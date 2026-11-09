@@ -2,7 +2,7 @@
 // Other people's records are quoted as material inside a fenced block.
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { readRecords } from "./chunks.ts";
+import { readAgents, readRecords } from "./chunks.ts";
 import { forEachRef, type GitOptions } from "./git.ts";
 import { ancestry, braidOf, describe, isTurn, type Rec } from "./records.ts";
 import { remoteRefs, SESSION_REFS, type Repo } from "./repo.ts";
@@ -65,7 +65,8 @@ function speaker(r: Rec): string {
   const who = actor?.actorId ?? "unknown";
   const via = actor?.userAgent?.split(" ")[0]?.split("/")[0] ?? "";
   const role = r.type === "branch_summary" ? "merge" : (r.role ?? r.type);
-  return `${who}${via ? ` via ${via}` : ""} · ${role}`;
+  const agent = braidOf(r).agent;
+  return `${who}${via ? ` via ${via}` : ""}${agent ? ` · subagent ${agent.slice(0, 8)}` : ""} · ${role}`;
 }
 
 /** Renders records as quoted material in a fence the agent cannot mistake for the user's words. */
@@ -112,7 +113,12 @@ export function briefing(repo: Repo, found: Found, remote: string): Briefing {
   const title =
     `braid: session ${found.session.slice(0, 8)} (${sessionName(own, found.session)}) by ${actor?.actorId ?? "unknown"}, ` +
     `${own.filter(isTurn).length} records of its own, ${path.filter(isTurn).length} on its branch.`;
-  return { found, head, text: quote(title, path) };
+  // Each subagent's last answer: what it handed back.
+  const results = [...readAgents(found.ref, found.opts)].flatMap(([id, recs]) => {
+    const last = recs.findLast((r) => r.role === "assistant" && describe(r));
+    return last ? [{ ...last, id: `${id}:${last.id}` }] : [];
+  });
+  return { found, head, text: quote(title, [...path, ...results]) };
 }
 
 /** Makes the current session, before its first save, continue from another session's head. */

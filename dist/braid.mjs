@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync7, readFileSync as readFileSync6 } from "node:fs";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync7, readFileSync as readFileSync7 } from "node:fs";
 import { join as join9 } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -138,6 +138,10 @@ function describe(r, max = 400) {
   if (r.type === "branch_summary") return clip(String(r.summary ?? ""), max * 4);
   if (r.type === "compaction") return clip(String(r.summary ?? ""), max);
   if (r.type === "label") return braidOf(r).commit ? `commit: ${String(r.label)}` : `named ${String(r.label)}`;
+  if (r.type === "agent_link") {
+    const agent = r.agent;
+    return clip(`\u2192 subagent ${String(r.transcriptId)}${agent ? ` (${agent.name ?? "subagent"}): ${agent.role ?? ""}` : ""}`, max);
+  }
   if (r.type !== "message") return "";
   const c = r.content;
   const parts = Array.isArray(c) ? c.map((b) => blockText(b, max)) : [blockText(c, max)];
@@ -174,7 +178,32 @@ function readChunks(ref, opts) {
 function readRecords(ref, opts) {
   return readChunks(ref, opts).flat();
 }
-function appendChunk(ref, records, meta, opts) {
+function readAgentChunks(ref, opts) {
+  const out = /* @__PURE__ */ new Map();
+  const commit = revParse(ref, opts);
+  if (!commit) return out;
+  for (const dir of subtree(lsTree(commit, opts), "agents", opts).filter((e) => e.type === "tree")) {
+    const files = lsTree(dir.sha, opts).filter((e) => e.type === "blob").sort((a, b) => a.name.localeCompare(b.name));
+    out.set(dir.name, catBlobs(files.map((f) => f.sha), opts).map(parseJsonl));
+  }
+  return out;
+}
+function readAgents(ref, opts) {
+  return new Map([...readAgentChunks(ref, opts)].map(([id, chunks]) => [id, chunks.flat()]));
+}
+function agentsTree(existing, added, opts) {
+  const dirs = new Map(existing.filter((e) => e.type === "tree").map((e) => [e.name, lsTree(e.sha, opts)]));
+  for (const [id, chunks] of added) {
+    const files = dirs.get(id) ?? [];
+    for (const chunk of chunks.filter((c) => c.length > 0)) {
+      files.push({ mode: "100644", type: "blob", sha: writeBlob(toJsonl(chunk), opts), name: name(files.length + 1, "jsonl") });
+    }
+    dirs.set(id, files);
+  }
+  const entries = [...dirs].filter(([, files]) => files.length > 0).map(([id, files]) => ({ mode: "040000", type: "tree", sha: mktree(files, opts), name: id }));
+  return entries.length ? { mode: "040000", type: "tree", sha: mktree(entries, opts), name: "agents" } : void 0;
+}
+function appendChunk(ref, records, meta, opts, agents = /* @__PURE__ */ new Map()) {
   const old = revParse(ref, opts);
   const root = old ? lsTree(old, opts) : [];
   const recs = subtree(root, "records", opts);
@@ -182,10 +211,12 @@ function appendChunk(ref, records, meta, opts) {
   const n = recs.length + 1;
   recs.push({ mode: "100644", type: "blob", sha: writeBlob(toJsonl(records), opts), name: name(n, "jsonl") });
   metas.push({ mode: "100644", type: "blob", sha: writeBlob(JSON.stringify(meta) + "\n", opts), name: name(n, "json") });
+  const agentEntry = agentsTree(subtree(root, "agents", opts), new Map([...agents].map(([id, r]) => [id, [r]])), opts);
   const tree = mktree(
     [
       { mode: "040000", type: "tree", sha: mktree(recs, opts), name: "records" },
-      { mode: "040000", type: "tree", sha: mktree(metas, opts), name: "meta" }
+      { mode: "040000", type: "tree", sha: mktree(metas, opts), name: "meta" },
+      ...agentEntry ? [agentEntry] : []
     ],
     opts
   );
@@ -193,16 +224,16 @@ function appendChunk(ref, records, meta, opts) {
   updateRef(ref, commit, old, opts);
   return commit;
 }
-function writeChunks(chunks, parent, message, opts) {
+function writeChunks(chunks, parent, message, opts, agents = /* @__PURE__ */ new Map()) {
   const recs = chunks.map((c, i) => ({
     mode: "100644",
     type: "blob",
     sha: writeBlob(toJsonl(c), opts),
     name: name(i + 1, "jsonl")
   }));
-  const recordsTree = mktree(recs, opts);
-  if (parent && lsTree(parent, opts).find((e) => e.name === "records")?.sha === recordsTree) return void 0;
-  const tree = mktree([{ mode: "040000", type: "tree", sha: recordsTree, name: "records" }], opts);
+  const agentEntry = agentsTree([], agents, opts);
+  const tree = mktree([{ mode: "040000", type: "tree", sha: mktree(recs, opts), name: "records" }, ...agentEntry ? [agentEntry] : []], opts);
+  if (parent && gitMaybe(["rev-parse", `${parent}^{tree}`], opts)?.trim() === tree) return void 0;
   return commitTree(tree, parent ? [parent] : [], message, opts);
 }
 
@@ -457,14 +488,21 @@ function publish(repo, session, opts = {}) {
   if (!state || state.chunks === 0) return { ...result, reason: "not saved" };
   if (state.private) return { ...result, reason: "private" };
   return withLock(repo, `publish-${session}`, () => {
-    const local = readChunks(storeRef(state.conv, session), { gitDir: repo.store });
-    const { chunks, counts } = publishedChunks(local, new Set(state.withheld ?? []));
+    const ref = storeRef(state.conv, session);
+    const withheld = new Set(state.withheld ?? []);
+    const { chunks, counts } = publishedChunks(readChunks(ref, { gitDir: repo.store }), withheld);
+    const agents = /* @__PURE__ */ new Map();
+    for (const [id, local] of readAgentChunks(ref, { gitDir: repo.store })) {
+      const published2 = publishedChunks(local, withheld);
+      agents.set(id, published2.chunks);
+      for (const [rule, n] of published2.counts) counts.set(rule, (counts.get(rule) ?? 0) + n);
+    }
     const records = chunks.flat().filter(isTurn).length;
     const redactions = sum(counts);
     const published = `${PUBLISHED_REFS}/${state.conv}/${session}`;
     const tracking = `${remoteRefs(remote)}/${state.conv}/${session}`;
     const parent = revParse(tracking, { cwd: repo.top });
-    const commit = writeChunks(chunks, parent, `publish ${session}`, { cwd: repo.top });
+    const commit = writeChunks(chunks, parent, `publish ${session}`, { cwd: repo.top }, agents);
     if (!commit) return { ...result, records, redactions, reason: "up to date" };
     git(["push", "--no-verify", "--quiet", `--force-with-lease=${published}:${parent ?? ""}`, remote, `${commit}:${published}`], {
       cwd: repo.top
@@ -710,7 +748,8 @@ function speaker(r) {
   const who = actor?.actorId ?? "unknown";
   const via = actor?.userAgent?.split(" ")[0]?.split("/")[0] ?? "";
   const role = r.type === "branch_summary" ? "merge" : r.role ?? r.type;
-  return `${who}${via ? ` via ${via}` : ""} \xB7 ${role}`;
+  const agent = braidOf(r).agent;
+  return `${who}${via ? ` via ${via}` : ""}${agent ? ` \xB7 subagent ${agent.slice(0, 8)}` : ""} \xB7 ${role}`;
 }
 function quote(title, records, budget = 6e4) {
   const fence = `braid-transcript-${randomBytes(4).toString("hex")}`;
@@ -746,7 +785,11 @@ function briefing(repo, found, remote) {
   const first = own.find((r) => braidOf(r).actor);
   const actor = first ? braidOf(first).actor : void 0;
   const title = `braid: session ${found.session.slice(0, 8)} (${sessionName(own, found.session)}) by ${actor?.actorId ?? "unknown"}, ${own.filter(isTurn).length} records of its own, ${path2.filter(isTurn).length} on its branch.`;
-  return { found, head, text: quote(title, path2) };
+  const results = [...readAgents(found.ref, found.opts)].flatMap(([id, recs]) => {
+    const last = recs.findLast((r) => r.role === "assistant" && describe(r));
+    return last ? [{ ...last, id: `${id}:${last.id}` }] : [];
+  });
+  return { found, head, text: quote(title, [...path2, ...results]) };
 }
 function markFork(repo, current, b) {
   const state = loadState(repo, current) ?? newState(current);
@@ -758,7 +801,7 @@ function markFork(repo, current, b) {
 }
 
 // src/save.ts
-import { existsSync as existsSync4, readdirSync } from "node:fs";
+import { existsSync as existsSync4, readdirSync, readFileSync as readFileSync4 } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join as join5 } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -1900,6 +1943,7 @@ function save(repo, session, transcript, opts = {}) {
       }
       return native.filter((r) => !savedIds().has(r.id));
     };
+    const agents = collectAgents(repo, state, path2);
     let window = readWindow(path2, cursor, session);
     if (window && state.chunks === 0 && !state.forkFrom) {
       source = forkSource(repo, session, window.records);
@@ -1910,8 +1954,8 @@ function save(repo, session, transcript, opts = {}) {
       for (const r of records) saved?.add(r.id);
       const final = !window?.more;
       state.first ??= window?.records.find((r) => r.type === "message")?.id;
-      const pending = final && (state.pendingMerge || (state.commits ?? []).length > 0 || opts.commit !== void 0);
-      if (records.length > 0 || pending) added += writeChunk(repo, state, records, window?.header, final, opts);
+      const pending = final && (state.pendingMerge || (state.commits ?? []).length > 0 || opts.commit !== void 0 || agents.size > 0);
+      if (records.length > 0 || pending) added += writeChunk(repo, state, records, window?.header, final, opts, final ? agents : /* @__PURE__ */ new Map());
       if (window) cursor = window.cursor;
       state.cursor = cursor;
       if (final) break;
@@ -1923,7 +1967,7 @@ function save(repo, session, transcript, opts = {}) {
     return { added, state };
   });
 }
-function writeChunk(repo, state, fresh, nativeHeader, final, opts) {
+function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
   const session = state.session;
   const first = state.chunks === 0;
   if (first && state.forkFrom) state.conv = state.forkFrom.conv;
@@ -2003,14 +2047,79 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts) {
       });
     }
   }
-  if (out.length === 0) return 0;
+  const agentRecords = /* @__PURE__ */ new Map();
+  for (const [id, a] of agents) {
+    agentRecords.set(id, a.records.map((r) => withBraid(r, { actor, session, agent: id })));
+    if (!a.link) continue;
+    const spawnedBy = toolCallRecord(repo, state, out, a.link.toolUseId) ?? lastNative;
+    out.push({
+      type: "agent_link",
+      id: `braid-agent-${id}`,
+      parentId: spawnedBy,
+      time: now,
+      relation: "spawn",
+      transcriptId: id,
+      ...a.link.agentType || a.link.description ? { agent: { name: a.link.agentType ?? "subagent", ...a.link.description ? { role: a.link.description } : {} } } : {},
+      ...a.link.toolUseId ? { toolCallId: a.link.toolUseId } : {},
+      ext: { braid: { actor, session } }
+    });
+  }
+  if (out.length === 0 && agentRecords.size === 0) return 0;
   const head = gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim();
-  appendChunk(storeRef(state.conv, session), out, { time: now, head, commits: codeCommits }, { gitDir: repo.store });
+  appendChunk(storeRef(state.conv, session), out, { time: now, head, commits: codeCommits }, { gitDir: repo.store }, agentRecords);
   state.last = fresh.at(-1)?.id ?? state.last;
   state.head = lastTurn(out) ?? state.head;
   state.chunks += 1;
   if (final) state.commits = [];
   return out.length;
+}
+function collectAgents(repo, state, path2) {
+  const out = /* @__PURE__ */ new Map();
+  const dir = join5(path2.replace(/\.jsonl$/, ""), "subagents");
+  if (!existsSync4(dir)) return out;
+  state.agents ??= {};
+  for (const file of readdirSync(dir).sort()) {
+    const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file)?.[1];
+    if (!id) continue;
+    const fp = join5(dir, file);
+    const prior = state.agents[id];
+    const rescan = !!prior && !intact(fp, prior.cursor);
+    const st = rescan || !prior ? { cursor: START, linked: prior?.linked } : prior;
+    let saved;
+    const records = [];
+    for (let w = readWindow(fp, st.cursor, id); w; w = w.more ? readWindow(fp, st.cursor, id) : void 0) {
+      let fresh = w.records;
+      const i = st.last ? fresh.findIndex((r) => r.id === st.last) : -1;
+      if (i >= 0) fresh = fresh.slice(i + 1);
+      else if (rescan) {
+        saved ??= new Set((readAgents(storeRef(state.conv, state.session), { gitDir: repo.store }).get(id) ?? []).map((r) => r.id));
+        fresh = fresh.filter((r) => !saved.has(r.id));
+      }
+      records.push(...fresh);
+      st.cursor = w.cursor;
+      st.last = fresh.at(-1)?.id ?? st.last;
+    }
+    state.agents[id] = st;
+    if (records.length === 0) continue;
+    let link;
+    if (!st.linked) {
+      st.linked = true;
+      try {
+        const meta = JSON.parse(readFileSync4(join5(dir, `agent-${id}.meta.json`), "utf8"));
+        const str = (k) => typeof meta[k] === "string" ? meta[k] : void 0;
+        link = { toolUseId: str("toolUseId"), description: str("description"), agentType: str("agentType") };
+      } catch {
+        link = {};
+      }
+    }
+    out.set(id, { records, link });
+  }
+  return out;
+}
+function toolCallRecord(repo, state, out, id) {
+  if (!id) return void 0;
+  const holds = (r) => Array.isArray(r.content) && r.content.some((b) => b?.type === "tool_call" && b.id === id);
+  return (out.find(holds) ?? readRecords(storeRef(state.conv, state.session), { gitDir: repo.store }).findLast(holds))?.id;
 }
 function register(repo, session, transcript) {
   ensureStore(repo);
@@ -2022,7 +2131,7 @@ function register(repo, session, transcript) {
 
 // src/setup.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { chmodSync as chmodSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { dirname, join as join6, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2061,7 +2170,7 @@ function init(repo, opts = {}) {
     notes.push(`wrote .braid/config.toml (publish = "${publish2}"${vis ? `, repository is ${vis.toLowerCase()}` : ", visibility unknown"})`);
     notes.push("commit it so teammates get braid too: git add .braid && git commit -m 'Set up braid'");
   } else if (opts.gitHooks !== void 0) {
-    const text = readFileSync4(file, "utf8");
+    const text = readFileSync5(file, "utf8");
     const line = `git-hooks = ${opts.gitHooks}`;
     writeFileSync4(file, /^git-hooks\s*=.*$/m.test(text) ? text.replace(/^git-hooks\s*=.*$/m, line) : `${line}
 ${text}`);
@@ -2085,10 +2194,10 @@ function setup(opts = {}) {
   const notes = [];
   const settingsFile = settingsPath();
   const saved = join6(configDir(), "statusline.json");
-  const settings = existsSync5(settingsFile) ? JSON.parse(readFileSync4(settingsFile, "utf8")) : {};
+  const settings = existsSync5(settingsFile) ? JSON.parse(readFileSync5(settingsFile, "utf8")) : {};
   const current = settings.statusLine;
   if (opts.undo) {
-    const prev = existsSync5(saved) ? JSON.parse(readFileSync4(saved, "utf8")) : {};
+    const prev = existsSync5(saved) ? JSON.parse(readFileSync5(saved, "utf8")) : {};
     if (prev.previous) settings.statusLine = { type: "command", command: prev.previous, ...prev.refreshInterval ? { refreshInterval: prev.refreshInterval } : {} };
     else delete settings.statusLine;
     writeFileSync4(settingsFile, JSON.stringify(settings, null, 2) + "\n");
@@ -2246,13 +2355,13 @@ function record(repo, session, chosen, opts) {
 // src/statusline.ts
 import { spawn as spawn2, spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync5, statSync as statSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync6, statSync as statSync3, writeFileSync as writeFileSync5 } from "node:fs";
 import { join as join8 } from "node:path";
 var hash2 = (s) => createHash3("sha1").update(s).digest("hex").slice(0, 16);
 function previous(stdin) {
   const file = join8(configDir(), "statusline.json");
   if (!existsSync6(file)) return "";
-  const { previous: previous2 } = JSON.parse(readFileSync5(file, "utf8"));
+  const { previous: previous2 } = JSON.parse(readFileSync6(file, "utf8"));
   if (!previous2) return "";
   const r = spawnSync4("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
   return (r.stdout ?? "").trimEnd();
@@ -2270,7 +2379,7 @@ function pullRequest(repo) {
   } catch {
   }
   if (!fresh) {
-    writeFileSync5(file, existsSync6(file) ? readFileSync5(file) : "");
+    writeFileSync5(file, existsSync6(file) ? readFileSync6(file) : "");
     const tmp = `${file}.${process.pid}`;
     spawn2("sh", ["-c", 'gh pr view --json number -q .number > "$T" 2>/dev/null; mv "$T" "$F"'], {
       cwd: repo.top,
@@ -2279,7 +2388,7 @@ function pullRequest(repo) {
       stdio: "ignore"
     }).unref();
   }
-  const n = readFileSync5(file, "utf8").trim();
+  const n = readFileSync6(file, "utf8").trim();
   return /^\d{1,7}$/.test(n) ? `#${n}` : "";
 }
 function braidPart(repo, session, remote) {
@@ -2297,7 +2406,7 @@ function braidPart(repo, session, remote) {
     ].join("\n")
   );
   const file = join8(repo.dir, "cache", `status-${key}`);
-  if (existsSync6(file)) return readFileSync5(file, "utf8");
+  if (existsSync6(file)) return readFileSync6(file, "utf8");
   const text = render(computeStatus(repo, session, remote));
   mkdirSync6(join8(repo.dir, "cache"), { recursive: true });
   writeFileSync5(file, text);
@@ -2356,7 +2465,7 @@ Other
 `;
 function readStdin() {
   try {
-    return readFileSync6(0, "utf8");
+    return readFileSync7(0, "utf8");
   } catch {
     return "";
   }
@@ -2383,6 +2492,14 @@ function summarize(results) {
   return results.map(
     (r) => r.pushed ? `braid: published ${r.session.slice(0, 8)}, ${r.records} records${r.redactions ? `, ${r.redactions} secrets redacted` : ""}` : `braid: ${r.session.slice(0, 8)} not published: ${r.reason}`
   );
+}
+function agentLines(records, agents) {
+  return [...agents].map(([id, recs]) => {
+    const link = records.find((r) => r.type === "agent_link" && r.transcriptId === id);
+    const agent = link?.agent;
+    const what = agent ? `${cleanName(agent.name ?? "subagent")}: ${String(agent.role ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 60)}` : "subagent";
+    return `\u21B3 ${id.slice(0, 8)}  ${what}  ${recs.filter(isTurn).length} records`;
+  });
 }
 function duration(text) {
   const m = /^(\d+)\s*(m|h|d)$/.exec(text.trim());
@@ -2511,6 +2628,7 @@ function main(argv) {
           const actor = records.map((r) => braidOf(r).actor).find(Boolean);
           const mark = f.session === session ? "  (this session)" : "";
           out(`  ${f.session.slice(0, 8)}  ${sessionName(records, f.session).padEnd(12)} ${actor?.actorId ?? "?"}  ${records.filter(isTurn).length} records${mark}`);
+          for (const line of agentLines(records, readAgents(f.ref, f.opts))) out(`      ${line}`);
         }
       }
       return 0;
@@ -2522,6 +2640,7 @@ function main(argv) {
         const records = readRecords(f.ref, f.opts);
         const actor = records.map((r) => braidOf(r).actor).find(Boolean);
         out(`${f.session.slice(0, 8)}  conv ${f.conv.slice(0, 8)}  ${sessionName(records, f.session).padEnd(12)} ${actor?.actorId ?? "?"}  ${records.filter(isTurn).length} records${f.opts.gitDir ? "  (yours)" : ""}`);
+        for (const line of agentLines(records, readAgents(f.ref, f.opts))) out(`    ${line}`);
       }
       return 0;
     }
@@ -2609,7 +2728,8 @@ function main(argv) {
         return 0;
       }
       const cutoff = Date.now() - duration(str("last") ?? "");
-      const ids = readRecords(storeRef(state.conv, session), { gitDir: repo.store }).filter((r) => r.time && Date.parse(r.time) >= cutoff).map((r) => r.id);
+      const ref = storeRef(state.conv, session);
+      const ids = [...readRecords(ref, { gitDir: repo.store }), ...[...readAgents(ref, { gitDir: repo.store }).values()].flat()].filter((r) => r.time && Date.parse(r.time) >= cutoff).map((r) => r.id);
       state.withheld = [.../* @__PURE__ */ new Set([...state.withheld ?? [], ...ids])];
       saveState(repo, state);
       out(`braid: ${ids.length} records withheld from publishing`);

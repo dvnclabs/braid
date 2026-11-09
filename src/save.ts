@@ -1,9 +1,9 @@
 // Saving: import what a harness wrote since the last save into the store.
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { appendChunk, readRecords } from "./chunks.ts";
+import { appendChunk, readAgents, readRecords } from "./chunks.ts";
 import { config, forEachRef, gitMaybe } from "./git.ts";
 import { lastTurn, withBraid, type Actor, type Rec } from "./records.ts";
 import { ensureStore, SESSION_REFS, storeRef, type Repo } from "./repo.ts";
@@ -103,6 +103,7 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
       return native.filter((r) => !savedIds().has(r.id));
     };
 
+    const agents = collectAgents(repo, state, path);
     let window = readWindow(path, cursor, session);
     if (window && state.chunks === 0 && !state.forkFrom) {
       source = forkSource(repo, session, window.records);
@@ -113,8 +114,8 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
       for (const r of records) saved?.add(r.id);
       const final = !window?.more;
       state.first ??= window?.records.find((r) => r.type === "message")?.id;
-      const pending = final && (state.pendingMerge || (state.commits ?? []).length > 0 || opts.commit !== undefined);
-      if (records.length > 0 || pending) added += writeChunk(repo, state, records, window?.header, final, opts);
+      const pending = final && (state.pendingMerge || (state.commits ?? []).length > 0 || opts.commit !== undefined || agents.size > 0);
+      if (records.length > 0 || pending) added += writeChunk(repo, state, records, window?.header, final, opts, final ? agents : new Map());
       if (window) cursor = window.cursor;
       state.cursor = cursor;
       if (final) break;
@@ -132,7 +133,15 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
  * chunk also carries the merge waiting to be written, and a commit label for
  * each code commit since the previous save and for `opts.commit`.
  */
-function writeChunk(repo: Repo, state: SessionState, fresh: Rec[], nativeHeader: Record<string, unknown> | undefined, final: boolean, opts: { commit?: string }): number {
+function writeChunk(
+  repo: Repo,
+  state: SessionState,
+  fresh: Rec[],
+  nativeHeader: Record<string, unknown> | undefined,
+  final: boolean,
+  opts: { commit?: string },
+  agents: Map<string, NewAgent>,
+): number {
   const session = state.session;
   const first = state.chunks === 0;
   if (first && state.forkFrom) state.conv = state.forkFrom.conv;
@@ -217,15 +226,93 @@ function writeChunk(repo: Repo, state: SessionState, fresh: Rec[], nativeHeader:
       });
     }
   }
-  if (out.length === 0) return 0;
+  const agentRecords = new Map<string, Rec[]>();
+  for (const [id, a] of agents) {
+    agentRecords.set(id, a.records.map((r) => withBraid(r, { actor, session, agent: id })));
+    if (!a.link) continue;
+    const spawnedBy = toolCallRecord(repo, state, out, a.link.toolUseId) ?? lastNative;
+    out.push({
+      type: "agent_link",
+      id: `braid-agent-${id}`,
+      parentId: spawnedBy,
+      time: now,
+      relation: "spawn",
+      transcriptId: id,
+      ...(a.link.agentType || a.link.description ? { agent: { name: a.link.agentType ?? "subagent", ...(a.link.description ? { role: a.link.description } : {}) } } : {}),
+      ...(a.link.toolUseId ? { toolCallId: a.link.toolUseId } : {}),
+      ext: { braid: { actor, session } },
+    });
+  }
+  if (out.length === 0 && agentRecords.size === 0) return 0;
 
   const head = gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim();
-  appendChunk(storeRef(state.conv, session), out, { time: now, head, commits: codeCommits }, { gitDir: repo.store });
+  appendChunk(storeRef(state.conv, session), out, { time: now, head, commits: codeCommits }, { gitDir: repo.store }, agentRecords);
   state.last = fresh.at(-1)?.id ?? state.last;
   state.head = lastTurn(out) ?? state.head;
   state.chunks += 1;
   if (final) state.commits = [];
   return out.length;
+}
+
+interface NewAgent {
+  records: Rec[];
+  /** Set the first time the subagent is saved: what its meta file says about it. */
+  link?: { toolUseId?: string; description?: string; agentType?: string };
+}
+
+/**
+ * New records of the subagents Claude Code wrote next to the transcript, in
+ * <transcript>/subagents/agent-<id>.jsonl, each read from its own cursor.
+ */
+function collectAgents(repo: Repo, state: SessionState, path: string): Map<string, NewAgent> {
+  const out = new Map<string, NewAgent>();
+  const dir = join(path.replace(/\.jsonl$/, ""), "subagents");
+  if (!existsSync(dir)) return out;
+  state.agents ??= {};
+  for (const file of readdirSync(dir).sort()) {
+    const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file)?.[1];
+    if (!id) continue;
+    const fp = join(dir, file);
+    const prior = state.agents[id];
+    const rescan = !!prior && !intact(fp, prior.cursor);
+    const st = rescan || !prior ? { cursor: START, linked: prior?.linked } : prior;
+    let saved: Set<string> | undefined;
+    const records: Rec[] = [];
+    for (let w = readWindow(fp, st.cursor, id); w; w = w.more ? readWindow(fp, st.cursor, id) : undefined) {
+      let fresh = w.records;
+      const i = st.last ? fresh.findIndex((r) => r.id === st.last) : -1;
+      if (i >= 0) fresh = fresh.slice(i + 1);
+      else if (rescan) {
+        saved ??= new Set((readAgents(storeRef(state.conv, state.session), { gitDir: repo.store }).get(id) ?? []).map((r) => r.id));
+        fresh = fresh.filter((r) => !saved!.has(r.id));
+      }
+      records.push(...fresh);
+      st.cursor = w.cursor;
+      st.last = fresh.at(-1)?.id ?? st.last;
+    }
+    state.agents[id] = st;
+    if (records.length === 0) continue;
+    let link: NewAgent["link"];
+    if (!st.linked) {
+      st.linked = true;
+      try {
+        const meta = JSON.parse(readFileSync(join(dir, `agent-${id}.meta.json`), "utf8")) as Record<string, unknown>;
+        const str = (k: string) => (typeof meta[k] === "string" ? (meta[k] as string) : undefined);
+        link = { toolUseId: str("toolUseId"), description: str("description"), agentType: str("agentType") };
+      } catch {
+        link = {};
+      }
+    }
+    out.set(id, { records, link });
+  }
+  return out;
+}
+
+/** The record holding tool call `id`: among the records being written, else in the store. */
+function toolCallRecord(repo: Repo, state: SessionState, out: Rec[], id: string | undefined): string | undefined {
+  if (!id) return undefined;
+  const holds = (r: Rec) => Array.isArray(r.content) && (r.content as { type?: string; id?: string }[]).some((b) => b?.type === "tool_call" && b.id === id);
+  return (out.find(holds) ?? readRecords(storeRef(state.conv, state.session), { gitDir: repo.store }).findLast(holds))?.id;
 }
 
 /** Registers a session with its transcript, without saving anything yet. */

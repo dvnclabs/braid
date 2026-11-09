@@ -30,6 +30,8 @@ export interface SessionState {
   /** "anthropic:claude-sonnet-5-5": the model of the newest assistant record. */
   model?: string;
   userAgent?: string;
+  /** Subagent transcripts saved with this session, by agent id. */
+  agents?: Record<string, { cursor: Cursor; last?: string; linked?: boolean }>;
   /** Id of the first message, which a fork's transcript shares with the session it was forked from. */
   first?: string;
   /** A session this one forks from, set by `braid fork` before the first save. */

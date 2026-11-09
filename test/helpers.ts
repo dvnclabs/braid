@@ -70,7 +70,7 @@ export class Transcript {
     writeFileSync(this.path, "");
   }
 
-  private add(type: "user" | "assistant", message: object): string {
+  add(type: "user" | "assistant", message: object, extra: object = {}): string {
     this.n += 1;
     const uuid = `${this.session.slice(0, 8)}-0000-4000-8000-${String(this.n).padStart(12, "0")}`;
     const entry = {
@@ -84,6 +84,7 @@ export class Transcript {
       sessionId: this.session,
       version: "2.1.222",
       userType: "external",
+      ...extra,
     };
     appendFileSync(this.path, JSON.stringify(entry) + "\n");
     this.last = uuid;
@@ -98,6 +99,19 @@ export class Transcript {
     t.last = this.last;
     t.n = this.n;
     return t;
+  }
+
+  /** An assistant turn that calls a tool, and the tool's result. */
+  toolCall(name: string, input: object, id: string, result: string): string {
+    this.add("assistant", {
+      id: `msg_${this.n}`,
+      type: "message",
+      role: "assistant",
+      model: "claude-sonnet-5-5",
+      content: [{ type: "tool_use", id, name, input }],
+      stop_reason: "tool_use",
+    });
+    return this.add("user", { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: result }] });
   }
 
   user(text: string): string {

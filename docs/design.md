@@ -58,11 +58,14 @@ A session ref holds only the records that session wrote. The conversation is the
 A harness hook saves at the end of each turn. It converts only what the harness wrote since the previous save with [ATXF](https://github.com/leostera/atxf)'s converter, and commits those records as one chunk to the session's ref in the store. braid keeps a cursor per session: the byte offset where the previous save stopped, the number of lines before it, and a hash of the line that ends there. Each save reads from the cursor, plus an overlap of at least 2 MB and the whole previous line, so that references across the boundary resolve; records without a uuid are named after their line in the whole file. When the file is shorter than the cursor or its last line changed, braid reads it again from the start and keeps the records the store lacks. The first save of a large session reads it in windows of 16 MB, one chunk each. A one-turn save of a 600 MB transcript takes about 150 ms, and the first save of it about 9 s.
 
 ```
-records/000001.jsonl    ATXF records, in the order written
-meta/000001.json        HEAD, and the code commits made since the previous save
+records/000001.jsonl          ATXF records, in the order written
+meta/000001.json              HEAD, and the code commits made since the previous save
 records/000002.jsonl
 meta/000002.json
+agents/<id>/000001.jsonl      a subagent's records
 ```
+
+Claude Code writes each subagent to its own file next to the transcript. braid saves new subagent records with the session that spawned them, under `agents/<id>/`, and adds an `agent_link` record below the tool call that spawned each one. Subagents are published, redacted and withheld with their session, `braid sessions` lists them under it, and a briefing includes each subagent's last answer.
 
 Each record keeps its native line in ATXF's `native` field, so the store can give back the harness's file byte for byte. Earlier chunks are kept as they are, so a save costs about the size of what the turn added. braid runs `git gc --auto` on the store every 50 saves. Harnesses delete old transcripts (Claude Code after 30 days by default), and the store keeps them.
 

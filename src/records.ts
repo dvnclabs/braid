@@ -19,6 +19,8 @@ export interface BraidExt {
   actor?: Actor;
   session?: string;
   partOf?: string;
+  /** On a subagent's record: the subagent's id. */
+  agent?: string;
   merge?: MergeInfo;
   pr?: number;
   /** On a label: the conversation was committed here, with this code commit when there is one. */
@@ -81,6 +83,10 @@ export function describe(r: Rec, max = 400): string {
   if (r.type === "branch_summary") return clip(String(r.summary ?? ""), max * 4);
   if (r.type === "compaction") return clip(String(r.summary ?? ""), max);
   if (r.type === "label") return braidOf(r).commit ? `commit: ${String(r.label)}` : `named ${String(r.label)}`;
+  if (r.type === "agent_link") {
+    const agent = r.agent as { name?: string; role?: string } | undefined;
+    return clip(`→ subagent ${String(r.transcriptId)}${agent ? ` (${agent.name ?? "subagent"}): ${agent.role ?? ""}` : ""}`, max);
+  }
   if (r.type !== "message") return "";
   const c = r.content;
   const parts = Array.isArray(c) ? c.map((b) => blockText(b, max)) : [blockText(c, max)];

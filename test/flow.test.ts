@@ -1,7 +1,7 @@
 // End to end: two people, one remote. Alice works and pushes, Bob reviews,
 // Alice merges the review. Every step goes through the CLI and real git.
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { braid, clone, must, run, sandbox, Transcript } from "./helpers.ts";
@@ -231,4 +231,55 @@ test("with git-hooks off, braid leaves git alone", () => {
   assert.match(must(s.env, repo, "git", ["log", "-1", "--format=%B"]), new RegExp(`Braid-Session: ${ALICE}`));
   braid(s.env, repo, ["init", "--no-git-hooks"]);
   assert.equal(existsSync(join(repo, ".git", "hooks", "pre-push")), false);
+});
+
+test("subagents are saved, published and briefed with their session", () => {
+  const s = sandbox();
+  const repo = clone(s, "fay", "fay@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, repo, ["init"]);
+  writeFileSync(join(repo, ".braid", "config.toml"), 'publish = "on-push"\n');
+  const t = new Transcript(s.root, ALICE);
+  const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo });
+  braid(s.env, repo, ["hook", "session-start"], hookIn);
+  t.user("Audit the webhook code.");
+  t.toolCall("Agent", { description: "Find webhook callers", prompt: "List callers" }, "toolu_agent1", "Three callers, see report.");
+
+  // Claude Code writes the subagent next to the transcript, with a meta file naming the tool call.
+  const dir = join(s.root, ALICE, "subagents");
+  mkdirSync(dir, { recursive: true });
+  const sub = new Transcript(dir, "agent-a36fc26663a698234");
+  sub.add("user", { role: "user", content: "List callers" }, { isSidechain: true, agentId: "a36fc26663a698234" });
+  sub.add("assistant", { id: "m1", type: "message", role: "assistant", model: "claude-sonnet-5-5", content: [{ type: "text", text: "Callers: billing, alerts, sync. Token ghp_" + "a".repeat(36) }] }, { isSidechain: true, agentId: "a36fc26663a698234" });
+  writeFileSync(join(dir, "agent-a36fc26663a698234.meta.json"), JSON.stringify({ agentType: "Explore", description: "Find webhook callers", toolUseId: "toolu_agent1" }));
+  braid(s.env, repo, ["hook", "stop"], hookIn);
+
+  const store = join(repo, ".git", "braid", "store");
+  const ref = `refs/sessions/${ALICE}/${ALICE}`;
+  const mine = records(s.env, repo, store, ref);
+  const link = mine.find((r) => r.type === "agent_link");
+  assert.equal(link?.transcriptId, "a36fc26663a698234");
+  assert.equal(link.toolCallId, "toolu_agent1");
+  assert.equal(mine.find((r) => r.id === link.parentId)?.content?.[0]?.type, "tool_call", "linked from the call that spawned it");
+  assert.match(must(s.env, repo, "git", ["--git-dir", store, "ls-tree", "-r", "--name-only", ref]), /agents\/a36fc26663a698234\/000001\.jsonl/);
+  assert.match(braid(s.env, repo, ["sessions"]).stdout, /↳ a36fc266 {2}Explore: Find webhook callers {2}2 records/);
+
+  // A later save adds only what the subagent wrote since.
+  sub.add("assistant", { id: "m2", type: "message", role: "assistant", model: "claude-sonnet-5-5", content: [{ type: "text", text: "Also: retries." }] }, { isSidechain: true, agentId: "a36fc26663a698234" });
+  braid(s.env, repo, ["hook", "stop"], hookIn);
+  const agentFiles = must(s.env, repo, "git", ["--git-dir", store, "ls-tree", "-r", "--name-only", ref, "agents/"]).trim().split("\n");
+  assert.equal(agentFiles.length, 2);
+  assert.equal(records(s.env, repo, store, ref).filter((r) => r.type === "agent_link").length, 1, "linked once");
+
+  // Published with the session, redacted.
+  must(s.env, repo, "git", ["push", "--quiet", "origin", "HEAD:main"]);
+  assert.match(braid(s.env, repo, ["push", "--session", ALICE]).stdout, /published 5b0e2c1a/);
+  const remote = join(s.root, "remote.git");
+  const published = `refs/braid/sessions/${ALICE}/${ALICE}`;
+  const shown = must(s.env, s.root, "git", ["--git-dir", remote, "show", `${published}:agents/a36fc26663a698234/000001.jsonl`]);
+  assert.match(shown, /Callers: billing/);
+  assert.match(shown, /\[REDACTED:github-token\]/);
+
+  // A briefing carries the subagent's answer.
+  assert.match(braid(s.env, repo, ["show", "5b0e2c1a"]).stdout, /subagent a36fc266 · assistant\] Also: retries\./);
 });

@@ -2,19 +2,19 @@
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { readRecords } from "./chunks.ts";
+import { readAgents, readRecords } from "./chunks.ts";
 import { fetchSessions } from "./fetch.ts";
 import { postCommit, prePush, prepareCommitMsg } from "./githooks.ts";
 import { sessionEnd, sessionStart, stop } from "./hooks.ts";
 import { allSessions, briefing, markFork, resolve, type Briefing } from "./load.ts";
 import { context, pick, record } from "./merge.ts";
 import { publish, type PublishResult } from "./publish.ts";
-import { braidOf, describe, isTurn } from "./records.ts";
+import { braidOf, describe, isTurn, type Rec } from "./records.ts";
 import { findRepo, isEnabled, readConfig, storeRef, type Repo } from "./repo.ts";
 import { save } from "./save.ts";
 import { configDir, init, setup } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
-import { computeStatus, render, sessionName } from "./status.ts";
+import { cleanName, computeStatus, render, sessionName } from "./status.ts";
 import { statusline } from "./statusline.ts";
 import { VERSION } from "./version.ts";
 
@@ -77,6 +77,16 @@ function summarize(results: PublishResult[]): string[] {
       ? `braid: published ${r.session.slice(0, 8)}, ${r.records} records${r.redactions ? `, ${r.redactions} secrets redacted` : ""}`
       : `braid: ${r.session.slice(0, 8)} not published: ${r.reason}`,
   );
+}
+
+/** One line per subagent of a session: its id, what it was asked to do, and its size. */
+function agentLines(records: Rec[], agents: Map<string, Rec[]>): string[] {
+  return [...agents].map(([id, recs]) => {
+    const link = records.find((r) => r.type === "agent_link" && r.transcriptId === id);
+    const agent = link?.agent as { name?: string; role?: string } | undefined;
+    const what = agent ? `${cleanName(agent.name ?? "subagent")}: ${String(agent.role ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 60)}` : "subagent";
+    return `↳ ${id.slice(0, 8)}  ${what}  ${recs.filter(isTurn).length} records`;
+  });
 }
 
 function duration(text: string): number {
@@ -205,6 +215,7 @@ function main(argv: string[]): number {
           const actor = records.map((r) => braidOf(r).actor).find(Boolean);
           const mark = f.session === session ? "  (this session)" : "";
           out(`  ${f.session.slice(0, 8)}  ${sessionName(records, f.session).padEnd(12)} ${actor?.actorId ?? "?"}  ${records.filter(isTurn).length} records${mark}`);
+          for (const line of agentLines(records, readAgents(f.ref, f.opts))) out(`      ${line}`);
         }
       }
       return 0;
@@ -216,6 +227,7 @@ function main(argv: string[]): number {
         const records = readRecords(f.ref, f.opts);
         const actor = records.map((r) => braidOf(r).actor).find(Boolean);
         out(`${f.session.slice(0, 8)}  conv ${f.conv.slice(0, 8)}  ${sessionName(records, f.session).padEnd(12)} ${actor?.actorId ?? "?"}  ${records.filter(isTurn).length} records${f.opts.gitDir ? "  (yours)" : ""}`);
+        for (const line of agentLines(records, readAgents(f.ref, f.opts))) out(`    ${line}`);
       }
       return 0;
     }
@@ -303,7 +315,8 @@ function main(argv: string[]): number {
         return 0;
       }
       const cutoff = Date.now() - duration(str("last") ?? "");
-      const ids = readRecords(storeRef(state.conv, session), { gitDir: repo.store })
+      const ref = storeRef(state.conv, session);
+      const ids = [...readRecords(ref, { gitDir: repo.store }), ...[...readAgents(ref, { gitDir: repo.store }).values()].flat()]
         .filter((r) => r.time && Date.parse(r.time) >= cutoff)
         .map((r) => r.id);
       state.withheld = [...new Set([...(state.withheld ?? []), ...ids])];

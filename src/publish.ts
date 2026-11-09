@@ -1,6 +1,5 @@
 // Publishing: build a redacted copy of a session from the store and push it.
-import { readChunks } from "./chunks.ts";
-import { writeChunks } from "./chunks.ts";
+import { readAgentChunks, readChunks, writeChunks } from "./chunks.ts";
 import { git, revParse, updateRef } from "./git.ts";
 import { redactValue, type Counts } from "./redact.ts";
 import { braidOf, isTurn, type Rec } from "./records.ts";
@@ -92,14 +91,21 @@ export function publish(repo: Repo, session: string, opts: { remote?: string; fo
   if (state.private) return { ...result, reason: "private" };
 
   return withLock(repo, `publish-${session}`, () => {
-    const local = readChunks(storeRef(state.conv, session), { gitDir: repo.store });
-    const { chunks, counts } = publishedChunks(local, new Set(state.withheld ?? []));
+    const ref = storeRef(state.conv, session);
+    const withheld = new Set(state.withheld ?? []);
+    const { chunks, counts } = publishedChunks(readChunks(ref, { gitDir: repo.store }), withheld);
+    const agents = new Map<string, Rec[][]>();
+    for (const [id, local] of readAgentChunks(ref, { gitDir: repo.store })) {
+      const published = publishedChunks(local, withheld);
+      agents.set(id, published.chunks);
+      for (const [rule, n] of published.counts) counts.set(rule, (counts.get(rule) ?? 0) + n);
+    }
     const records = chunks.flat().filter(isTurn).length;
     const redactions = sum(counts);
     const published = `${PUBLISHED_REFS}/${state.conv}/${session}`;
     const tracking = `${remoteRefs(remote)}/${state.conv}/${session}`;
     const parent = revParse(tracking, { cwd: repo.top });
-    const commit = writeChunks(chunks, parent, `publish ${session}`, { cwd: repo.top });
+    const commit = writeChunks(chunks, parent, `publish ${session}`, { cwd: repo.top }, agents);
     if (!commit) return { ...result, records, redactions, reason: "up to date" };
     git(["push", "--no-verify", "--quiet", `--force-with-lease=${published}:${parent ?? ""}`, remote, `${commit}:${published}`], {
       cwd: repo.top,
