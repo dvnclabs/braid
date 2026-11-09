@@ -18,8 +18,10 @@ export interface PendingMerge {
 export interface SessionState {
   session: string;
   conv: string;
-  harness: "claude-code";
+  harness: "claude-code" | "openclaw";
   transcript?: string;
+  /** For imported OpenClaw sessions: the last event imported. */
+  importedSeq?: number;
   /** Where the previous save stopped reading the transcript. */
   cursor?: Cursor;
   /** Id of the last native record saved, so the next save starts after it. */

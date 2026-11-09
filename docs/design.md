@@ -259,7 +259,7 @@ The ATXF 0.2 draft adds `actorId` and `userAgent` to every record envelope. brai
 | replay | `/resume`, `claude --resume <id>` | `codex resume <id>` |
 | headless | `claude -p` | `codex exec` |
 
-Gemini CLI, OpenCode and Pi can be imported through ATXF's converters. Any harness that supports MCP can use `braid mcp`, which offers the commands as tools and sessions as resources (`@braid:session://5b0e2c1a`). It offers no prompts, because the skills already provide the commands.
+`braid import openclaw` imports [OpenClaw](https://openclaw.ai) sessions: it opens each agent's SQLite store read-only, decompresses the events, which are in pi's session format, converts them with ATXF's pi converter in batches of at most 16 MB, and picks up after the last event it imported. A spawned session joins its parent's conversation. Gemini CLI, OpenCode and Pi can be imported the same way through ATXF's converters. Any harness that supports MCP can use `braid mcp`, which offers the commands as tools and sessions as resources (`@braid:session://5b0e2c1a`). It offers no prompts, because the skills already provide the commands.
 
 Harnesses name their tools differently: Claude Code edits with `Edit`, Codex with `apply_patch`, and Codex runs commands with `exec_command`. Each adapter maps tool names to a few kinds (read, edit, write, shell, search, web, subagent), and digests, checks and the commit rule work from the kinds.
 
@@ -279,6 +279,8 @@ The skills and the hooks call the CLI. You rarely need it yourself.
 | `braid fork [<id\|name\|pr:N>]` | continue a new session from another; with no target, how to branch this one |
 | `braid merge [<id\|name\|pr:N>]` | show what another session has that this one lacks; `--record` and `--skip` write the merge |
 | `braid show <id\|name\|pr:N>` | read a session as a briefing |
+| `braid replay <id> [--cwd <path>]` | write a session out as a new Claude Code session to resume |
+| `braid import openclaw` | import OpenClaw sessions |
 | `braid withhold --last 30m \| --all` | keep records, or the whole session, from being published |
 | `braid sessions`, `braid log <id>` | list sessions, and the turns and commits of one |
 | `braid fetch [--all]` | fetch published sessions now |

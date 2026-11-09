@@ -9,6 +9,7 @@ import { sessionEnd, sessionStart, stop } from "./hooks.ts";
 import { allSessions, briefing, markFork, resolve, type Briefing } from "./load.ts";
 import { context, pick, record } from "./merge.ts";
 import { replay } from "./replay.ts";
+import { importOpenclaw, openclawDatabases } from "./openclaw.ts";
 import { publish, type PublishResult } from "./publish.ts";
 import { braidOf, describe, isTurn, type Rec } from "./records.ts";
 import { findRepo, isEnabled, readConfig, storeRef, type Repo } from "./repo.ts";
@@ -41,6 +42,7 @@ Other
   braid sessions              every session braid can see in this repository
   braid log [<id>]            the turns and commits of a session
   braid fetch [--all]         fetch published sessions
+  braid import openclaw [--session <key|id>] [--db <path>]   import OpenClaw sessions into this repository
   braid save                  save the current session now (the Stop hook does this)
 `;
 
@@ -125,6 +127,7 @@ function main(argv: string[]): number {
       "dry-run": { type: "boolean" },
       publish: { type: "string" },
       cwd: { type: "string" },
+      db: { type: "string" },
     },
   });
   const str = (k: string) => (typeof opts[k] === "string" ? (opts[k] as string) : undefined);
@@ -295,6 +298,16 @@ function main(argv: string[]): number {
         const from = briefings.reduce((a, b) => (newest(b) > newest(a) ? b : a));
         markFork(repo, current, from);
         out(`braid: this session continues from ${from.found.session.slice(0, 8)} (${from.head.slice(0, 12)})`);
+      }
+      return 0;
+    }
+    case "import": {
+      const repo = needRepo();
+      if (args[0] !== "openclaw") throw new Error("usage: braid import openclaw [--session <key|id>] [--db <path>]");
+      const dbs = str("db") ? [str("db")!] : openclawDatabases();
+      if (dbs.length === 0) throw new Error("no OpenClaw database found under ~/.openclaw/agents; pass --db <path>");
+      for (const db of dbs) {
+        for (const r of importOpenclaw(repo, db, str("session"))) out(`braid: ${r.session.slice(0, 8)} ${r.name}: ${r.added ? `imported ${r.added} records` : "up to date"}`);
       }
       return 0;
     }

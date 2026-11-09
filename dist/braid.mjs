@@ -2,7 +2,7 @@
 
 // src/cli.ts
 import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync10, readFileSync as readFileSync10 } from "node:fs";
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 import { parseArgs } from "node:util";
 
 // src/git.ts
@@ -653,9 +653,9 @@ function publishedChunks(chunks, withheld, extra = []) {
       const found = /* @__PURE__ */ new Map();
       const red = redactValue(c, found, extra);
       if (found.size > 0) {
-        const redactions = [...found].map(([rule, count]) => ({ rule, count }));
+        const redactions = [...found].map(([rule, count2]) => ({ rule, count: count2 }));
         red.ext = { ...red.ext, braid: { ...braidOf(red), redactions } };
-        for (const [rule, count] of found) counts.set(rule, (counts.get(rule) ?? 0) + count);
+        for (const [rule, count2] of found) counts.set(rule, (counts.get(rule) ?? 0) + count2);
       }
       return red;
     })
@@ -1139,12 +1139,12 @@ function withContent(body, replacement) {
   }
   return { ...body, content: replacement };
 }
-function matches(replay2, target) {
-  return replay2.provider === target.provider && (replay2.api === void 0 || target.api === void 0 || replay2.api === target.api);
+function matches(replay3, target) {
+  return replay3.provider === target.provider && (replay3.api === void 0 || target.api === void 0 || replay3.api === target.api);
 }
 function filterReplay(messages, target) {
-  const keep = (replay2) => {
-    const kept = replay2?.filter((entry) => matches(entry, target));
+  const keep = (replay3) => {
+    const kept = replay3?.filter((entry) => matches(entry, target));
     return kept && kept.length > 0 ? kept : void 0;
   };
   return messages.map((message) => {
@@ -1155,19 +1155,23 @@ function filterReplay(messages, target) {
       if (!("replay" in block) || block.replay === void 0)
         return [block];
       const { replay: _2, ...rest2 } = block;
-      const replay3 = keep(block.replay);
-      const filtered = replay3 ? { ...rest2, replay: replay3 } : rest2;
-      if (filtered.type === "reasoning" && filtered.text === void 0 && filtered.summary === void 0 && !replay3)
+      const replay4 = keep(block.replay);
+      const filtered = replay4 ? { ...rest2, replay: replay4 } : rest2;
+      if (filtered.type === "reasoning" && filtered.text === void 0 && filtered.summary === void 0 && !replay4)
         return [];
       return [filtered];
     });
     const { replay: _, ...rest } = body;
-    const replay2 = keep(body.replay);
-    return { ...message, body: { ...rest, ...replay2 ? { replay: replay2 } : {}, content } };
+    const replay3 = keep(body.replay);
+    return { ...message, body: { ...rest, ...replay3 ? { replay: replay3 } : {}, content } };
   });
 }
 
 // node_modules/@leostera/atxf/dist/convert.js
+function millisFromIso(iso) {
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? 0 : ms;
+}
 var IdAllocator = class {
   used = /* @__PURE__ */ new Set();
   constructor(existing = []) {
@@ -1419,10 +1423,10 @@ function defineConverter(spec, defaults = {}) {
     const values = carry ? spec.carrier.attach(encoded.map(({ value, source }) => spec.carrier.mark(value, source)), transcript) : encoded.map(({ value }) => value);
     return spec.framing.print(values.map((value) => ({ value, raw: spec.framing.canonical(value) })));
   };
-  const reader = spec.reader;
-  const stream = reader && ((options = {}) => {
+  const reader2 = spec.reader;
+  const stream = reader2 && ((options = {}) => {
     const integrity = options.integrity ?? defaults.integrity ?? true;
-    const read = reader({ known: /* @__PURE__ */ new Map(), ids: new IdAllocator() });
+    const read = reader2({ known: /* @__PURE__ */ new Map(), ids: new IdAllocator() });
     let header2;
     let hasher;
     let index2 = 0;
@@ -2709,15 +2713,669 @@ function record(repo, session, chosen, opts) {
   saveState(repo, state);
 }
 
+// src/openclaw.ts
+import { existsSync as existsSync10, readdirSync as readdirSync3 } from "node:fs";
+import { createRequire } from "node:module";
+import { homedir as homedir6 } from "node:os";
+import { join as join12 } from "node:path";
+import { zstdDecompressSync } from "node:zlib";
+
+// node_modules/@leostera/atxf/dist/formats/pi.js
+var AGENT2 = "pi";
+var FORMAT2 = "pi/session-jsonl";
+function decode2(units, context2) {
+  const read = reader(context2);
+  const { header: header2, took } = read.start(units[0]);
+  for (let index2 = took ? 1 : 0; index2 < units.length; index2++)
+    read.next(units[index2], index2);
+  return { header: header2, records: read.tree.records };
+}
+function reader(context2, retain = true) {
+  const tree = new TreeBuilder(context2, retain);
+  const native = (unit) => nativeOf([unit], AGENT2, FORMAT2);
+  let header2;
+  let hasContext = context2.base?.records.some((record2) => record2.type === "context") ?? false;
+  return {
+    tree,
+    start(first) {
+      const value = first?.value;
+      if (isObject(value) && value.type === "session" && !context2.known.has(0)) {
+        header2 = sessionHeader2(value, native(first));
+        return { header: header2, took: true };
+      }
+      header2 = sessionHeader2({}, void 0);
+      return { header: header2, took: false };
+    },
+    next(unit, index2) {
+      const entry = unit.value;
+      if (context2.known.has(index2)) {
+        if (isObject(entry) && typeof entry.id === "string") {
+          tree.alias(entry.id, context2.known.get(index2) ?? tree.parentOf(entry.parentId));
+        }
+        return void 0;
+      }
+      const record2 = entryRecord(entry, index2, tree, context2, header2.time, hasContext);
+      if (record2.type === "context")
+        hasContext = true;
+      return tree.push(record2, native(unit));
+    }
+  };
+}
+function sessionHeader2(session, native) {
+  const id = typeof session.id === "string" && session.id !== "" ? session.id : "pi-session";
+  return compact({
+    type: "transcript",
+    atxf: ATXF_VERSION,
+    id,
+    time: isoTime(session.timestamp, EPOCH),
+    source: compact({
+      agent: AGENT2,
+      format: FORMAT2,
+      version: session.version === void 0 ? void 0 : String(session.version),
+      sessionId: typeof session.id === "string" ? session.id : void 0
+    }),
+    workspace: typeof session.cwd === "string" ? { cwd: session.cwd } : void 0,
+    parent: typeof session.parentSession === "string" && session.parentSession !== "" ? { transcriptId: session.parentSession, uri: session.parentSession, relation: "fork" } : void 0,
+    fidelity: { topology: "tree", instructions: "full", tools: "full", native: "all", ids: "stable" },
+    native
+  });
+}
+function entryRecord(entry, index2, tree, context2, fallbackTime, hasContext) {
+  const e = isObject(entry) ? entry : {};
+  const id = context2.ids.take(typeof e.id === "string" && e.id !== "" ? e.id : `pi-line-${index2 + 1}`);
+  const parentId = tree.parentOf(e.parentId);
+  const time = isoTime(e.timestamp, fallbackTime);
+  const node = { id, parentId, time };
+  const custom = () => {
+    tree.alias(e.id, id);
+    return { type: "custom", ...node, namespace: AGENT2, name: typeof e.type === "string" ? e.type : "unparsed" };
+  };
+  const annotation = (record2) => {
+    tree.alias(e.id, parentId);
+    return record2;
+  };
+  const treeRecord = (record2) => {
+    tree.alias(e.id, id);
+    return record2;
+  };
+  switch (e.type) {
+    case "message": {
+      const body = messageBody2(e.message, tree);
+      if (body === "context")
+        return treeRecord(contextRecord(node, e.message, hasContext));
+      if (body === void 0)
+        return custom();
+      return treeRecord({ type: "message", ...node, ...body });
+    }
+    case "model_change":
+      if (typeof e.provider !== "string" || typeof e.modelId !== "string")
+        return custom();
+      return treeRecord({ type: "settings", ...node, model: { provider: e.provider, id: e.modelId } });
+    case "thinking_level_change":
+      if (typeof e.thinkingLevel !== "string")
+        return custom();
+      return treeRecord({ type: "settings", ...node, reasoningEffort: e.thinkingLevel });
+    case "usage": {
+      const usage = usageOf2(e.usage);
+      if (!usage)
+        return custom();
+      return treeRecord(compact({
+        type: "usage",
+        ...node,
+        kind: typeof e.kind === "string" ? e.kind : "unknown",
+        model: typeof e.provider === "string" && typeof e.model === "string" ? { provider: e.provider, id: e.model } : void 0,
+        usage
+      }));
+    }
+    case "compaction": {
+      if (typeof e.summary !== "string")
+        return custom();
+      let firstKeptId = tree.resolve(e.firstKeptEntryId);
+      if (firstKeptId !== null && !tree.isAncestor(firstKeptId, parentId))
+        firstKeptId = null;
+      const snapshot = isObject(e.systemMessage) ? promptOf(e.systemMessage) : void 0;
+      return treeRecord(compact({
+        type: "compaction",
+        ...node,
+        strategy: "summary",
+        summary: e.summary,
+        firstKeptId,
+        snapshot: snapshot ? compact({ instructions: snapshot.instructions, tools: snapshot.tools }) : void 0,
+        tokensBefore: Number.isInteger(e.tokensBefore) && e.tokensBefore >= 0 ? e.tokensBefore : void 0,
+        usage: usageOf2(e.usage)
+      }));
+    }
+    case "context_edit": {
+      const targetId = tree.resolve(e.targetId);
+      if (targetId === null || tree.typeOf(targetId) !== "message")
+        return custom();
+      const replacement = e.replacement === null ? null : replacementOf(e.replacement);
+      if (replacement === void 0)
+        return custom();
+      return treeRecord({ type: "context_edit", ...node, targetId, replacement });
+    }
+    case "branch_summary": {
+      const fromId = tree.resolve(e.fromId);
+      if (fromId === null || typeof e.summary !== "string")
+        return custom();
+      return treeRecord(compact({ type: "branch_summary", ...node, fromId, summary: e.summary, usage: usageOf2(e.usage) }));
+    }
+    case "custom":
+      tree.alias(e.id, id);
+      return compact({
+        type: "custom",
+        ...node,
+        namespace: AGENT2,
+        name: typeof e.customType === "string" && e.customType !== "" ? e.customType : "custom",
+        data: e.data
+      });
+    case "custom_message": {
+      const content = userContent(e.content);
+      if (content === void 0)
+        return custom();
+      return treeRecord(compact({
+        type: "message",
+        ...node,
+        role: "user",
+        content,
+        origin: compact({ kind: "extension", name: typeof e.customType === "string" && e.customType !== "" ? e.customType : void 0 }),
+        display: typeof e.display === "boolean" ? e.display : void 0
+      }));
+    }
+    case "label": {
+      const targetId = tree.resolve(e.targetId);
+      if (targetId === null)
+        return custom();
+      return annotation({ type: "label", id, time, targetId, label: typeof e.label === "string" ? e.label : null });
+    }
+    case "session_info":
+      if (typeof e.name !== "string")
+        return custom();
+      return annotation({ type: "metadata", id, time, title: e.name });
+    default:
+      return custom();
+  }
+}
+function messageBody2(message, tree) {
+  if (!isObject(message))
+    return void 0;
+  switch (message.role) {
+    case "system":
+      return "context";
+    case "user": {
+      const content = userContent(message.content);
+      return content === void 0 ? void 0 : { role: "user", content };
+    }
+    case "assistant": {
+      if (!Array.isArray(message.content))
+        return void 0;
+      const model = typeof message.provider === "string" && typeof message.model === "string" ? compact({ provider: message.provider, id: message.model, api: typeof message.api === "string" ? message.api : void 0 }) : void 0;
+      const replayBase = { provider: model?.provider ?? "unknown", api: model?.api, model: model?.id };
+      const content = [];
+      for (const block of message.content) {
+        if (!isObject(block))
+          continue;
+        if (block.type === "text" && typeof block.text === "string") {
+          content.push(compact({ type: "text", text: block.text, replay: replay2(replayBase, "text_signature", block.textSignature) }));
+        } else if (block.type === "thinking" && typeof block.thinking === "string") {
+          content.push(compact({
+            type: "reasoning",
+            text: block.thinking,
+            redacted: block.redacted === true ? true : void 0,
+            replay: replay2(replayBase, "signature", block.thinkingSignature)
+          }));
+        } else if (block.type === "toolCall" && typeof block.id === "string" && typeof block.name === "string") {
+          if (tree.hasToolCall(block.id))
+            continue;
+          content.push(compact({
+            type: "tool_call",
+            id: block.id,
+            name: block.name,
+            namespace: typeof block.namespace === "string" ? block.namespace : void 0,
+            arguments: isObject(block.arguments) ? block.arguments : {},
+            replay: replay2(replayBase, "thought_signature", block.thoughtSignature)
+          }));
+        } else if (block.type === "image" && typeof block.mimeType === "string") {
+          content.push(compact({ type: "image", mediaType: block.mimeType, data: typeof block.data === "string" ? block.data : void 0 }));
+        }
+      }
+      return compact({
+        role: "assistant",
+        content,
+        model,
+        usage: usageOf2(message.usage),
+        stop: stopOf(message.stopReason),
+        rawStop: typeof message.rawStopReason === "string" ? message.rawStopReason : typeof message.stopReason === "string" && stopOf(message.stopReason) === "other" ? message.stopReason : void 0,
+        responseId: typeof message.responseId === "string" ? message.responseId : void 0,
+        error: typeof message.errorMessage === "string" ? { message: message.errorMessage } : void 0
+      });
+    }
+    case "toolResult": {
+      if (typeof message.toolCallId !== "string")
+        return void 0;
+      const content = userContent(message.content);
+      if (content === void 0)
+        return void 0;
+      return compact({
+        role: "tool",
+        toolCallId: message.toolCallId,
+        toolName: typeof message.toolName === "string" ? message.toolName : void 0,
+        content,
+        isError: typeof message.isError === "boolean" ? message.isError : void 0,
+        details: isObject(message.details) ? message.details : void 0
+      });
+    }
+    case "custom": {
+      const content = userContent(message.content);
+      if (content === void 0)
+        return void 0;
+      return compact({
+        role: "user",
+        content,
+        origin: compact({ kind: "extension", name: typeof message.customType === "string" && message.customType !== "" ? message.customType : void 0 }),
+        display: typeof message.display === "boolean" ? message.display : void 0
+      });
+    }
+    case "bashExecution": {
+      if (message.excludeFromContext === true || typeof message.command !== "string")
+        return void 0;
+      const output = typeof message.output === "string" ? message.output : "";
+      return { role: "user", content: `$ ${message.command}
+${output}`, origin: { kind: "command", name: "bash" } };
+    }
+    default:
+      return void 0;
+  }
+}
+function contextRecord(node, message, hasContext) {
+  const { instructions, tools, removed } = promptOf(message);
+  return compact({
+    type: "context",
+    ...node,
+    mode: hasContext ? "patch" : "replace",
+    instructions: instructions.length > 0 ? instructions : void 0,
+    toolsAdded: tools.length > 0 ? tools : void 0,
+    toolsRemoved: hasContext && removed.length > 0 ? removed : void 0
+  });
+}
+function promptOf(message) {
+  const instructions = [];
+  if (isObject(message.sections)) {
+    for (const [name2, text2] of Object.entries(message.sections)) {
+      if (typeof text2 === "string" || text2 === null)
+        instructions.push({ name: name2, text: text2 });
+    }
+  }
+  const text = textOf2(message.content);
+  if (text)
+    instructions.push({ name: "system", text });
+  const tools = [];
+  for (const tool of Array.isArray(message.toolsAdded) ? message.toolsAdded : []) {
+    if (!isObject(tool) || typeof tool.name !== "string")
+      continue;
+    tools.push(compact({
+      name: tool.name,
+      description: typeof tool.description === "string" ? tool.description : void 0,
+      parameters: isObject(tool.parameters) ? tool.parameters : void 0
+    }));
+  }
+  const removed = [];
+  for (const tool of Array.isArray(message.toolsRemoved) ? message.toolsRemoved : []) {
+    if (isObject(tool) && typeof tool.name === "string")
+      removed.push(tool.name);
+  }
+  return { instructions, tools, removed };
+}
+function textOf2(content) {
+  if (typeof content === "string")
+    return content;
+  if (!Array.isArray(content))
+    return "";
+  return content.flatMap((block) => isObject(block) && block.type === "text" && typeof block.text === "string" ? [block.text] : []).join("\n");
+}
+function userContent(content) {
+  if (typeof content === "string")
+    return content;
+  if (!Array.isArray(content))
+    return void 0;
+  const blocks = [];
+  for (const block of content) {
+    if (!isObject(block))
+      continue;
+    if (block.type === "text" && typeof block.text === "string")
+      blocks.push({ type: "text", text: block.text });
+    else if (block.type === "image" && typeof block.mimeType === "string") {
+      blocks.push(compact({ type: "image", mediaType: block.mimeType, data: typeof block.data === "string" ? block.data : void 0 }));
+    }
+  }
+  return blocks;
+}
+function replacementOf(value) {
+  return userContent(value);
+}
+function replay2(base, kind, data) {
+  return typeof data === "string" && data !== "" ? [compact({ ...base, kind, data })] : void 0;
+}
+var STOPS2 = { stop: "end", toolUse: "tool_use", length: "max_tokens", error: "error", aborted: "aborted" };
+function stopOf(value) {
+  if (typeof value !== "string")
+    return void 0;
+  return STOPS2[value] ?? "other";
+}
+var count = (value) => typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : void 0;
+var amount = (value) => typeof value === "number" && Number.isFinite(value) ? value : void 0;
+function usageOf2(value) {
+  if (!isObject(value))
+    return void 0;
+  const input = count(value.input);
+  const output = count(value.output);
+  if (input === void 0 || output === void 0)
+    return void 0;
+  const cost = isObject(value.cost) && amount(value.cost.total) !== void 0 ? value.cost : void 0;
+  return compact({
+    input,
+    output,
+    cacheRead: count(value.cacheRead),
+    cacheWrite: count(value.cacheWrite),
+    reasoning: count(value.reasoning),
+    total: count(value.totalTokens),
+    cost: cost ? compact({
+      input: amount(cost.input),
+      output: amount(cost.output),
+      cacheRead: amount(cost.cacheRead),
+      cacheWrite: amount(cost.cacheWrite),
+      total: amount(cost.total)
+    }) : void 0
+  });
+}
+function encode2(transcript) {
+  const context2 = buildContext(transcript);
+  const times = new Map(transcript.records.map((record2) => [record2.id, record2.time]));
+  const out = [];
+  const ids = new IdAllocator();
+  let parentId = null;
+  let time = transcript.header.time;
+  out.push({
+    value: compact({
+      type: "session",
+      version: 3,
+      id: transcript.header.source.sessionId ?? transcript.header.id,
+      timestamp: transcript.header.time,
+      cwd: transcript.header.workspace?.cwd ?? context2.settings.cwd ?? ""
+    }),
+    source: null
+  });
+  const entry = (fields, source) => {
+    if (source)
+      time = times.get(source) ?? time;
+    const id = ids.take(source ?? "atxf");
+    out.push({ value: { type: fields.type, id, parentId, timestamp: time, ...fields }, source });
+    parentId = id;
+  };
+  if (context2.instructions.length > 0 || context2.tools.length > 0) {
+    entry({
+      type: "message",
+      message: compact({
+        role: "system",
+        content: "",
+        sections: context2.instructions.length > 0 ? Object.fromEntries(context2.instructions.map((s) => [s.name, s.text])) : void 0,
+        toolsAdded: context2.tools.length > 0 ? context2.tools.map((tool) => ({ name: tool.name, description: tool.description ?? "", parameters: tool.parameters ?? {} })) : void 0,
+        timestamp: millisFromIso(time)
+      })
+    }, null);
+  }
+  if (context2.settings.model) {
+    entry({ type: "model_change", provider: context2.settings.model.provider, modelId: context2.settings.model.id }, null);
+  }
+  if (context2.settings.reasoningEffort)
+    entry({ type: "thinking_level_change", thinkingLevel: context2.settings.reasoningEffort }, null);
+  for (const message of context2.messages) {
+    const summary = message.kind === "compaction_summary" || message.kind === "branch_summary";
+    if (summary && parentId === null) {
+      const id = ids.take(message.sourceId);
+      time = times.get(message.sourceId) ?? time;
+      out.push({
+        value: { type: "compaction", id, parentId, timestamp: time, summary: textOf2(message.body.content), firstKeptEntryId: id, tokensBefore: 0 },
+        source: message.sourceId
+      });
+      parentId = id;
+      continue;
+    }
+    if (summary) {
+      entry({ type: "branch_summary", fromId: parentId, summary: textOf2(message.body.content) }, message.sourceId);
+      continue;
+    }
+    const body = message.body;
+    if (body.role === "user" && (body.origin && body.origin.kind !== "human" || body.display === false)) {
+      const customType = body.origin ? [body.origin.kind, body.origin.name].filter(Boolean).join(":") : "atxf";
+      entry({ type: "custom_message", customType, content: piUserContent(body.content), display: body.display ?? true }, message.sourceId);
+      continue;
+    }
+    entry({ type: "message", message: piMessage(body, millisFromIso(times.get(message.sourceId) ?? time)) }, message.sourceId);
+  }
+  return out;
+}
+var PI_STOPS = {
+  end: "stop",
+  tool_use: "toolUse",
+  max_tokens: "length",
+  error: "error",
+  aborted: "aborted",
+  refusal: "stop",
+  other: "stop"
+};
+function piMessage(body, timestamp) {
+  switch (body.role) {
+    case "system":
+      return { role: "system", content: typeof body.content === "string" ? body.content : textOf2(body.content), timestamp };
+    case "user":
+      return { role: "user", content: piUserContent(body.content), timestamp };
+    case "tool":
+      return compact({
+        role: "toolResult",
+        toolCallId: body.toolCallId,
+        toolName: body.toolName ?? "",
+        content: typeof body.content === "string" ? [{ type: "text", text: body.content }] : piUserContent(body.content),
+        details: body.details,
+        isError: body.isError === true,
+        timestamp
+      });
+    case "assistant": {
+      const signature = (replay3, kind) => replay3?.find((r) => r.kind === kind && typeof r.data === "string")?.data;
+      const content = body.content.map((block) => {
+        switch (block.type) {
+          case "text":
+            return compact({ type: "text", text: block.text, textSignature: signature(block.replay, "text_signature") });
+          case "reasoning":
+            return compact({
+              type: "thinking",
+              thinking: block.text ?? (block.summary ?? []).join("\n"),
+              thinkingSignature: signature(block.replay, "signature"),
+              redacted: block.redacted
+            });
+          case "tool_call":
+            return compact({
+              type: "toolCall",
+              id: block.id,
+              name: block.name,
+              arguments: block.arguments ?? (block.input === void 0 ? {} : { input: block.input }),
+              namespace: block.namespace,
+              thoughtSignature: signature(block.replay, "thought_signature")
+            });
+          case "image":
+            return { type: "text", text: "[image]" };
+        }
+      });
+      const usage = body.usage;
+      return compact({
+        role: "assistant",
+        content,
+        api: body.model?.api ?? "unknown",
+        provider: body.model?.provider ?? "unknown",
+        model: body.model?.id ?? "unknown",
+        responseId: body.responseId,
+        usage: {
+          input: usage?.input ?? 0,
+          output: usage?.output ?? 0,
+          cacheRead: usage?.cacheRead ?? 0,
+          cacheWrite: usage?.cacheWrite ?? 0,
+          totalTokens: usage?.total ?? (usage ? usage.input + usage.output : 0),
+          cost: {
+            input: usage?.cost?.input ?? 0,
+            output: usage?.cost?.output ?? 0,
+            cacheRead: usage?.cost?.cacheRead ?? 0,
+            cacheWrite: usage?.cost?.cacheWrite ?? 0,
+            total: usage?.cost?.total ?? 0
+          }
+        },
+        stopReason: PI_STOPS[body.stop ?? "end"],
+        rawStopReason: body.rawStop,
+        errorMessage: body.error?.message,
+        timestamp
+      });
+    }
+  }
+}
+function piUserContent(content) {
+  if (typeof content === "string")
+    return content;
+  return content.map((block) => {
+    if (block.type === "text")
+      return { type: "text", text: block.text };
+    if (block.type === "image" && block.data !== void 0)
+      return { type: "image", data: block.data, mimeType: block.mediaType };
+    if (block.type === "image")
+      return { type: "text", text: `[image ${block.uri ?? ""}]`.trim() };
+    return { type: "text", text: block.text ?? `[${block.uri}]` };
+  });
+}
+var carrier2 = {
+  mark(value, source) {
+    return { ...value, atxf: { id: source } };
+  },
+  markOf(value) {
+    return isObject(value) && isObject(value.atxf) && "id" in value.atxf ? value.atxf.id : void 0;
+  },
+  attach(values, transcript) {
+    const [header2, ...rest] = values;
+    return [{ ...header2, atxf: { ...header2.atxf, transcript: carriedValue(transcript) } }, ...rest];
+  },
+  detach(units) {
+    const index2 = units.findIndex((unit) => isObject(unit.value) && isObject(unit.value.atxf) && isObject(unit.value.atxf.transcript));
+    if (index2 === -1)
+      return void 0;
+    const value = units[index2].value;
+    const { transcript, ...mark } = value.atxf;
+    const rest = units.slice();
+    rest[index2] = { value: { ...value, atxf: mark }, raw: units[index2].raw };
+    return { transcript, units: rest };
+  }
+};
+var pi = defineConverter({ agent: AGENT2, format: FORMAT2, framing: jsonl, decode: decode2, encode: encode2, carrier: carrier2, reader: (context2) => reader(context2, false) });
+
+// src/openclaw.ts
+var BATCH_EVENTS = 2e3;
+var BATCH_BYTES = 16 * 1024 * 1024;
+function openDatabase(path2) {
+  const listeners = process.listeners("warning");
+  process.removeAllListeners("warning");
+  try {
+    const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+    return new DatabaseSync(path2, { readOnly: true });
+  } finally {
+    for (const l of listeners) process.on("warning", l);
+  }
+}
+function openclawDatabases() {
+  const agents = join12(process.env.OPENCLAW_HOME || join12(homedir6(), ".openclaw"), "agents");
+  if (!existsSync10(agents)) return [];
+  return readdirSync3(agents).map((a) => join12(agents, a, "agent", "openclaw-agent.sqlite")).filter((p) => existsSync10(p));
+}
+var decode3 = (row) => (row.event_json ?? zstdDecompressSync(Buffer.from(row.event_zstd ?? new Uint8Array())).toString("utf8")).trim();
+function importOpenclaw(repo, dbPath, only) {
+  ensureStore(repo);
+  const db = openDatabase(dbPath);
+  try {
+    const nodes = db.prepare("SELECT session_key, current_session_id, parent_session_key, label, display_name FROM session_nodes").all();
+    const byId = new Map(nodes.map((n) => [n.current_session_id, n]));
+    const byKey = new Map(nodes.map((n) => [n.session_key, n]));
+    const ids = db.prepare("SELECT DISTINCT session_id FROM transcript_events").all().map((r) => r.session_id);
+    const wanted = ids.filter((id) => !only || id.startsWith(only) || (byId.get(id)?.session_key ?? "").startsWith(only));
+    const depth = (id, seen = /* @__PURE__ */ new Set()) => {
+      const parent = byKey.get(byId.get(id)?.parent_session_key ?? "")?.current_session_id;
+      return parent && !seen.has(parent) ? 1 + depth(parent, seen.add(id)) : 0;
+    };
+    wanted.sort((a, b) => depth(a) - depth(b));
+    const out = [];
+    const first = db.prepare("SELECT seq, event_json, event_zstd FROM transcript_events WHERE session_id = ? ORDER BY seq LIMIT 1");
+    const next = db.prepare(`SELECT seq, event_json, event_zstd FROM transcript_events WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ${BATCH_EVENTS}`);
+    for (const id of wanted) {
+      const node = byId.get(id);
+      const name2 = cleanName(node?.display_name || node?.label || "") || id.slice(0, 8);
+      const added = withLock(repo, `save-${id}`, () => {
+        const state = loadState(repo, id) ?? newState(id);
+        state.harness = "openclaw";
+        const parent = byKey.get(node?.parent_session_key ?? "")?.current_session_id;
+        if (state.chunks === 0 && parent) state.conv = loadState(repo, parent)?.conv ?? parent;
+        const head = first.get(id);
+        if (!head) return 0;
+        const headerLine = decode3(head);
+        const hasHeader = JSON.parse(headerLine).type === "session";
+        let last = state.importedSeq ?? (hasHeader ? head.seq : head.seq - 1);
+        let total = 0;
+        for (; ; ) {
+          const rows = [];
+          let bytes = 0;
+          for (const row of next.iterate(id, last)) {
+            rows.push(row);
+            bytes += (row.event_json ?? "").length + (row.event_zstd?.length ?? 0) * 4;
+            if (bytes > BATCH_BYTES) break;
+          }
+          if (rows.length === 0) break;
+          const t = pi.toAtxf([...hasHeader ? [headerLine] : [], ...rows.map(decode3)].join("\n"), { integrity: false });
+          const records = t.records.map((r) => {
+            const parentId = r.native?.records?.[0]?.parentId;
+            return r.parentId == null && typeof parentId === "string" ? { ...r, parentId } : r;
+          });
+          const model = [...records].reverse().find((r) => r.role === "assistant")?.model;
+          const actor = { actorId: actorId(repo), userAgent: `openclaw${model?.id ? ` ${model.provider ?? "unknown"}:${model.id}` : ""}` };
+          const chunk = [];
+          if (state.chunks === 0) {
+            if (state.conv === id) {
+              const h = t.header;
+              chunk.push({ type: "transcript", atxf: "0.1", id, time: String(h.time ?? (/* @__PURE__ */ new Date()).toISOString()), source: { agent: "braid", version: VERSION }, ...h.workspace ? { workspace: h.workspace } : {}, fidelity: { topology: "tree", native: "all" }, ext: { braid: { version: 1 } } });
+            }
+            const firstMessage = records.find((r) => r.type === "message");
+            if (firstMessage && name2 !== id.slice(0, 8)) chunk.push({ type: "label", id: `braid-label-${id}`, time: firstMessage.time, targetId: firstMessage.id, label: `openclaw/${name2}`.slice(0, 32), ext: { braid: { actor, session: id } } });
+          }
+          chunk.push(...records.map((r) => withBraid(r, { actor, session: id })));
+          last = rows.at(-1).seq;
+          appendChunk(storeRef(state.conv, id), chunk, { time: (/* @__PURE__ */ new Date()).toISOString(), source: `openclaw:${dbPath}`, seq: last }, { gitDir: repo.store });
+          state.chunks += 1;
+          state.importedSeq = last;
+          total += records.length;
+          if (rows.length < BATCH_EVENTS && bytes <= BATCH_BYTES) break;
+        }
+        saveState(repo, state);
+        return total;
+      });
+      out.push({ session: id, name: name2, added });
+    }
+    return out;
+  } finally {
+    db.close();
+  }
+}
+
 // src/statusline.ts
 import { spawn as spawn2, spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync10, mkdirSync as mkdirSync9, readFileSync as readFileSync9, statSync as statSync3, writeFileSync as writeFileSync8 } from "node:fs";
-import { join as join12 } from "node:path";
+import { existsSync as existsSync11, mkdirSync as mkdirSync9, readFileSync as readFileSync9, statSync as statSync3, writeFileSync as writeFileSync8 } from "node:fs";
+import { join as join13 } from "node:path";
 var hash2 = (s) => createHash3("sha1").update(s).digest("hex").slice(0, 16);
 function previous(stdin) {
-  const file2 = join12(configDir(), "statusline.json");
-  if (!existsSync10(file2)) return "";
+  const file2 = join13(configDir(), "statusline.json");
+  if (!existsSync11(file2)) return "";
   const { previous: previous2 } = JSON.parse(readFileSync9(file2, "utf8"));
   if (!previous2) return "";
   const r = spawnSync4("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
@@ -2727,16 +3385,16 @@ function pullRequest(repo) {
   if (process.env.BRAID_STATUS_NO_PR) return "";
   const branch = gitMaybe(["branch", "--show-current"], { cwd: repo.top })?.trim();
   if (!branch) return "";
-  const dir = join12(repo.dir, "cache");
+  const dir = join13(repo.dir, "cache");
   mkdirSync9(dir, { recursive: true });
-  const file2 = join12(dir, `pr-${hash2(branch)}`);
+  const file2 = join13(dir, `pr-${hash2(branch)}`);
   let fresh = false;
   try {
     fresh = Date.now() - statSync3(file2).mtimeMs < 5 * 6e4;
   } catch {
   }
   if (!fresh) {
-    writeFileSync8(file2, existsSync10(file2) ? readFileSync9(file2) : "");
+    writeFileSync8(file2, existsSync11(file2) ? readFileSync9(file2) : "");
     const tmp = `${file2}.${process.pid}`;
     spawn2("sh", ["-c", 'gh pr view --json number -q .number > "$T" 2>/dev/null; mv "$T" "$F"'], {
       cwd: repo.top,
@@ -2750,7 +3408,7 @@ function pullRequest(repo) {
 }
 function braidPart(repo, session, remote) {
   const conv = convOf(repo, session);
-  const statePath = join12(repo.dir, "sessions", `${session}.json`);
+  const statePath = join13(repo.dir, "sessions", `${session}.json`);
   const key = hash2(
     [
       session,
@@ -2759,13 +3417,13 @@ function braidPart(repo, session, remote) {
       ...forEachRef([`${SESSION_REFS}/${conv ?? "-"}/`], { gitDir: repo.store }).map((r) => r.sha + r.ref),
       ...forEachRef([`${remoteRefs(remote)}/${conv ?? "-"}/`], { cwd: repo.top }).map((r) => r.sha + r.ref),
       gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim(),
-      existsSync10(statePath) ? statSync3(statePath).mtimeMs : 0
+      existsSync11(statePath) ? statSync3(statePath).mtimeMs : 0
     ].join("\n")
   );
-  const file2 = join12(repo.dir, "cache", `status-${key}`);
-  if (existsSync10(file2)) return readFileSync9(file2, "utf8");
+  const file2 = join13(repo.dir, "cache", `status-${key}`);
+  if (existsSync11(file2)) return readFileSync9(file2, "utf8");
   const text = render(computeStatus(repo, session, remote));
-  mkdirSync9(join12(repo.dir, "cache"), { recursive: true });
+  mkdirSync9(join13(repo.dir, "cache"), { recursive: true });
   writeFileSync8(file2, text);
   return text;
 }
@@ -2819,6 +3477,7 @@ Other
   braid sessions              every session braid can see in this repository
   braid log [<id>]            the turns and commits of a session
   braid fetch [--all]         fetch published sessions
+  braid import openclaw [--session <key|id>] [--db <path>]   import OpenClaw sessions into this repository
   braid save                  save the current session now (the Stop hook does this)
 `;
 function readStdin() {
@@ -2831,7 +3490,7 @@ function readStdin() {
 function logError(err) {
   try {
     mkdirSync10(configDir(), { recursive: true });
-    appendFileSync2(join13(configDir(), "errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${err instanceof Error ? err.stack : String(err)}
+    appendFileSync2(join14(configDir(), "errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${err instanceof Error ? err.stack : String(err)}
 `);
   } catch {
   }
@@ -2889,7 +3548,8 @@ function main(argv) {
       undo: { type: "boolean" },
       "dry-run": { type: "boolean" },
       publish: { type: "string" },
-      cwd: { type: "string" }
+      cwd: { type: "string" },
+      db: { type: "string" }
     }
   });
   const str = (k) => typeof opts[k] === "string" ? opts[k] : void 0;
@@ -3062,6 +3722,16 @@ function main(argv) {
         const from = briefings.reduce((a, b) => newest(b) > newest(a) ? b : a);
         markFork(repo, current, from);
         out(`braid: this session continues from ${from.found.session.slice(0, 8)} (${from.head.slice(0, 12)})`);
+      }
+      return 0;
+    }
+    case "import": {
+      const repo = needRepo();
+      if (args[0] !== "openclaw") throw new Error("usage: braid import openclaw [--session <key|id>] [--db <path>]");
+      const dbs = str("db") ? [str("db")] : openclawDatabases();
+      if (dbs.length === 0) throw new Error("no OpenClaw database found under ~/.openclaw/agents; pass --db <path>");
+      for (const db of dbs) {
+        for (const r of importOpenclaw(repo, db, str("session"))) out(`braid: ${r.session.slice(0, 8)} ${r.name}: ${r.added ? `imported ${r.added} records` : "up to date"}`);
       }
       return 0;
     }

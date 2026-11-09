@@ -505,3 +505,50 @@ test("a session moves to another machine, and two machines publish one session",
   const texts = remote.filter((x) => x.role === "user").map((x) => x.content);
   assert.ok(texts.includes("From the server.") && texts.includes("From the laptop."), JSON.stringify(texts));
 });
+
+test("OpenClaw sessions import from SQLite, incrementally", async () => {
+  const s = sandbox();
+  const repo = clone(s, "ivy", "ivy@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, repo, ["init"]);
+  const { DatabaseSync } = await import("node:sqlite");
+  const { zstdCompressSync } = await import("node:zlib");
+  const path = join(s.root, "openclaw-agent.sqlite");
+  const db = new DatabaseSync(path);
+  db.exec(`CREATE TABLE session_nodes (session_key TEXT PRIMARY KEY, current_session_id TEXT, parent_session_key TEXT, label TEXT, display_name TEXT);
+    CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, created_at INTEGER, event_zstd BLOB, PRIMARY KEY (session_id, seq));`);
+  const MAIN = "6f0a5d05-1708-4b07-a961-bb6dcc33bb13";
+  const CHILD = "77aa0000-1708-4b07-a961-bb6dcc33bb13";
+  db.prepare("INSERT INTO session_nodes VALUES (?, ?, ?, ?, ?)").run("agent:main:main", MAIN, null, null, "Inbox");
+  db.prepare("INSERT INTO session_nodes VALUES (?, ?, ?, ?, ?)").run("agent:main:sub", CHILD, "agent:main:main", null, "Research");
+  const add = (session: string, seq: number, event: object, compressed = false) => {
+    const json = JSON.stringify(event);
+    db.prepare("INSERT INTO transcript_events VALUES (?, ?, ?, 0, ?)").run(session, seq, compressed ? null : json, compressed ? zstdCompressSync(Buffer.from(json)) : null);
+  };
+  const msg = (id: string, parentId: string | null, message: object) => ({ type: "message", id, parentId, timestamp: "2026-11-09T10:00:00.000Z", message });
+  for (const id of [MAIN, CHILD]) add(id, 0, { type: "session", version: 4, id, timestamp: "2026-11-09T10:00:00.000Z", cwd: "/Users/ivy/.openclaw/workspace" });
+  add(MAIN, 1, msg("m1", null, { role: "user", content: "Check the build.", timestamp: 1 }));
+  add(MAIN, 2, msg("m2", "m1", { role: "assistant", content: [{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "ci/build.log" } }], provider: "openai", model: "gpt-5.5", api: "openai-responses", stopReason: "toolUse", timestamp: 2 }), true);
+  add(MAIN, 3, msg("m3", "m2", { role: "toolResult", toolCallId: "call_1", toolName: "read", content: [{ type: "text", text: "build ok" }], isError: false, timestamp: 3 }));
+  add(MAIN, 4, msg("m4", "m3", { role: "assistant", content: [{ type: "text", text: "The build passes." }], provider: "openai", model: "gpt-5.5", api: "openai-responses", stopReason: "stop", timestamp: 4 }));
+  add(CHILD, 1, msg("c1", null, { role: "user", content: "Find sources.", timestamp: 5 }));
+
+  const first = braid(s.env, repo, ["import", "openclaw", "--db", path]);
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /6f0a5d05 Inbox: imported 4 records/);
+  assert.match(first.stdout, /77aa0000 Research: imported 1 records/);
+  assert.doesNotMatch(first.stderr, /ExperimentalWarning/);
+  const store = join(repo, ".git", "braid", "store");
+  assert.ok(must(s.env, repo, "git", ["--git-dir", store, "for-each-ref", "--format=%(refname)"]).includes(`refs/sessions/${MAIN}/${CHILD}`), "a spawned session joins its parent's conversation");
+
+  // Only new events are imported the next time.
+  add(MAIN, 5, msg("m5", "m4", { role: "user", content: "Thanks.", timestamp: 6 }));
+  const again = braid(s.env, repo, ["import", "openclaw", "--db", path]);
+  assert.match(again.stdout, /6f0a5d05 Inbox: imported 1 records/);
+  assert.match(again.stdout, /77aa0000 Research: up to date/);
+  db.close();
+
+  const shown = braid(s.env, repo, ["show", "6f0a5d05"]);
+  assert.match(shown.stdout, /via openclaw · assistant\] → read ci\/build\.log/);
+  assert.match(shown.stdout, /The build passes\./);
+});
