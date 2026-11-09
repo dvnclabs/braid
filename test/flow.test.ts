@@ -395,3 +395,48 @@ test("with link = store, commits carry no trailer and still lead to their sessio
   assert.equal(shown.status, 0, shown.stderr);
   assert.match(shown.stdout, /session 5b0e2c1a/);
 });
+
+test("team rules withhold paths and redact terms, and a dry run shows it first", () => {
+  const s = sandbox();
+  const repo = clone(s, "hal", "hal@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, repo, ["init", "--publish", "on-push"]);
+  writeFileSync(join(repo, ".braid", "redact.toml"), 'terms = ["Acme Corp"]\nwithhold = ["customers/**"]\n');
+  must(s.env, repo, "git", ["add", ".braid"]);
+  must(s.env, repo, "git", ["commit", "--quiet", "-m", "Set up braid"]);
+  must(s.env, repo, "git", ["push", "--quiet", "origin", "HEAD:main"]);
+  must(s.env, repo, "git", ["fetch", "--quiet", "origin"]);
+
+  // Rules on a feature branch do not count: they come from the default branch.
+  must(s.env, repo, "git", ["checkout", "--quiet", "-b", "feature"]);
+  writeFileSync(join(repo, ".braid", "redact.toml"), "terms = []\n");
+  must(s.env, repo, "git", ["commit", "--quiet", "-am", "Drop the rules"]);
+
+  const t = new Transcript(s.root, ALICE);
+  const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo });
+  braid(s.env, repo, ["hook", "session-start"], hookIn);
+  t.user("Summarize the Acme Corp contract.");
+  t.toolCall("Read", { file_path: join(repo, "customers", "x.md") }, "toolu_read1", "Contract terms: pays 1M a year.");
+  t.assistant("Acme Corp pays 1M a year.");
+  braid(s.env, repo, ["hook", "stop"], hookIn);
+
+  const dry = braid(s.env, repo, ["push", "--dry-run", "--session", ALICE]);
+  assert.match(dry.stdout, /would publish 2 records/);
+  assert.match(dry.stdout, /redacted: term 2/);
+  assert.match(dry.stdout, /withheld: customers\/\*\* 1/);
+  assert.match(dry.stdout, /rules: built in, \.braid\/redact\.toml on origin\/main/);
+  const remote = join(s.root, "remote.git");
+  assert.equal(must(s.env, s.root, "git", ["--git-dir", remote, "for-each-ref", "refs/braid/"]).trim(), "", "a dry run pushes nothing");
+
+  assert.match(braid(s.env, repo, ["push", "--session", ALICE]).stdout, /published 5b0e2c1a/);
+  const text = JSON.stringify(records(s.env, s.root, remote, `refs/braid/sessions/${ALICE}/${ALICE}`));
+  assert.doesNotMatch(text, /Contract terms|Acme Corp|customers\/x\.md/);
+  assert.match(text, /\[REDACTED:term\] pays 1M a year/);
+
+  // Your own default wins: publish = "off" in ~/.config/braid/config.toml.
+  mkdirSync(join(s.env.XDG_CONFIG_HOME!, "braid"), { recursive: true });
+  writeFileSync(join(s.env.XDG_CONFIG_HOME!, "braid", "config.toml"), 'publish = "off"\n');
+  t.user("more");
+  braid(s.env, repo, ["hook", "stop"], hookIn);
+  assert.match(braid(s.env, repo, ["push", "--session", ALICE]).stdout, /not published: publishing is off in ~\/\.config\/braid\/config\.toml/);
+});

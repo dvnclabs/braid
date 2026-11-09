@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync9, readFileSync as readFileSync9 } from "node:fs";
-import { join as join11 } from "node:path";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync9, readFileSync as readFileSync10 } from "node:fs";
+import { join as join12 } from "node:path";
 import { parseArgs } from "node:util";
 
 // src/git.ts
@@ -248,6 +248,7 @@ import { join as join3 } from "node:path";
 
 // src/repo.ts
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 function findRepo(cwd) {
   const top = gitMaybe(["rev-parse", "--show-toplevel"], { cwd })?.trim();
@@ -264,6 +265,15 @@ function ensureStore(repo) {
   mkdirSync(repo.dir, { recursive: true });
   git(["init", "--quiet", "--bare", repo.store]);
 }
+function configDir() {
+  return join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "braid");
+}
+function userConfig() {
+  const path2 = join(configDir(), "config.toml");
+  if (!existsSync(path2)) return {};
+  const m = /^\s*publish\s*=\s*"(on-push|off)"/m.exec(readFileSync(path2, "utf8"));
+  return m ? { publish: m[1] } : {};
+}
 function readConfig(repo) {
   const config2 = { gitHooks: true, link: "trailer", publish: "off", remote: "origin" };
   const path2 = join(repo.top, ".braid", "config.toml");
@@ -277,6 +287,7 @@ function readConfig(repo) {
     if (key === "link" && (value === "trailer" || value === "store")) config2.link = value;
     if (key === "remote" && value) config2.remote = value;
   }
+  if (userConfig().publish === "off") Object.assign(config2, { publish: "off", publishSource: "~/.config/braid/config.toml" });
   return config2;
 }
 var SESSION_REFS = "refs/sessions";
@@ -428,11 +439,11 @@ function fetchInBackground(repo, remote, minutes = 3) {
 }
 
 // src/githooks.ts
-import { chmodSync, existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync6, renameSync as renameSync3, rmSync as rmSync2, writeFileSync as writeFileSync5 } from "node:fs";
-import { isAbsolute, join as join7 } from "node:path";
+import { chmodSync, existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync7, renameSync as renameSync3, rmSync as rmSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { isAbsolute as isAbsolute2, join as join8 } from "node:path";
 
 // src/redact.ts
-import { homedir } from "node:os";
+import { homedir as homedir2 } from "node:os";
 var RULES = [
   { rule: "private-key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
   { rule: "aws-access-key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
@@ -454,9 +465,10 @@ var RULES = [
     group: 1
   }
 ];
-function redactString(s, counts) {
+var HOMES = /(?:\/Users|\/home|[A-Za-z]:\\Users)[\/\\][A-Za-z0-9._-]+(?=[\/\\"'\s]|$)/g;
+function redactString(s, counts, extra = []) {
   let out = s;
-  for (const { rule, re, group } of RULES) {
+  for (const { rule, re, group } of [...RULES, ...extra]) {
     out = out.replace(re, (match, ...groups) => {
       counts.set(rule, (counts.get(rule) ?? 0) + 1);
       const marker = `[REDACTED:${rule}]`;
@@ -465,19 +477,129 @@ function redactString(s, counts) {
       return typeof secret === "string" ? match.replace(secret, marker) : marker;
     });
   }
-  const home = homedir();
+  const home = homedir2();
   if (home.length > 1) out = out.split(home).join("~");
-  return out;
+  return out.replace(HOMES, "~");
 }
-function redactValue(value, counts) {
-  if (typeof value === "string") return redactString(value, counts);
-  if (Array.isArray(value)) return value.map((v) => redactValue(v, counts));
+function redactValue(value, counts, extra = []) {
+  if (typeof value === "string") return redactString(value, counts, extra);
+  if (Array.isArray(value)) return value.map((v) => redactValue(v, counts, extra));
   if (value && typeof value === "object") {
     const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = redactValue(v, counts);
+    for (const [k, v] of Object.entries(value)) out[k] = redactValue(v, counts, extra);
     return out;
   }
   return value;
+}
+
+// src/rules.ts
+import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
+import { isAbsolute, join as join5, relative } from "node:path";
+function parseToml(text) {
+  const out = {};
+  const clean2 = text.replace(/^\s*#.*$/gm, "");
+  for (const m of clean2.matchAll(/^\s*([A-Za-z0-9_-]+)\s*=\s*(\[[\s\S]*?\]|true|false)/gm)) {
+    const [, key, value] = m;
+    if (value === "true" || value === "false") {
+      out[key] = value === "true";
+      continue;
+    }
+    const items = [];
+    for (const s of value.matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g)) {
+      if (s[2] !== void 0) items.push(s[2]);
+      else {
+        try {
+          items.push(JSON.parse(`"${s[1]}"`));
+        } catch {
+        }
+      }
+    }
+    out[key] = items;
+  }
+  return out;
+}
+function globToRegExp(glob) {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*" && glob[i + 1] === "*") {
+      re += glob[i + 2] === "/" ? "(?:.*/)?" : ".*";
+      i += glob[i + 2] === "/" ? 2 : 1;
+    } else if (c === "*") re += "[^/]*";
+    else if (c === "?") re += "[^/]";
+    else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(glob.includes("/") ? `^/?${re}$` : `(?:^|/)${re}$`);
+}
+function defaultBranch(repo, remote) {
+  const head = gitMaybe(["symbolic-ref", "-q", `refs/remotes/${remote}/HEAD`], { cwd: repo.top })?.trim();
+  for (const ref of [head, `refs/remotes/${remote}/main`, `refs/remotes/${remote}/master`, "refs/heads/main", "refs/heads/master"]) {
+    if (ref && gitMaybe(["rev-parse", "-q", "--verify", `${ref}^{commit}`], { cwd: repo.top })) return ref;
+  }
+  return void 0;
+}
+function loadRules(repo, remote) {
+  const rules = { redact: [], withhold: [], withholdSession: false, sources: [], problems: [] };
+  const texts = [];
+  const own = join5(configDir(), "redact.toml");
+  if (existsSync4(own)) texts.push([own.replace(process.env.HOME ?? "\0", "~"), readFileSync4(own, "utf8")]);
+  const branch = defaultBranch(repo, remote);
+  const shared = branch ? gitMaybe(["show", `${branch}:.braid/redact.toml`], { cwd: repo.top }) : void 0;
+  if (branch && shared !== void 0) texts.push([`.braid/redact.toml on ${branch.replace(/^refs\/(remotes|heads)\//, "")}`, shared]);
+  for (const [source, text] of texts) {
+    rules.sources.push(source);
+    const t = parseToml(text);
+    for (const term of Array.isArray(t.terms) ? t.terms : []) {
+      if (term.trim()) rules.redact.push({ rule: "term", re: new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi") });
+    }
+    for (const pattern of Array.isArray(t.patterns) ? t.patterns : []) {
+      try {
+        rules.redact.push({ rule: "pattern", re: new RegExp(pattern, "g") });
+      } catch {
+        rules.problems.push(`${source}: not a valid pattern: ${pattern}`);
+      }
+    }
+    for (const glob of Array.isArray(t.withhold) ? t.withhold : []) rules.withhold.push({ glob, re: globToRegExp(glob) });
+    if (t["withhold-session"] === true) rules.withholdSession = true;
+  }
+  return rules;
+}
+var PATH_ARGS = ["file_path", "path", "notebook_path", "filePath"];
+function pathsOf(args) {
+  const out = PATH_ARGS.map((k) => args[k]).filter((v) => typeof v === "string");
+  for (const k of ["command", "cmd"]) {
+    const v = args[k];
+    if (typeof v === "string") out.push(...v.split(/[\s"'`;|&<>()]+/).filter((w) => w.includes("/") || w.includes(".")));
+  }
+  return out;
+}
+function candidates(p, top) {
+  if (!isAbsolute(p)) return [p.replace(/^\.\//, "")];
+  const parts = p.split("/").filter(Boolean);
+  const out = parts.map((_, i) => parts.slice(i).join("/"));
+  const inside = relative(top, p);
+  if (!inside.startsWith("..")) out.push(inside);
+  return out;
+}
+function pathWithheld(records, rules, top) {
+  const ids = /* @__PURE__ */ new Set();
+  const counts = /* @__PURE__ */ new Map();
+  if (rules.withhold.length === 0) return { ids, counts };
+  const calls = /* @__PURE__ */ new Set();
+  for (const r of records) {
+    if (!Array.isArray(r.content)) continue;
+    for (const block of r.content) {
+      if (block?.type !== "tool_call" || !block.arguments || typeof block.arguments !== "object") continue;
+      const paths = pathsOf(block.arguments).flatMap((p) => candidates(p, top));
+      const hit = rules.withhold.find((w) => paths.some((p) => w.re.test(p)));
+      if (!hit) continue;
+      if (!ids.has(r.id)) counts.set(hit.glob, (counts.get(hit.glob) ?? 0) + 1);
+      ids.add(r.id);
+      if (block.id) calls.add(block.id);
+    }
+  }
+  for (const r of records) if (r.role === "tool" && typeof r.toolCallId === "string" && calls.has(r.toolCallId)) ids.add(r.id);
+  return { ids, counts };
 }
 
 // src/publish.ts
@@ -499,7 +621,7 @@ function clean(r) {
   }
   return out;
 }
-function publishedChunks(chunks, withheld) {
+function publishedChunks(chunks, withheld, extra = []) {
   const all = chunks.flat();
   const parents = new Map(all.map((r) => [r.id, r.parentId ?? null]));
   const cleaned = /* @__PURE__ */ new Map();
@@ -525,7 +647,7 @@ function publishedChunks(chunks, withheld) {
       if (typeof c.fromId === "string") c.fromId = relink(c.fromId) ?? c.fromId;
       if (typeof c.targetId === "string") c.targetId = relink(c.targetId) ?? c.targetId;
       const found = /* @__PURE__ */ new Map();
-      const red = redactValue(c, found);
+      const red = redactValue(c, found, extra);
       if (found.size > 0) {
         const redactions = [...found].map(([rule, count]) => ({ rule, count }));
         red.ext = { ...red.ext, braid: { ...braidOf(red), redactions } };
@@ -541,22 +663,32 @@ function publish(repo, session, opts = {}) {
   const config2 = readConfig(repo);
   const remote = opts.remote ?? config2.remote;
   const result = { session, pushed: false, records: 0, redactions: 0 };
-  if (config2.publish === "off" && !opts.force) return { ...result, reason: "publishing is off in .braid/config.toml" };
+  const off = config2.publish === "off" && !opts.force ? `publishing is off in ${config2.publishSource ?? ".braid/config.toml"}` : void 0;
+  if (off && !opts.dryRun) return { ...result, reason: off };
   const state = loadState(repo, session);
   if (!state || state.chunks === 0) return { ...result, reason: "not saved" };
   if (state.private) return { ...result, reason: "private" };
   return withLock(repo, `publish-${session}`, () => {
     const ref = storeRef(state.conv, session);
-    const withheld = new Set(state.withheld ?? []);
-    const { chunks, counts } = publishedChunks(readChunks(ref, { gitDir: repo.store }), withheld);
+    const local = readChunks(ref, { gitDir: repo.store });
+    const localAgents = readAgentChunks(ref, { gitDir: repo.store });
+    const rules = loadRules(repo, remote);
+    const byPath = pathWithheld([...local.flat(), ...[...localAgents.values()].flat(2)], rules, repo.top);
+    const report = { counts: /* @__PURE__ */ new Map(), withheld: new Map(byPath.counts), sources: rules.sources, problems: rules.problems };
+    if ((state.withheld ?? []).length) report.withheld.set("braid withhold", state.withheld.length);
+    if (rules.withholdSession && byPath.ids.size > 0) return { ...result, reason: "withheld whole: it touched a path under the withhold rules", report };
+    const withheld = /* @__PURE__ */ new Set([...state.withheld ?? [], ...byPath.ids]);
+    const { chunks, counts } = publishedChunks(local, withheld, rules.redact);
     const agents = /* @__PURE__ */ new Map();
-    for (const [id, local] of readAgentChunks(ref, { gitDir: repo.store })) {
-      const published2 = publishedChunks(local, withheld);
+    for (const [id, chunksOfAgent] of localAgents) {
+      const published2 = publishedChunks(chunksOfAgent, withheld, rules.redact);
       agents.set(id, published2.chunks);
       for (const [rule, n] of published2.counts) counts.set(rule, (counts.get(rule) ?? 0) + n);
     }
+    report.counts = counts;
     const records = chunks.flat().filter(isTurn).length;
     const redactions = sum(counts);
+    if (opts.dryRun) return { ...result, records, redactions, reason: off ?? "dry run", report };
     const published = `${PUBLISHED_REFS}/${state.conv}/${session}`;
     const tracking = `${remoteRefs(remote)}/${state.conv}/${session}`;
     const parent = revParse(tracking, { cwd: repo.top });
@@ -571,18 +703,18 @@ function publish(repo, session, opts = {}) {
 }
 
 // src/registry.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync4, renameSync as renameSync2, writeFileSync as writeFileSync4 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join5 } from "node:path";
+import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join6 } from "node:path";
 function file(session) {
   if (!/^[A-Za-z0-9-]{8,80}$/.test(session)) return void 0;
-  return join5(process.env.XDG_DATA_HOME || join5(homedir2(), ".local", "share"), "braid", "sessions", `${session}.json`);
+  return join6(process.env.XDG_DATA_HOME || join6(homedir3(), ".local", "share"), "braid", "sessions", `${session}.json`);
 }
 function readEntry(session) {
   const path2 = file(session);
-  if (!path2 || !existsSync4(path2)) return void 0;
+  if (!path2 || !existsSync5(path2)) return void 0;
   try {
-    const entry = JSON.parse(readFileSync4(path2, "utf8"));
+    const entry = JSON.parse(readFileSync5(path2, "utf8"));
     return { transcript: entry.transcript, repos: Array.isArray(entry.repos) ? entry.repos : [] };
   } catch {
     return void 0;
@@ -594,16 +726,16 @@ function recordSession(session, update) {
   const entry = readEntry(session) ?? { repos: [] };
   if (update.transcript) entry.transcript = update.transcript;
   if (update.repo && !entry.repos.includes(update.repo)) entry.repos.push(update.repo);
-  mkdirSync5(join5(path2, ".."), { recursive: true });
+  mkdirSync5(join6(path2, ".."), { recursive: true });
   const tmp = `${path2}.${process.pid}.tmp`;
   writeFileSync4(tmp, JSON.stringify(entry, null, 2) + "\n");
   renameSync2(tmp, path2);
 }
 
 // src/save.ts
-import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "node:fs";
+import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
 import { hostname, userInfo } from "node:os";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // src/transcript.ts
@@ -1704,8 +1836,8 @@ function header(h, session) {
 }
 function forkSource(repo, session, native) {
   const firstMessage = native.find((r) => r.type === "message")?.id;
-  const dir = join6(repo.dir, "sessions");
-  if (!firstMessage || !existsSync5(dir)) return void 0;
+  const dir = join7(repo.dir, "sessions");
+  if (!firstMessage || !existsSync6(dir)) return void 0;
   for (const name2 of readdirSync2(dir)) {
     if (!name2.endsWith(".json") || name2 === `${session}.json`) continue;
     const other = loadState(repo, name2.slice(0, -".json".length));
@@ -1724,7 +1856,7 @@ function save(repo, session, transcript, opts = {}) {
     const state = loadState(repo, session) ?? newState(session, transcript);
     if (transcript) state.transcript = transcript;
     const path2 = state.transcript;
-    if (!path2 || !existsSync5(path2)) {
+    if (!path2 || !existsSync6(path2)) {
       if (opts.commit !== void 0) throw new Error("this session is not saved yet: braid saves sessions that start after it is set up");
       return { added: 0, state };
     }
@@ -1875,13 +2007,13 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
 }
 function collectAgents(repo, state, path2) {
   const out = /* @__PURE__ */ new Map();
-  const dir = join6(path2.replace(/\.jsonl$/, ""), "subagents");
-  if (!existsSync5(dir)) return out;
+  const dir = join7(path2.replace(/\.jsonl$/, ""), "subagents");
+  if (!existsSync6(dir)) return out;
   state.agents ??= {};
   for (const file2 of readdirSync2(dir).sort()) {
     const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file2)?.[1];
     if (!id) continue;
-    const fp = join6(dir, file2);
+    const fp = join7(dir, file2);
     const prior = state.agents[id];
     const rescan = !!prior && !intact(fp, prior.cursor);
     const st = rescan || !prior ? { cursor: START, linked: prior?.linked } : prior;
@@ -1905,7 +2037,7 @@ function collectAgents(repo, state, path2) {
     if (!st.linked) {
       st.linked = true;
       try {
-        const meta = JSON.parse(readFileSync5(join6(dir, `agent-${id}.meta.json`), "utf8"));
+        const meta = JSON.parse(readFileSync6(join7(dir, `agent-${id}.meta.json`), "utf8"));
         const str = (k) => typeof meta[k] === "string" ? meta[k] : void 0;
         link = { toolUseId: str("toolUseId"), description: str("description"), agentType: str("agentType") };
       } catch {
@@ -1949,12 +2081,12 @@ ${stdin ? `printf '%s\\n' "$input" | "$@"` : '"$@" || true'}
 }
 function hooksDir(repo) {
   const custom = config("core.hooksPath", { cwd: repo.top });
-  if (custom) return { dir: isAbsolute(custom) ? custom : join7(repo.top, custom), managed: true };
-  return { dir: join7(repo.common, "hooks"), managed: false };
+  if (custom) return { dir: isAbsolute2(custom) ? custom : join8(repo.top, custom), managed: true };
+  return { dir: join8(repo.common, "hooks"), managed: false };
 }
 function hooksInstalled(repo) {
   const { dir } = hooksDir(repo);
-  return HOOKS.every((h) => existsSync6(join7(dir, h)) && readFileSync6(join7(dir, h), "utf8").includes(MARK));
+  return HOOKS.every((h) => existsSync7(join8(dir, h)) && readFileSync7(join8(dir, h), "utf8").includes(MARK));
 }
 function installHooks(repo) {
   const { dir, managed } = hooksDir(repo);
@@ -1968,9 +2100,9 @@ function installHooks(repo) {
   mkdirSync6(dir, { recursive: true });
   const notes = [];
   for (const hook of HOOKS) {
-    const path2 = join7(dir, hook);
-    if (existsSync6(path2) && !readFileSync6(path2, "utf8").includes(MARK)) {
-      if (!existsSync6(`${path2}.local`)) {
+    const path2 = join8(dir, hook);
+    if (existsSync7(path2) && !readFileSync7(path2, "utf8").includes(MARK)) {
+      if (!existsSync7(`${path2}.local`)) {
         renameSync3(path2, `${path2}.local`);
         notes.push(`kept your ${hook} hook as ${hook}.local; braid runs it first`);
       }
@@ -1985,10 +2117,10 @@ function uninstallHooks(repo) {
   if (managed) return [`core.hooksPath is set to ${dir}: remove the braid git-hook lines from your hook manager`];
   const notes = [];
   for (const hook of HOOKS) {
-    const path2 = join7(dir, hook);
-    if (!existsSync6(path2) || !readFileSync6(path2, "utf8").includes(MARK)) continue;
+    const path2 = join8(dir, hook);
+    if (!existsSync7(path2) || !readFileSync7(path2, "utf8").includes(MARK)) continue;
     rmSync2(path2);
-    if (existsSync6(`${path2}.local`)) renameSync3(`${path2}.local`, path2);
+    if (existsSync7(`${path2}.local`)) renameSync3(`${path2}.local`, path2);
     notes.push(`removed the ${hook} hook`);
   }
   return notes;
@@ -2060,8 +2192,8 @@ function prePush(repo, remote, stdin) {
 }
 
 // src/hooks.ts
-import { appendFileSync, existsSync as existsSync8 } from "node:fs";
-import { dirname as dirname2, join as join9 } from "node:path";
+import { appendFileSync, existsSync as existsSync9 } from "node:fs";
+import { dirname as dirname2, join as join10 } from "node:path";
 
 // src/load.ts
 import { randomBytes } from "node:crypto";
@@ -2252,19 +2384,16 @@ function markFork(repo, current, b) {
 
 // src/setup.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { chmodSync as chmodSync2, existsSync as existsSync7, mkdirSync as mkdirSync7, readFileSync as readFileSync7, writeFileSync as writeFileSync6 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { dirname, join as join8, resolve as resolve2 } from "node:path";
+import { chmodSync as chmodSync2, existsSync as existsSync8, mkdirSync as mkdirSync7, readFileSync as readFileSync8, writeFileSync as writeFileSync6 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { dirname, join as join9, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
-function configDir() {
-  return join8(process.env.XDG_CONFIG_HOME || join8(homedir3(), ".config"), "braid");
-}
 function cliPath() {
   return resolve2(process.argv[1] ?? fileURLToPath(import.meta.url));
 }
 function writePointer() {
   mkdirSync7(configDir(), { recursive: true });
-  writeFileSync6(join8(configDir(), "cli"), cliPath());
+  writeFileSync6(join9(configDir(), "cli"), cliPath());
 }
 function visibility(repo) {
   const r = spawnSync3("gh", ["repo", "view", "--json", "visibility", "-q", ".visibility"], { cwd: repo.top, encoding: "utf8" });
@@ -2283,16 +2412,18 @@ var TEMPLATE = (publish2, gitHooks) => [
 ].join("\n");
 function init(repo, opts = {}) {
   const notes = [];
-  const file2 = join8(repo.top, ".braid", "config.toml");
-  if (!existsSync7(file2)) {
-    const vis = visibility(repo);
-    const publish2 = vis === "PRIVATE" || vis === "INTERNAL" ? "on-push" : "off";
+  const file2 = join9(repo.top, ".braid", "config.toml");
+  if (!existsSync8(file2)) {
+    const chosen = opts.publish ?? userConfig().publish;
+    const vis = chosen ? void 0 : visibility(repo);
+    const publish2 = chosen ?? (vis === "PRIVATE" || vis === "INTERNAL" ? "on-push" : "off");
     mkdirSync7(dirname(file2), { recursive: true });
     writeFileSync6(file2, TEMPLATE(publish2, opts.gitHooks ?? true));
-    notes.push(`wrote .braid/config.toml (publish = "${publish2}"${vis ? `, repository is ${vis.toLowerCase()}` : ", visibility unknown"})`);
+    const why = opts.publish ? "as asked" : chosen ? "your default in ~/.config/braid/config.toml" : vis ? `repository is ${vis.toLowerCase()}` : "visibility unknown";
+    notes.push(`wrote .braid/config.toml (publish = "${publish2}", ${why})`);
     notes.push("commit it so teammates get braid too: git add .braid && git commit -m 'Set up braid'");
   } else if (opts.gitHooks !== void 0) {
-    const text = readFileSync7(file2, "utf8");
+    const text = readFileSync8(file2, "utf8");
     const line = `git-hooks = ${opts.gitHooks}`;
     writeFileSync6(file2, /^git-hooks\s*=.*$/m.test(text) ? text.replace(/^git-hooks\s*=.*$/m, line) : `${line}
 ${text}`);
@@ -2304,7 +2435,7 @@ ${text}`);
   return notes;
 }
 function settingsPath() {
-  return join8(process.env.CLAUDE_CONFIG_DIR || join8(homedir3(), ".claude"), "settings.json");
+  return join9(process.env.CLAUDE_CONFIG_DIR || join9(homedir4(), ".claude"), "settings.json");
 }
 var SHIM = `#!/bin/sh
 # braid: runs the braid CLI wherever the Claude Code plugin installed it.
@@ -2315,24 +2446,24 @@ exec node "$(cat "$cli")" "$@"
 function setup(opts = {}) {
   const notes = [];
   const settingsFile = settingsPath();
-  const saved = join8(configDir(), "statusline.json");
-  const settings = existsSync7(settingsFile) ? JSON.parse(readFileSync7(settingsFile, "utf8")) : {};
+  const saved = join9(configDir(), "statusline.json");
+  const settings = existsSync8(settingsFile) ? JSON.parse(readFileSync8(settingsFile, "utf8")) : {};
   const current = settings.statusLine;
   if (opts.undo) {
-    const prev = existsSync7(saved) ? JSON.parse(readFileSync7(saved, "utf8")) : {};
+    const prev = existsSync8(saved) ? JSON.parse(readFileSync8(saved, "utf8")) : {};
     if (prev.previous) settings.statusLine = { type: "command", command: prev.previous, ...prev.refreshInterval ? { refreshInterval: prev.refreshInterval } : {} };
     else delete settings.statusLine;
     writeFileSync6(settingsFile, JSON.stringify(settings, null, 2) + "\n");
     return [`restored the previous status line in ${settingsFile}`];
   }
   writePointer();
-  const bin = join8(homedir3(), ".local", "bin");
+  const bin = join9(homedir4(), ".local", "bin");
   mkdirSync7(bin, { recursive: true });
-  writeFileSync6(join8(bin, "braid"), SHIM);
-  chmodSync2(join8(bin, "braid"), 493);
-  notes.push(`installed ${join8(bin, "braid")}`);
+  writeFileSync6(join9(bin, "braid"), SHIM);
+  chmodSync2(join9(bin, "braid"), 493);
+  notes.push(`installed ${join9(bin, "braid")}`);
   if (!(process.env.PATH ?? "").split(":").includes(bin)) notes.push(`add ${bin} to your PATH to run braid from a terminal`);
-  const command = `${join8(bin, "braid")} statusline`;
+  const command = `${join9(bin, "braid")} statusline`;
   if (current?.command !== command) {
     mkdirSync7(configDir(), { recursive: true });
     writeFileSync6(saved, JSON.stringify({ previous: current?.command ?? "", refreshInterval: current?.refreshInterval }, null, 2) + "\n");
@@ -2366,7 +2497,7 @@ function otherRepos(session, current) {
   const seen = new Set(current ? [current.common] : []);
   const out = [];
   for (const top of readEntry(session)?.repos ?? []) {
-    const repo = existsSync8(top) ? findRepo(top) : void 0;
+    const repo = existsSync9(top) ? findRepo(top) : void 0;
     if (!repo || seen.has(repo.common) || !isEnabled(repo)) continue;
     seen.add(repo.common);
     out.push(repo);
@@ -2380,7 +2511,7 @@ function sessionStart(input) {
   recordSession(session, { transcript: input.transcript_path });
   const envFile = process.env.CLAUDE_ENV_FILE;
   if (envFile) {
-    const bin = join9(dirname2(dirname2(cliPath())), "bin");
+    const bin = join10(dirname2(dirname2(cliPath())), "bin");
     appendFileSync(envFile, `export BRAID_SESSION=${session}
 export PATH="${bin}:$PATH"
 `);
@@ -2492,13 +2623,13 @@ function record(repo, session, chosen, opts) {
 // src/statusline.ts
 import { spawn as spawn2, spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync8, statSync as statSync3, writeFileSync as writeFileSync7 } from "node:fs";
-import { join as join10 } from "node:path";
+import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync9, statSync as statSync3, writeFileSync as writeFileSync7 } from "node:fs";
+import { join as join11 } from "node:path";
 var hash2 = (s) => createHash3("sha1").update(s).digest("hex").slice(0, 16);
 function previous(stdin) {
-  const file2 = join10(configDir(), "statusline.json");
-  if (!existsSync9(file2)) return "";
-  const { previous: previous2 } = JSON.parse(readFileSync8(file2, "utf8"));
+  const file2 = join11(configDir(), "statusline.json");
+  if (!existsSync10(file2)) return "";
+  const { previous: previous2 } = JSON.parse(readFileSync9(file2, "utf8"));
   if (!previous2) return "";
   const r = spawnSync4("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
   return (r.stdout ?? "").trimEnd();
@@ -2507,16 +2638,16 @@ function pullRequest(repo) {
   if (process.env.BRAID_STATUS_NO_PR) return "";
   const branch = gitMaybe(["branch", "--show-current"], { cwd: repo.top })?.trim();
   if (!branch) return "";
-  const dir = join10(repo.dir, "cache");
+  const dir = join11(repo.dir, "cache");
   mkdirSync8(dir, { recursive: true });
-  const file2 = join10(dir, `pr-${hash2(branch)}`);
+  const file2 = join11(dir, `pr-${hash2(branch)}`);
   let fresh = false;
   try {
     fresh = Date.now() - statSync3(file2).mtimeMs < 5 * 6e4;
   } catch {
   }
   if (!fresh) {
-    writeFileSync7(file2, existsSync9(file2) ? readFileSync8(file2) : "");
+    writeFileSync7(file2, existsSync10(file2) ? readFileSync9(file2) : "");
     const tmp = `${file2}.${process.pid}`;
     spawn2("sh", ["-c", 'gh pr view --json number -q .number > "$T" 2>/dev/null; mv "$T" "$F"'], {
       cwd: repo.top,
@@ -2525,12 +2656,12 @@ function pullRequest(repo) {
       stdio: "ignore"
     }).unref();
   }
-  const n = readFileSync8(file2, "utf8").trim();
+  const n = readFileSync9(file2, "utf8").trim();
   return /^\d{1,7}$/.test(n) ? `#${n}` : "";
 }
 function braidPart(repo, session, remote) {
   const conv = convOf(repo, session);
-  const statePath = join10(repo.dir, "sessions", `${session}.json`);
+  const statePath = join11(repo.dir, "sessions", `${session}.json`);
   const key = hash2(
     [
       session,
@@ -2539,13 +2670,13 @@ function braidPart(repo, session, remote) {
       ...forEachRef([`${SESSION_REFS}/${conv ?? "-"}/`], { gitDir: repo.store }).map((r) => r.sha + r.ref),
       ...forEachRef([`${remoteRefs(remote)}/${conv ?? "-"}/`], { cwd: repo.top }).map((r) => r.sha + r.ref),
       gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim(),
-      existsSync9(statePath) ? statSync3(statePath).mtimeMs : 0
+      existsSync10(statePath) ? statSync3(statePath).mtimeMs : 0
     ].join("\n")
   );
-  const file2 = join10(repo.dir, "cache", `status-${key}`);
-  if (existsSync9(file2)) return readFileSync8(file2, "utf8");
+  const file2 = join11(repo.dir, "cache", `status-${key}`);
+  if (existsSync10(file2)) return readFileSync9(file2, "utf8");
   const text = render(computeStatus(repo, session, remote));
-  mkdirSync8(join10(repo.dir, "cache"), { recursive: true });
+  mkdirSync8(join11(repo.dir, "cache"), { recursive: true });
   writeFileSync7(file2, text);
   return text;
 }
@@ -2581,12 +2712,12 @@ var HELP = `braid ${VERSION}: version control for agent conversations
 
 Setup
   braid setup                 once per machine: the braid command and the status line
-  braid init [--no-git-hooks] once per repository: .braid/config.toml, and git hooks unless turned off
+  braid init [--no-git-hooks] [--publish off]   once per repository: .braid/config.toml, and git hooks unless turned off
 
 Everyday (inside an agent session; the session comes from $BRAID_SESSION)
   braid status                where this session stands, and the sessions around it
   braid commit -m "<message>" commit the conversation (git commits do this when git-hooks is on)
-  braid push                  publish this session (git push does this when git-hooks is on)
+  braid push [--dry-run]      publish this session (git push does this when git-hooks is on); --dry-run shows what would go
   braid fork [<id|name|pr:N>] start this new session from another; with no target, how to branch this one
   braid merge [<id|name|pr:N>]   show what another session has that this one lacks, for the agent to summarize
   braid merge --record <id> --instruction "<text>"   record a merge; summary on stdin
@@ -2602,7 +2733,7 @@ Other
 `;
 function readStdin() {
   try {
-    return readFileSync9(0, "utf8");
+    return readFileSync10(0, "utf8");
   } catch {
     return "";
   }
@@ -2610,7 +2741,7 @@ function readStdin() {
 function logError(err) {
   try {
     mkdirSync9(configDir(), { recursive: true });
-    appendFileSync2(join11(configDir(), "errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${err instanceof Error ? err.stack : String(err)}
+    appendFileSync2(join12(configDir(), "errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${err instanceof Error ? err.stack : String(err)}
 `);
   } catch {
   }
@@ -2664,7 +2795,9 @@ function main(argv) {
       all: { type: "boolean" },
       quiet: { type: "boolean" },
       force: { type: "boolean" },
-      undo: { type: "boolean" }
+      undo: { type: "boolean" },
+      "dry-run": { type: "boolean" },
+      publish: { type: "string" }
     }
   });
   const str = (k) => typeof opts[k] === "string" ? opts[k] : void 0;
@@ -2715,7 +2848,9 @@ function main(argv) {
     case "init": {
       const repo = needRepo();
       const gitHooks = opts["no-git-hooks"] === true ? false : opts["git-hooks"] === true ? true : void 0;
-      for (const note of init(repo, { gitHooks })) out(`braid: ${note}`);
+      const publishOpt = str("publish");
+      if (publishOpt !== void 0 && publishOpt !== "on-push" && publishOpt !== "off") throw new Error('--publish takes "on-push" or "off"');
+      for (const note of init(repo, { gitHooks, publish: publishOpt })) out(`braid: ${note}`);
       return 0;
     }
     case "setup":
@@ -2739,7 +2874,20 @@ function main(argv) {
       const repo = needRepo();
       const session = needSession(str("session"));
       save(repo, session);
-      for (const line of summarize([publish(repo, session, { remote: str("remote"), force: opts.force === true })])) out(line);
+      const r = publish(repo, session, { remote: str("remote"), force: opts.force === true, dryRun: opts["dry-run"] === true });
+      if (!opts["dry-run"]) {
+        for (const line of summarize([r])) out(line);
+        return 0;
+      }
+      const list = (m) => [...m].map(([k, n]) => `${k} ${n}`).join(", ") || "none";
+      const would = r.reason === "dry run" ? `would publish ${r.records} records` : `would not publish: ${r.reason}`;
+      out(`braid: dry run for ${session.slice(0, 8)}: ${would}`);
+      if (r.report) {
+        out(`  redacted: ${list(r.report.counts)}`);
+        out(`  withheld: ${list(r.report.withheld)}`);
+        out(`  rules: built in${r.report.sources.map((s) => `, ${s}`).join("")}`);
+        for (const p of r.report.problems) out(`  problem: ${p}`);
+      }
       return 0;
     }
     case "fetch": {

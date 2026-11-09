@@ -2,7 +2,7 @@
 // become [REDACTED:<rule>] markers and are counted per rule.
 import { homedir } from "node:os";
 
-interface Rule {
+export interface Rule {
   rule: string;
   re: RegExp;
   /** Index of the capture group holding the secret; the whole match when absent. */
@@ -33,9 +33,13 @@ const RULES: Rule[] = [
 
 export type Counts = Map<string, number>;
 
-export function redactString(s: string, counts: Counts): string {
+// Home directories of any user and machine: a session moved from /Users/alice to /home/alice has both.
+const HOMES = /(?:\/Users|\/home|[A-Za-z]:\\Users)[\/\\][A-Za-z0-9._-]+(?=[\/\\"'\s]|$)/g;
+
+/** Redacts one string with the built-in rules and `extra`, counting matches per rule. */
+export function redactString(s: string, counts: Counts, extra: Rule[] = []): string {
   let out = s;
-  for (const { rule, re, group } of RULES) {
+  for (const { rule, re, group } of [...RULES, ...extra]) {
     out = out.replace(re, (match: string, ...groups: unknown[]) => {
       counts.set(rule, (counts.get(rule) ?? 0) + 1);
       const marker = `[REDACTED:${rule}]`;
@@ -46,16 +50,16 @@ export function redactString(s: string, counts: Counts): string {
   }
   const home = homedir();
   if (home.length > 1) out = out.split(home).join("~");
-  return out;
+  return out.replace(HOMES, "~");
 }
 
 /** Redacts every string in a JSON value. */
-export function redactValue<T>(value: T, counts: Counts): T {
-  if (typeof value === "string") return redactString(value, counts) as T;
-  if (Array.isArray(value)) return value.map((v) => redactValue(v, counts)) as T;
+export function redactValue<T>(value: T, counts: Counts, extra: Rule[] = []): T {
+  if (typeof value === "string") return redactString(value, counts, extra) as T;
+  if (Array.isArray(value)) return value.map((v) => redactValue(v, counts, extra)) as T;
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[k] = redactValue(v, counts);
+    for (const [k, v] of Object.entries(value)) out[k] = redactValue(v, counts, extra);
     return out as T;
   }
   return value;

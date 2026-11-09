@@ -1,7 +1,8 @@
 // Publishing: build a redacted copy of a session from the store and push it.
 import { readAgentChunks, readChunks, writeChunks } from "./chunks.ts";
 import { git, revParse, updateRef } from "./git.ts";
-import { redactValue, type Counts } from "./redact.ts";
+import { redactValue, type Counts, type Rule } from "./redact.ts";
+import { loadRules, pathWithheld } from "./rules.ts";
 import { braidOf, isTurn, type Rec } from "./records.ts";
 import { PUBLISHED_REFS, readConfig, remoteRefs, storeRef, type Repo } from "./repo.ts";
 import { loadState, withLock } from "./state.ts";
@@ -35,10 +36,12 @@ export interface PublishResult {
   records: number;
   redactions: number;
   reason?: string;
+  /** What --dry-run reports: redactions per rule, withheld records per cause, and where the rules came from. */
+  report?: { counts: Counts; withheld: Map<string, number>; sources: string[]; problems: string[] };
 }
 
 /** Builds the published chunks for a session: cleaned, withheld records dropped, parents relinked, redacted. */
-export function publishedChunks(chunks: Rec[][], withheld: Set<string>): { chunks: Rec[][]; counts: Counts } {
+export function publishedChunks(chunks: Rec[][], withheld: Set<string>, extra: Rule[] = []): { chunks: Rec[][]; counts: Counts } {
   const all = chunks.flat();
   const parents = new Map(all.map((r) => [r.id, r.parentId ?? null]));
   const cleaned = new Map<string, Rec>();
@@ -67,7 +70,7 @@ export function publishedChunks(chunks: Rec[][], withheld: Set<string>): { chunk
         if (typeof c.fromId === "string") c.fromId = relink(c.fromId) ?? c.fromId;
         if (typeof c.targetId === "string") c.targetId = relink(c.targetId) ?? c.targetId;
         const found: Counts = new Map();
-        const red = redactValue(c, found);
+        const red = redactValue(c, found, extra);
         if (found.size > 0) {
           const redactions = [...found].map(([rule, count]) => ({ rule, count }));
           red.ext = { ...red.ext, braid: { ...braidOf(red), redactions } };
@@ -81,27 +84,38 @@ export function publishedChunks(chunks: Rec[][], withheld: Set<string>): { chunk
 
 const sum = (m: Counts) => [...m.values()].reduce((a, b) => a + b, 0);
 
-export function publish(repo: Repo, session: string, opts: { remote?: string; force?: boolean } = {}): PublishResult {
+export function publish(repo: Repo, session: string, opts: { remote?: string; force?: boolean; dryRun?: boolean } = {}): PublishResult {
   const config = readConfig(repo);
   const remote = opts.remote ?? config.remote;
   const result: PublishResult = { session, pushed: false, records: 0, redactions: 0 };
-  if (config.publish === "off" && !opts.force) return { ...result, reason: "publishing is off in .braid/config.toml" };
+  const off = config.publish === "off" && !opts.force ? `publishing is off in ${config.publishSource ?? ".braid/config.toml"}` : undefined;
+  if (off && !opts.dryRun) return { ...result, reason: off };
   const state = loadState(repo, session);
   if (!state || state.chunks === 0) return { ...result, reason: "not saved" };
   if (state.private) return { ...result, reason: "private" };
 
   return withLock(repo, `publish-${session}`, () => {
     const ref = storeRef(state.conv, session);
-    const withheld = new Set(state.withheld ?? []);
-    const { chunks, counts } = publishedChunks(readChunks(ref, { gitDir: repo.store }), withheld);
+    const local = readChunks(ref, { gitDir: repo.store });
+    const localAgents = readAgentChunks(ref, { gitDir: repo.store });
+    const rules = loadRules(repo, remote);
+    const byPath = pathWithheld([...local.flat(), ...[...localAgents.values()].flat(2)], rules, repo.top);
+    const report = { counts: new Map() as Counts, withheld: new Map(byPath.counts), sources: rules.sources, problems: rules.problems };
+    if ((state.withheld ?? []).length) report.withheld.set("braid withhold", state.withheld!.length);
+    if (rules.withholdSession && byPath.ids.size > 0) return { ...result, reason: "withheld whole: it touched a path under the withhold rules", report };
+    const withheld = new Set([...(state.withheld ?? []), ...byPath.ids]);
+
+    const { chunks, counts } = publishedChunks(local, withheld, rules.redact);
     const agents = new Map<string, Rec[][]>();
-    for (const [id, local] of readAgentChunks(ref, { gitDir: repo.store })) {
-      const published = publishedChunks(local, withheld);
+    for (const [id, chunksOfAgent] of localAgents) {
+      const published = publishedChunks(chunksOfAgent, withheld, rules.redact);
       agents.set(id, published.chunks);
       for (const [rule, n] of published.counts) counts.set(rule, (counts.get(rule) ?? 0) + n);
     }
+    report.counts = counts;
     const records = chunks.flat().filter(isTurn).length;
     const redactions = sum(counts);
+    if (opts.dryRun) return { ...result, records, redactions, reason: off ?? "dry run", report };
     const published = `${PUBLISHED_REFS}/${state.conv}/${session}`;
     const tracking = `${remoteRefs(remote)}/${state.conv}/${session}`;
     const parent = revParse(tracking, { cwd: repo.top });

@@ -1,5 +1,6 @@
 // Where braid keeps things, for one repository.
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { git, gitMaybe } from "./git.ts";
 
@@ -40,7 +41,22 @@ export interface Config {
   link: "trailer" | "store";
   /** "on-push" publishes sessions with git push and braid push; "off" never publishes. */
   publish: "on-push" | "off";
+  /** Where publish = "off" came from, when it came from the user's own config. */
+  publishSource?: string;
   remote: string;
+}
+
+/** braid's per-user directory: ~/.config/braid. */
+export function configDir(): string {
+  return join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "braid");
+}
+
+/** The user's own defaults, from ~/.config/braid/config.toml. */
+export function userConfig(): { publish?: "on-push" | "off" } {
+  const path = join(configDir(), "config.toml");
+  if (!existsSync(path)) return {};
+  const m = /^\s*publish\s*=\s*"(on-push|off)"/m.exec(readFileSync(path, "utf8"));
+  return m ? { publish: m[1] as "on-push" | "off" } : {};
 }
 
 /** Reads the few keys braid uses from `.braid/config.toml`, a flat `key = "value"` file. */
@@ -57,6 +73,8 @@ export function readConfig(repo: Repo): Config {
     if (key === "link" && (value === "trailer" || value === "store")) config.link = value;
     if (key === "remote" && value) config.remote = value;
   }
+  // You can always keep your own sessions from being published.
+  if (userConfig().publish === "off") Object.assign(config, { publish: "off", publishSource: "~/.config/braid/config.toml" });
   return config;
 }
 

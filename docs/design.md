@@ -115,7 +115,18 @@ braid adds nothing to `remote.origin.fetch`, so a plain `git fetch`, and an edit
 
 A session built on someone else's, such as a review, makes no commits, so it publishes when it ends. `/braid:push` publishes the current session at any time.
 
-**What leaves the machine.** Published copies hold ATXF records only. Native lines, reasoning, images, system messages and harness metadata stay in the store. braid redacts every remaining string with built-in rules for common credentials (cloud, GitHub, Anthropic, OpenAI, Slack, Stripe and npm keys, private keys, JWTs, passwords in URLs, and secret-looking assignments), and replaces your home directory with `~`. Matches become markers like `[REDACTED:aws-access-key]`, and each record lists what was removed in `ext.braid.redactions`. Running [gitleaks](https://github.com/gitleaks/gitleaks) and team rules in `.braid/redact.toml` are *planned*.
+**What leaves the machine.** Published copies hold ATXF records only. Native lines, reasoning, images, system messages and harness metadata stay in the store. braid redacts every remaining string with built-in rules for common credentials (cloud, GitHub, Anthropic, OpenAI, Slack, Stripe and npm keys, private keys, JWTs, passwords in URLs, and secret-looking assignments), and replaces home directories, of any user and machine (`/Users/<name>`, `/home/<name>`), with `~`. Matches become markers like `[REDACTED:aws-access-key]`, and each record lists what was removed in `ext.braid.redactions`.
+
+Teams add their own rules in `.braid/redact.toml`, which braid reads from the default branch only, and anyone can add personal ones in `~/.config/braid/redact.toml`:
+
+```toml
+terms = ["Acme Corp", "Project Falcon"]   # replaced in any case, as [REDACTED:term]
+patterns = ['CUST-\d{6}']                  # regular expressions, as [REDACTED:pattern]
+withhold = ["customers/**", "*.pem"]      # tool calls on these paths, and their results
+withhold-session = false                  # true: such a call withholds the whole session
+```
+
+`braid push --dry-run` shows what would be published: the records, the redactions per rule, the records withheld per cause, and where the rules came from. `publish = "off"` in `~/.config/braid/config.toml` keeps all of your sessions on your machine, whatever a repository says, and `braid init --publish off` writes a repository's config that way. Running [gitleaks](https://github.com/gitleaks/gitleaks) is *planned*.
 
 **Withholding.** Saying "don't publish the last hour" makes the agent mark those records withheld. braid keeps the list in the session's state, applies it to every later publish, and attaches the children of withheld records to their nearest published ancestor, so the published tree stays connected. Withheld records do not count in `↑`. `braid withhold --all` keeps a whole session private.
 

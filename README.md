@@ -74,7 +74,7 @@ The status line shows where your session stands:
 
 Asking in plain language works too: "pull in Bob's review but keep my jitter".
 
-**Privacy.** Published copies hold the conversation's messages and tool calls only. Reasoning, images and the harness's raw files stay on your machine, and common credentials are redacted before anything leaves it. Anyone who can read the repository can read its published sessions. See [Publishing](docs/design.md#publishing) and [Trust](docs/design.md#trust).
+**Privacy.** Published copies hold the conversation's messages and tool calls only. Reasoning, images and the harness's raw files stay on your machine, and common credentials are redacted before anything leaves it. Teams add terms, patterns and paths to withhold in `.braid/redact.toml`, `/braid:push` with a dry run shows what would go, and `publish = "off"` in `~/.config/braid/config.toml` keeps all of your sessions local. Anyone who can read the repository can read its published sessions. See [Publishing](docs/design.md#publishing) and [Trust](docs/design.md#trust).
 
 ## How it works
 

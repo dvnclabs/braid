@@ -22,12 +22,12 @@ const HELP = `braid ${VERSION}: version control for agent conversations
 
 Setup
   braid setup                 once per machine: the braid command and the status line
-  braid init [--no-git-hooks] once per repository: .braid/config.toml, and git hooks unless turned off
+  braid init [--no-git-hooks] [--publish off]   once per repository: .braid/config.toml, and git hooks unless turned off
 
 Everyday (inside an agent session; the session comes from $BRAID_SESSION)
   braid status                where this session stands, and the sessions around it
   braid commit -m "<message>" commit the conversation (git commits do this when git-hooks is on)
-  braid push                  publish this session (git push does this when git-hooks is on)
+  braid push [--dry-run]      publish this session (git push does this when git-hooks is on); --dry-run shows what would go
   braid fork [<id|name|pr:N>] start this new session from another; with no target, how to branch this one
   braid merge [<id|name|pr:N>]   show what another session has that this one lacks, for the agent to summarize
   braid merge --record <id> --instruction "<text>"   record a merge; summary on stdin
@@ -117,6 +117,8 @@ function main(argv: string[]): number {
       quiet: { type: "boolean" },
       force: { type: "boolean" },
       undo: { type: "boolean" },
+      "dry-run": { type: "boolean" },
+      publish: { type: "string" },
     },
   });
   const str = (k: string) => (typeof opts[k] === "string" ? (opts[k] as string) : undefined);
@@ -165,7 +167,9 @@ function main(argv: string[]): number {
     case "init": {
       const repo = needRepo();
       const gitHooks = opts["no-git-hooks"] === true ? false : opts["git-hooks"] === true ? true : undefined;
-      for (const note of init(repo, { gitHooks })) out(`braid: ${note}`);
+      const publishOpt = str("publish");
+      if (publishOpt !== undefined && publishOpt !== "on-push" && publishOpt !== "off") throw new Error('--publish takes "on-push" or "off"');
+      for (const note of init(repo, { gitHooks, publish: publishOpt })) out(`braid: ${note}`);
       return 0;
     }
     case "setup":
@@ -189,7 +193,20 @@ function main(argv: string[]): number {
       const repo = needRepo();
       const session = needSession(str("session"));
       save(repo, session);
-      for (const line of summarize([publish(repo, session, { remote: str("remote"), force: opts.force === true })])) out(line);
+      const r = publish(repo, session, { remote: str("remote"), force: opts.force === true, dryRun: opts["dry-run"] === true });
+      if (!opts["dry-run"]) {
+        for (const line of summarize([r])) out(line);
+        return 0;
+      }
+      const list = (m: Map<string, number>) => [...m].map(([k, n]) => `${k} ${n}`).join(", ") || "none";
+      const would = r.reason === "dry run" ? `would publish ${r.records} records` : `would not publish: ${r.reason}`;
+      out(`braid: dry run for ${session.slice(0, 8)}: ${would}`);
+      if (r.report) {
+        out(`  redacted: ${list(r.report.counts)}`);
+        out(`  withheld: ${list(r.report.withheld)}`);
+        out(`  rules: built in${r.report.sources.map((s) => `, ${s}`).join("")}`);
+        for (const p of r.report.problems) out(`  problem: ${p}`);
+      }
       return 0;
     }
     case "fetch": {

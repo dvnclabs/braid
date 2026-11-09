@@ -5,11 +5,9 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installHooks, uninstallHooks } from "./githooks.ts";
-import { ensureStore, readConfig, type Repo } from "./repo.ts";
+import { configDir, ensureStore, readConfig, userConfig, type Repo } from "./repo.ts";
 
-export function configDir(): string {
-  return join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "braid");
-}
+export { configDir };
 
 /** Absolute path of the running CLI script. */
 export function cliPath(): string {
@@ -41,15 +39,17 @@ const TEMPLATE = (publish: string, gitHooks: boolean) =>
   ].join("\n");
 
 /** Once per repository: `.braid/config.toml`, the store, and the git hooks when git-hooks is on. */
-export function init(repo: Repo, opts: { gitHooks?: boolean } = {}): string[] {
+export function init(repo: Repo, opts: { gitHooks?: boolean; publish?: "on-push" | "off" } = {}): string[] {
   const notes: string[] = [];
   const file = join(repo.top, ".braid", "config.toml");
   if (!existsSync(file)) {
-    const vis = visibility(repo);
-    const publish = vis === "PRIVATE" || vis === "INTERNAL" ? "on-push" : "off";
+    const chosen = opts.publish ?? userConfig().publish;
+    const vis = chosen ? undefined : visibility(repo);
+    const publish = chosen ?? (vis === "PRIVATE" || vis === "INTERNAL" ? "on-push" : "off");
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, TEMPLATE(publish, opts.gitHooks ?? true));
-    notes.push(`wrote .braid/config.toml (publish = "${publish}"${vis ? `, repository is ${vis.toLowerCase()}` : ", visibility unknown"})`);
+    const why = opts.publish ? "as asked" : chosen ? "your default in ~/.config/braid/config.toml" : vis ? `repository is ${vis.toLowerCase()}` : "visibility unknown";
+    notes.push(`wrote .braid/config.toml (publish = "${publish}", ${why})`);
     notes.push("commit it so teammates get braid too: git add .braid && git commit -m 'Set up braid'");
   } else if (opts.gitHooks !== undefined) {
     const text = readFileSync(file, "utf8");
