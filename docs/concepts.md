@@ -57,7 +57,7 @@ There are two kinds of projection:
 | **replay** | the same harness that wrote the records | exact: braid writes back the native records and the harness resumes the session |
 | **briefing** | any harness | a written summary of the path, injected as the first message of a new session |
 
-Replay is exact and only works within one harness. Briefing works everywhere and loses detail. braid chooses replay when it can and briefing otherwise. A user can force either one.
+braid uses replay when it can, because replay is exact, but replay only works within one harness. Otherwise it writes a briefing, which works in any harness and loses detail. A user can force either one.
 
 ## Operations
 
@@ -71,7 +71,7 @@ Replay is exact and only works within one harness. Briefing works everywhere and
 | **project** | renders a branch for a viewer and a target | for briefings |
 | **link** | points a record at another conversation, for subagents and chains of agents | no |
 
-Reconcile and merge both combine branches, at different levels. **Reconcile** works on structure: Alice's copy and Bob's copy of a conversation have both grown since they last synced, and reconcile produces one tree that contains both. It is deterministic and follows ATXF's reconciliation rules. **Merge** works on meaning: given two branches in that tree, it writes what branch B means for branch A and lists conflicts for a person to resolve. [operations.md](operations.md) describes merge in detail.
+Reconcile and merge both combine branches, at different levels. **Reconcile** handles structure. When Alice's copy and Bob's copy of a conversation have both grown since they last synced, reconcile produces one tree that contains both, deterministically, following ATXF's reconciliation rules. **Merge** works one level up, on what the branches say. Given two branches in that tree, it writes what branch B means for branch A and lists conflicts for a person to resolve. [operations.md](operations.md) describes merge in detail.
 
 ## Shapes this model covers
 

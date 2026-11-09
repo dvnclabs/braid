@@ -1,6 +1,6 @@
 # Pull request review
 
-The first use of braid is code review on teams that write code with agents. The author's conversation travels with the pull request. The reviewer reads a digest, questions the session when the digest raises a question, and sends a review branch back. The author merges that branch into their own conversation and continues with the review in context.
+The first use of braid is code review on teams that write code with agents. The author's conversation travels with the pull request. The reviewer reads a digest, asks the session about anything the digest leaves unclear, and sends a review branch back. The author merges that branch into their own conversation and continues with the review in context.
 
 ```
 author                                       reviewer
@@ -107,7 +107,7 @@ Three design rules:
 
 ### Skills used inside a conversation
 
-A session that relied on a skill depends on that skill's instructions. Loading the session elsewhere without the skill leaves the agent mid-task without the rules it was following. braid detects skill loads in transcripts (Claude Code records them as `Skill` tool calls) and notes each skill's name and content hash. On load, braid checks that the target has the same version, and otherwise includes the skill's text in the briefing.
+A session that relied on a skill depends on that skill's instructions. If the session is loaded somewhere the skill is missing, the agent ends up mid-task without the rules it was following. braid detects skill loads in transcripts (Claude Code records them as `Skill` tool calls) and notes each skill's name and content hash. On load, braid checks that the target has the same version, and otherwise includes the skill's text in the briefing.
 
 ## Forges
 

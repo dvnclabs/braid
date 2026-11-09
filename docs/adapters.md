@@ -23,7 +23,7 @@ adapter
   tool_kind(tool_name)  ->    read | edit | write | shell | search | web | subagent | other
 ```
 
-**Import reuses ATXF's converters.** ATXF already ships converters for Claude Code, Codex, Gemini CLI, OpenCode and Pi. A braid adapter adds what a converter lacks: finding sessions on disk, writing native files back for replay, and launching the harness.
+**Import reuses ATXF's converters.** ATXF ships converters for Claude Code, Codex, Gemini CLI, OpenCode and Pi. A braid adapter adds what a converter lacks: finding sessions on disk, writing native files back for replay, and launching the harness.
 
 ### Tool kinds
 
@@ -62,7 +62,7 @@ Tool names change between releases. Each adapter keeps its table in one place, w
 
 Gemini CLI, OpenCode and Pi can be imported through ATXF's converters from the first release. Loading into them uses briefings until someone writes their `export`. Cursor and others follow when there is demand.
 
-Replaying one harness's records inside a different harness means translating tool calls and record formats. braid leaves that out of its first versions and uses briefings across harnesses. Projects such as [casr](https://github.com/Dicklesworthstone/cross_agent_session_resumer) already convert between formats, and one of them could become an optional backend.
+Replaying one harness's records inside a different harness means translating tool calls and record formats. braid leaves that out of its first versions and uses briefings across harnesses. Projects such as [casr](https://github.com/Dicklesworthstone/cross_agent_session_resumer) convert between formats, and one of them could become an optional backend.
 
 ## LLM providers
 

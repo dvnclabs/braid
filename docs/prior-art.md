@@ -7,7 +7,7 @@ Surveyed in November 2026. Several projects cover parts of what braid needs, and
 | Project | What it does | Relation to braid |
 |---|---|---|
 | [Entire](https://docs.entire.io/overview) | Open-source CLI (MIT) that records agent sessions per commit, stores full transcripts in the repository under `refs/entire/checkpoints/`, adds an `Entire-Checkpoint` commit trailer, redacts secrets, and supports Claude Code, Codex, Cursor, Copilot CLI and others. A web viewer shows checkpoints next to their diff. | Closest in storage design. Its docs describe no fork, merge or cross-harness load. braid plans to import Entire checkpoints as a native source. |
-| [Traces](https://www.traces.com/docs) | Uploads a session from many harnesses and returns a shareable link; can follow a live session; has skills to share from inside an agent. | Hosted sharing. braid keeps conversations in the team's repository. |
+| [Traces](https://www.traces.com/docs) | Uploads a session from many harnesses and returns a shareable link; can follow a live session; has skills to share from inside an agent. | Hosted sharing. braid covers the same need from the team's repository. |
 | [Hugging Face Agent Traces](https://huggingface.co/docs/hub/agent-traces) | The Hub detects Claude Code, Codex and Pi session files in datasets and shows them in a trace viewer. Other harnesses can use its [Session Trace format](https://huggingface.co/docs/hub/session-traces-format). | Publishing traces as datasets. |
 | [SpecStory](https://specstory.com/learning/ai-coding/ai-coding-session-history) | Saves agent chat history into the project and recommends linking transcripts from pull requests. | The practice braid automates. |
 
@@ -16,7 +16,7 @@ Surveyed in November 2026. Several projects cover parts of what braid needs, and
 | Project | What it does | Relation to braid |
 |---|---|---|
 | [git-ai](https://github.com/acunniffe/git-ai) | Records which agent, model and session wrote each line, in git notes, and keeps attribution through rebases and squashes. | Line-level attribution. braid links whole conversations to commits and could read git-ai's data. |
-| [Agent Trace](https://agent-trace.dev/) | Draft specification from Cursor for linking code ranges to the conversations behind them, with support from Cognition, Cloudflare, Vercel and others. | Complementary. A braid conversation is a natural target for an Agent Trace record. |
+| [Agent Trace](https://agent-trace.dev/) | Draft specification from Cursor for linking code ranges to the conversations behind them, with support from Cognition, Cloudflare, Vercel and others. | Complementary. An Agent Trace record could point to a braid conversation. |
 
 ## Transcript formats
 
@@ -44,7 +44,7 @@ Surveyed in November 2026. Several projects cover parts of what braid needs, and
 | [GitChat](https://github.com/DrustZ/GitChat) | Branches a chat and rewires which branches feed the context of a new one. |
 | [ContextBranch](https://arxiv.org/pdf/2512.13914) | Paper that formalizes version-control semantics for LLM conversations. |
 
-These tools work on single-user chats. braid applies the same ideas to coding-agent sessions shared by a team.
+braid applies the ideas in these single-user chat tools to coding-agent sessions shared by a team.
 
 ## What braid adds
 

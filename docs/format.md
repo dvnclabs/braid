@@ -47,7 +47,7 @@ braid writes ATXF **0.1** and validates every file against the [published schema
 | subagent or linked conversation | `agent_link`, and `parent` in the child's header |
 | compaction, rewinds, context edits | kept as the ATXF converters produce them |
 
-`branch_summary` fits merges well. ATXF defines it as a summary of one branch, from `fromId` back to the common ancestor, carried into the branch that continues from `parentId`. A braid merge is that summary written to an instruction.
+`branch_summary` fits merges well. ATXF defines it as a summary of one branch, from `fromId` back to the common ancestor, carried into the branch that continues from `parentId`. In a braid merge, the model writes that summary following an instruction.
 
 ## The `ext.braid` fields
 
@@ -102,7 +102,7 @@ Here are a merge and a branch label from the [example](../examples/pr-review/con
 
 ### Moving to ATXF 0.2
 
-The ATXF 0.2 draft adds `actorId` and `userAgent` directly on record envelopes. When 0.2 is final and its reference libraries ship, braid will write those fields natively and keep reading `ext.braid.actor` from older files. ATXF 0.1 validators reject the 0.2 fields, which is why braid waits.
+The ATXF 0.2 draft adds `actorId` and `userAgent` directly on record envelopes. When 0.2 is final and its reference libraries ship, braid will write those fields natively and keep reading `ext.braid.actor` from older files. braid waits because ATXF 0.1 validators reject the 0.2 fields.
 
 ## Storage in git
 
@@ -138,4 +138,4 @@ GitHub shows trailers in commit messages, and its default squash-merge message k
 
 ## Reading from Entire
 
-Repositories that use [Entire](https://docs.entire.io/overview) already store full transcripts under `refs/entire/checkpoints/` and link them with an `Entire-Checkpoint` trailer. braid plans an importer that reads those checkpoints as its native source, so a team using Entire does not capture sessions twice.
+Repositories that use [Entire](https://docs.entire.io/overview) already store full transcripts under `refs/entire/checkpoints/` and link them with an `Entire-Checkpoint` trailer. braid plans an importer that reads those checkpoints as its native source, which saves a team using Entire from capturing sessions twice.

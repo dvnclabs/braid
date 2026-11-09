@@ -121,12 +121,12 @@ Every merge record stores its base, heads, instruction, strategy and model ([for
 
 ## Load
 
-`braid load` always works on a new branch named after the viewer, such as `bob/1`, so loading never changes what the author wrote.
+`braid load` always works on a new branch named after the viewer, such as `bob/1`. Loading never changes what the author wrote.
 
 **Replay** (same harness). The adapter rebuilds the native session file from `raw/`, rewrites absolute paths to the local checkout, places the file where the harness looks for sessions, and starts the harness's resume command.
 
 **Briefing** (any harness). braid projects the branch for the viewer and writes a briefing: the goal, decisions with their reasons, open questions, files touched, commands run and their results, and where the conversation stopped. It starts the harness with the briefing as the first message, or prints it with `--print`.
 
-**Repository drift.** The conversation records the commit it started from. When the local checkout has moved on, braid adds a summary of `git diff <commit>..HEAD` to the briefing, or as a user message in a replay, so the agent knows which files changed under it.
+**Repository drift.** The conversation records the commit it started from. When the local checkout has moved on, braid adds a summary of `git diff <commit>..HEAD` to the briefing, or as a user message in a replay. That way the agent knows which files changed under it.
 
 **Bringing new work back.** Records the harness writes after a load are imported into the viewer's branch, either by a harness hook at the end of the session (Claude Code's `SessionEnd`, for example) or with `braid import --into`.

@@ -6,15 +6,15 @@ Version control for agent conversations. braid saves the conversations you have 
 
 ## Why
 
-A pull request written with an agent arrives as a diff. The conversation behind it stays on the author's laptop: the request, the approaches the agent tried and dropped, the commands it ran, the places where it guessed. Reviewers reconstruct that context from the code. An author who returns to the branch a week later starts a fresh session. A teammate who takes over the branch starts from nothing.
+A pull request written with an agent arrives as a diff, and the conversation behind it stays on the author's laptop: the request, the approaches the agent tried and dropped, the commands it ran, the places where it guessed. Reviewers have to reconstruct that context from the code. When the author comes back to the branch a week later, they open a fresh session, and a teammate who takes the branch over gets none of it.
 
 braid keeps the conversation next to the code, in a form any harness can read:
 
 - **Save** a session from any supported harness to a folder or to your git repository.
 - **Share** it with everyone who already has access to the repository.
-- **Load** it into Claude Code, Codex or another harness, as an exact replay in the same harness or as a briefing in any harness.
+- **Load** it into Claude Code, Codex or another harness, as an exact replay in the harness that recorded it, or as a briefing anywhere.
 - **Fork** it at any point, and **merge** forks back with an instruction: `braid merge alice/jitter review/bob -p "keep my jitter, adopt the reviewer's time budget"`.
-- **Attach** it to a pull request. Reviewers get a digest and can question the session that wrote the code.
+- **Attach** it to a pull request. Reviewers get a digest and can ask questions of the session behind the code.
 
 ## A short tour
 
@@ -37,14 +37,14 @@ braid save pr:128 ./conversations/pr-128
 
 ## The model in one paragraph
 
-A conversation is a tree of records written by any number of participants: people, agents and tools. A fork is a branch of the tree. A **merge** asks an LLM to combine what the branches learned, following your instruction, and records the instruction, the model and the merge base next to the result. A **projection** renders the stored conversation for one participant in one harness: that participant's turns become `assistant` turns, and everyone else's become `user` turns labeled with the speaker. That is how one conversation moves between people, agents and harnesses. [docs/concepts.md](docs/concepts.md) has the details.
+A conversation is a tree of records written by any number of participants: people, agents and tools. A fork is a branch of the tree. A **merge** asks an LLM to combine what the branches learned, following your instruction, and records the instruction, the model and the merge base next to the result. A **projection** renders the stored conversation for one participant in one harness: that participant's turns become `assistant` turns, and everyone else's become `user` turns labeled with the speaker, which is what lets one conversation move between people, agents and harnesses. [docs/concepts.md](docs/concepts.md) has the details.
 
 ## Open formats underneath
 
 braid reuses existing formats and adds as little as possible on top.
 
 - **Native session files are the source of truth.** braid keeps the files your harness wrote (Claude Code JSONL, Codex rollouts) byte for byte.
-- **[ATXF](https://github.com/leostera/atxf)** (Agent Transcript Exchange Format) holds the conversation tree. It already models branches, rewinds, compaction, subagents and verbatim native records. braid stores participants and merge metadata in an `ext.braid` namespace.
+- **[ATXF](https://github.com/leostera/atxf)** (Agent Transcript Exchange Format) holds the conversation tree. It models branches, rewinds, compaction, subagents and verbatim native records. braid stores participants and merge metadata in an `ext.braid` namespace.
 - **[ATIF](https://docs.harborframework.com/agents/atif)** export is available for the Harbor, NVIDIA NeMo and Arize Phoenix tools.
 
 A conversation saved to a folder:

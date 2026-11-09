@@ -1,6 +1,6 @@
 # Privacy and redaction
 
-Agent transcripts hold more than code. They contain file contents, environment variables, command output, customer data pulled from logs, and remarks people type to an agent and would not say to a colleague. braid shares conversations only when the author asks, only with people who can already read the repository, and only after redaction and a preview.
+Besides code, agent transcripts contain file contents, environment variables, command output, customer data pulled from logs, and remarks people type to an agent and would not say to a colleague. braid shares a conversation only when the author asks, and only after redaction and a preview. Its audience is limited to people who can already read the repository.
 
 ## Defaults
 
@@ -11,7 +11,7 @@ Agent transcripts hold more than code. They contain file contents, environment v
 
 ## Who can read a conversation
 
-Conversations pushed to a repository live under `refs/braid/` in that repository, so they have the repository's access control. Anyone who can clone the repository can fetch its conversations. braid adds no separate hosting and no separate permissions.
+Conversations pushed to a repository live under its `refs/braid/` and inherit its access control, so anyone who can clone the repository can fetch them. braid does not host anything itself and has no permission system of its own.
 
 For a public repository this means published conversations are public. `braid push` warns when the remote is public and requires `--public` to continue.
 
