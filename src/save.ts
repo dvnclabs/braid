@@ -6,7 +6,9 @@ import { randomUUID } from "node:crypto";
 import { appendChunk, readAgents, readRecords } from "./chunks.ts";
 import { config, forEachRef, gitMaybe } from "./git.ts";
 import { lastTurn, withBraid, type Actor, type Rec } from "./records.ts";
-import { ensureStore, SESSION_REFS, storeRef, type Repo } from "./repo.ts";
+import { conversation } from "./load.ts";
+import { ensureStore, readConfig, SESSION_REFS, storeRef, type Repo } from "./repo.ts";
+import { replayedIds } from "./replay.ts";
 import { loadState, newState, saveState, withLock, type SessionState } from "./state.ts";
 import { intact, readWindow, START } from "./transcript.ts";
 import { VERSION } from "./version.ts";
@@ -94,6 +96,11 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
     let added = 0;
 
     const fresh = (native: Rec[]): Rec[] => {
+      if (replayed) {
+        return native
+          .filter((r) => !replayed.has(r.id))
+          .map((r) => (r.parentId && replayed.has(r.parentId) ? { ...r, parentId: replayed.get(r.parentId) } : r));
+      }
       if (source) return native.filter((r) => !source!.known.has(r.id));
       if (state.chunks === 0 && !state.last) return native;
       if (!rewritten && state.last) {
@@ -104,6 +111,9 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
     };
 
     const agents = collectAgents(repo, state, path);
+    // A replayed session's file starts with copies of the source's records, under uuids derived from their ids.
+    const replayed =
+      state.chunks === 0 && state.forkFrom?.replayed ? replayedIds(conversation(repo, state.forkFrom.conv, readConfig(repo).remote).values()) : undefined;
     let window = readWindow(path, cursor, session);
     if (window && state.chunks === 0 && !state.forkFrom) {
       source = forkSource(repo, session, window.records);

@@ -51,12 +51,24 @@ export function configDir(): string {
   return join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "braid");
 }
 
-/** The user's own defaults, from ~/.config/braid/config.toml. */
-export function userConfig(): { publish?: "on-push" | "off" } {
+/**
+ * The user's own defaults, from ~/.config/braid/config.toml: whether to
+ * publish at all, and path prefixes to rewrite when replaying a session from
+ * another machine, under [paths]:
+ *
+ *   publish = "off"
+ *   [paths]
+ *   "/Users/alice/dev" = "/home/alice/dev"
+ */
+export function userConfig(): { publish?: "on-push" | "off"; paths: [string, string][] } {
   const path = join(configDir(), "config.toml");
-  if (!existsSync(path)) return {};
-  const m = /^\s*publish\s*=\s*"(on-push|off)"/m.exec(readFileSync(path, "utf8"));
-  return m ? { publish: m[1] as "on-push" | "off" } : {};
+  if (!existsSync(path)) return { paths: [] };
+  const text = readFileSync(path, "utf8");
+  const top = text.split(/^\s*\[/m)[0] ?? "";
+  const publish = /^\s*publish\s*=\s*"(on-push|off)"/m.exec(top)?.[1] as "on-push" | "off" | undefined;
+  const section = /^\s*\[paths\]\s*$([\s\S]*?)(?=^\s*\[|$(?![\s\S]))/m.exec(text)?.[1] ?? "";
+  const paths = [...section.matchAll(/^\s*"([^"]+)"\s*=\s*"([^"]+)"/gm)].map((m) => [m[1]!, m[2]!] as [string, string]);
+  return { publish, paths };
 }
 
 /** Reads the few keys braid uses from `.braid/config.toml`, a flat `key = "value"` file. */

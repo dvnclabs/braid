@@ -1,6 +1,6 @@
 // Publishing: build a redacted copy of a session from the store and push it.
-import { readAgentChunks, readChunks, writeChunks } from "./chunks.ts";
-import { git, revParse, updateRef } from "./git.ts";
+import { readAgentChunks, readChunks, readRecords, writeChunks } from "./chunks.ts";
+import { git, gitMaybe, revParse, updateRef } from "./git.ts";
 import { redactValue, type Counts, type Rule } from "./redact.ts";
 import { loadRules, pathWithheld } from "./rules.ts";
 import { braidOf, isTurn, type Rec } from "./records.ts";
@@ -36,6 +36,8 @@ export interface PublishResult {
   records: number;
   redactions: number;
   reason?: string;
+  /** Records the remote copy has with different content: this machine's version was published. */
+  conflicts?: string[];
   /** What --dry-run reports: redactions per rule, withheld records per cause, and where the rules came from. */
   report?: { counts: Counts; withheld: Map<string, number>; sources: string[]; problems: string[] };
 }
@@ -118,13 +120,39 @@ export function publish(repo: Repo, session: string, opts: { remote?: string; fo
     if (opts.dryRun) return { ...result, records, redactions, reason: off ?? "dry run", report };
     const published = `${PUBLISHED_REFS}/${state.conv}/${session}`;
     const tracking = `${remoteRefs(remote)}/${state.conv}/${session}`;
-    const parent = revParse(tracking, { cwd: repo.top });
-    const commit = writeChunks(chunks, parent, `publish ${session}`, { cwd: repo.top }, agents);
-    if (!commit) return { ...result, records, redactions, reason: "up to date" };
-    git(["push", "--no-verify", "--quiet", `--force-with-lease=${published}:${parent ?? ""}`, remote, `${commit}:${published}`], {
-      cwd: repo.top,
-    });
-    updateRef(tracking, commit, parent, { cwd: repo.top });
-    return { session, pushed: true, records, redactions };
+    const localIds = new Set([...local.flat(), ...[...localAgents.values()].flat(2)].map((r) => r.id));
+    const mine = new Map(chunks.flat().map((r) => [r.id, r]));
+
+    // The same session can be saved on two machines. Records the remote copy has
+    // and this machine lacks are kept; a record both have with different content
+    // is reported, and this machine's version is published.
+    const attempt = (): PublishResult & { commit?: string; parent?: string } => {
+      const parent = revParse(tracking, { cwd: repo.top });
+      const theirs = parent ? readRecords(tracking, { cwd: repo.top }) : [];
+      const extra = theirs.filter((r) => !localIds.has(r.id));
+      const conflicts = theirs.filter((r) => mine.has(r.id) && stable(mine.get(r.id)) !== stable(r)).map((r) => r.id);
+      const commit = writeChunks(extra.length ? [...chunks, extra] : chunks, parent, `publish ${session}`, { cwd: repo.top }, agents);
+      return { ...result, records, redactions, conflicts, commit, parent };
+    };
+    let a = attempt();
+    for (let tries = 0; ; tries++) {
+      if (!a.commit) return { ...result, records, redactions, conflicts: a.conflicts, reason: "up to date" };
+      try {
+        git(["push", "--no-verify", "--quiet", `--force-with-lease=${published}:${a.parent ?? ""}`, remote, `${a.commit}:${published}`], { cwd: repo.top });
+        break;
+      } catch (err) {
+        if (tries > 0) throw err;
+        // Published from somewhere else since the last fetch: take that copy in and try again.
+        gitMaybe(["fetch", "--quiet", "--no-write-fetch-head", remote, `+${published}:${tracking}`], { cwd: repo.top });
+        a = attempt();
+      }
+    }
+    updateRef(tracking, a.commit, a.parent, { cwd: repo.top });
+    return { session, pushed: true, records, redactions, conflicts: a.conflicts };
   });
+}
+
+/** JSON with sorted keys, so two copies of a record compare by content. */
+function stable(value: unknown): string {
+  return JSON.stringify(value, (_k, v) => (v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v));
 }

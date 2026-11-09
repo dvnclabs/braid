@@ -1,7 +1,7 @@
 // End to end: two people, one remote. Alice works and pushes, Bob reviews,
 // Alice merges the review. Every step goes through the CLI and real git.
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { braid, clone, must, run, sandbox, Transcript } from "./helpers.ts";
@@ -439,4 +439,69 @@ test("team rules withhold paths and redact terms, and a dry run shows it first",
   t.user("more");
   braid(s.env, repo, ["hook", "stop"], hookIn);
   assert.match(braid(s.env, repo, ["push", "--session", ALICE]).stdout, /not published: publishing is off in ~\/\.config\/braid\/config\.toml/);
+});
+
+test("a session moves to another machine, and two machines publish one session", () => {
+  const s = sandbox();
+  const machineB = () => ({ ...s.env, HOME: join(s.root, "home-b"), XDG_CONFIG_HOME: join(s.root, "home-b", ".config"), CLAUDE_CONFIG_DIR: join(s.root, "home-b", ".claude") });
+  mkdirSync(join(s.root, "home-b"));
+  const a = clone(s, "laptop", "alice@example.com");
+  must(s.env, a, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, a, ["init", "--publish", "on-push"]);
+  must(s.env, a, "git", ["add", ".braid"]);
+  must(s.env, a, "git", ["commit", "--quiet", "-m", "Set up braid"]);
+  must(s.env, a, "git", ["push", "--quiet", "origin", "HEAD:main"]);
+
+  // On the laptop: a turn that names a file by its absolute path, published.
+  const t = new Transcript(s.root, ALICE);
+  const hookIn = (session: string, path: string, cwd: string) => JSON.stringify({ session_id: session, transcript_path: path, cwd });
+  braid(s.env, a, ["hook", "session-start"], hookIn(ALICE, t.path, a));
+  t.user("Fix the parser.");
+  t.toolCall("Read", { file_path: "/work/src/parser.ts" }, "toolu_p1", "export function parse() {}");
+  const head = t.assistant("Fixed /work/src/parser.ts.");
+  braid(s.env, a, ["hook", "stop"], hookIn(ALICE, t.path, a));
+  assert.match(braid(s.env, a, ["push", "--session", ALICE]).stdout, /published 5b0e2c1a/);
+
+  // On the server, in a checkout at another path: replay it as a new session.
+  const b = join(s.root, "server");
+  const envB = machineB();
+  must(envB, s.root, "git", ["clone", "--quiet", join(s.root, "remote.git"), b]);
+  must(envB, b, "git", ["config", "user.email", "alice@example.com"]);
+  braid(envB, b, ["fetch", "--all"]);
+  const r = braid(envB, b, ["replay", "5b0e2c1a", "--cwd", b]);
+  assert.equal(r.status, 0, r.stderr);
+  const newId = /wrote session (\S+)/.exec(r.stdout)![1]!;
+  const file = /to (\S+\.jsonl)/.exec(r.stdout)![1]!;
+  const real = realpathSync(b);
+  assert.ok(file.startsWith(join(s.root, "home-b", ".claude", "projects", real.replace(/[^A-Za-z0-9]/g, "-"))), "where claude --resume looks");
+  const native = readFileSync(file, "utf8");
+  assert.match(native, new RegExp(`${real.replace(/[/.-]/g, "\\$&")}/src/parser\\.ts`));
+  assert.doesNotMatch(native, /\/work\/src/);
+
+  // Claude Code resumes it and adds a turn; the first save keeps only the new turn, continuing Alice's head.
+  const last = JSON.parse(native.trim().split("\n").at(-1)!).uuid;
+  appendFileSync(file, JSON.stringify({ parentUuid: last, type: "user", message: { role: "user", content: "Now add tests." }, uuid: "b0000000-0000-4000-8000-000000000001", timestamp: "2026-11-09T12:00:00.000Z", sessionId: newId, cwd: real }) + "\n");
+  braid(envB, b, ["hook", "session-start"], hookIn(newId, file, b));
+  braid(envB, b, ["hook", "stop"], hookIn(newId, file, b));
+  const store = join(b, ".git", "braid", "store");
+  const saved = records(envB, b, store, `refs/sessions/${ALICE}/${newId}`).filter((x) => x.type === "message");
+  assert.deepEqual(saved.map((x) => x.content), ["Now add tests."], "the copied records are not saved again");
+  assert.equal(saved[0].parentId, head, "the replay continues from the source head");
+  assert.match(braid(envB, b, ["push", "--session", newId]).stdout, /published/);
+
+  // The same session id saved on both machines (a transcript copied by hand): both publish, and the remote keeps both sides.
+  const copy = join(s.root, "copy.jsonl");
+  writeFileSync(copy, readFileSync(t.path, "utf8"));
+  appendFileSync(copy, JSON.stringify({ parentUuid: head, type: "user", message: { role: "user", content: "From the server." }, uuid: "c0000000-0000-4000-8000-000000000001", timestamp: "2026-11-09T12:00:00.000Z", sessionId: ALICE, cwd: "/work" }) + "\n");
+  braid(envB, b, ["hook", "session-start"], hookIn(ALICE, copy, b));
+  braid(envB, b, ["hook", "stop"], hookIn(ALICE, copy, b));
+  t.user("From the laptop.");
+  braid(s.env, a, ["hook", "stop"], hookIn(ALICE, t.path, a));
+  const pushB = braid(envB, b, ["push", "--session", ALICE]);
+  assert.match(pushB.stdout, /published 5b0e2c1a/, pushB.stderr);
+  const pushA = braid(s.env, a, ["push", "--session", ALICE]);
+  assert.match(pushA.stdout, /published 5b0e2c1a/, pushA.stderr);
+  const remote = records(s.env, s.root, join(s.root, "remote.git"), `refs/braid/sessions/${ALICE}/${ALICE}`);
+  const texts = remote.filter((x) => x.role === "user").map((x) => x.content);
+  assert.ok(texts.includes("From the server.") && texts.includes("From the laptop."), JSON.stringify(texts));
 });

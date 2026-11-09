@@ -35,7 +35,7 @@ export interface SessionState {
   /** Id of the first message, which a fork's transcript shares with the session it was forked from. */
   first?: string;
   /** A session this one forks from, set by `braid fork` before the first save. */
-  forkFrom?: { session: string; conv: string; head: string; actor?: string };
+  forkFrom?: { session: string; conv: string; head: string; actor?: string; replayed?: boolean };
   pendingMerge?: PendingMerge;
   /** Native records whose parent is `from` continue from the merge record `to`. */
   reparent?: { from: string; to: string };

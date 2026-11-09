@@ -8,6 +8,7 @@ import { postCommit, postRewrite, prePush, prepareCommitMsg } from "./githooks.t
 import { sessionEnd, sessionStart, stop } from "./hooks.ts";
 import { allSessions, briefing, markFork, resolve, type Briefing } from "./load.ts";
 import { context, pick, record } from "./merge.ts";
+import { replay } from "./replay.ts";
 import { publish, type PublishResult } from "./publish.ts";
 import { braidOf, describe, isTurn, type Rec } from "./records.ts";
 import { findRepo, isEnabled, readConfig, storeRef, type Repo } from "./repo.ts";
@@ -36,6 +37,7 @@ Everyday (inside an agent session; the session comes from $BRAID_SESSION)
 
 Other
   braid show <id|name|pr:N>   read a session as a briefing, without linking to it
+  braid replay <id> [--cwd <path>]   write a session out as a new Claude Code session to resume, here or on another machine
   braid sessions              every session braid can see in this repository
   braid log [<id>]            the turns and commits of a session
   braid fetch [--all]         fetch published sessions
@@ -72,11 +74,14 @@ function needSession(flag: string | undefined): string {
 }
 
 function summarize(results: PublishResult[]): string[] {
-  return results.map((r) =>
+  return results.flatMap((r) => [
     r.pushed
       ? `braid: published ${r.session.slice(0, 8)}, ${r.records} records${r.redactions ? `, ${r.redactions} secrets redacted` : ""}`
       : `braid: ${r.session.slice(0, 8)} not published: ${r.reason}`,
-  );
+    ...(r.conflicts?.length
+      ? [`braid: ${r.conflicts.length} records of ${r.session.slice(0, 8)} differ from the copy published from another machine; this machine's were kept: ${r.conflicts.slice(0, 3).join(", ")}`]
+      : []),
+  ]);
 }
 
 /** One line per subagent of a session: its id, what it was asked to do, and its size. */
@@ -119,6 +124,7 @@ function main(argv: string[]): number {
       undo: { type: "boolean" },
       "dry-run": { type: "boolean" },
       publish: { type: "string" },
+      cwd: { type: "string" },
     },
   });
   const str = (k: string) => (typeof opts[k] === "string" ? (opts[k] as string) : undefined);
@@ -290,6 +296,17 @@ function main(argv: string[]): number {
         markFork(repo, current, from);
         out(`braid: this session continues from ${from.found.session.slice(0, 8)} (${from.head.slice(0, 12)})`);
       }
+      return 0;
+    }
+    case "replay": {
+      const repo = needRepo();
+      const remote = str("remote") ?? readConfig(repo).remote;
+      if (!args[0]) throw new Error("usage: braid replay <id|name> [--cwd <path>]");
+      const found = resolve(repo, args[0], remote);
+      if (found.length !== 1) throw new Error(found.length ? `${args[0]} matches ${found.length} sessions; name one` : `no session matches ${args[0]}; try braid fetch --all`);
+      const r = replay(repo, found[0]!, remote, { cwd: str("cwd") });
+      out(`braid: wrote session ${r.session} (${r.records} lines) to ${r.file}`);
+      out(`braid: resume it from ${r.cwd} with: claude --resume ${r.session}`);
       return 0;
     }
     case "merge": {
