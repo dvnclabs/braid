@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync7, readFileSync as readFileSync7 } from "node:fs";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync7, readFileSync as readFileSync6 } from "node:fs";
 import { join as join9 } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -758,10 +758,14 @@ function markFork(repo, current, b) {
 }
 
 // src/save.ts
-import { existsSync as existsSync4, readdirSync, readFileSync as readFileSync4 } from "node:fs";
+import { existsSync as existsSync4, readdirSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join as join5 } from "node:path";
 import { randomUUID } from "node:crypto";
+
+// src/transcript.ts
+import { createHash as createHash2 } from "node:crypto";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 
 // node_modules/@leostera/atxf/dist/types.js
 var TREE_TYPES = /* @__PURE__ */ new Set([
@@ -1085,17 +1089,17 @@ var TranscriptHasher = class {
   }
   /** Hash the next record in file order. A seal is checked against the records before it. */
   push(record2) {
-    const hash2 = hashRecord(record2, this.transcriptHash, (id) => this.hashes.get(id));
+    const hash3 = hashRecord(record2, this.transcriptHash, (id) => this.hashes.get(id));
     if (record2.type !== "seal") {
       for (const id of Object.values(referencesOf(record2)))
         if (id !== null && id !== void 0)
           this.referenced.add(id);
       this.dagIds.push(record2.id);
     }
-    this.hashes.set(record2.id, hash2);
-    this.chain = chainStep(this.chain, hash2);
+    this.hashes.set(record2.id, hash3);
+    this.chain = chainStep(this.chain, hash3);
     this.count += 1;
-    return { ...record2, hash: hash2 };
+    return { ...record2, hash: hash3 };
   }
   /** The commitment a `seal` record appended now would carry. */
   commitment() {
@@ -1736,6 +1740,96 @@ var carrier = {
 };
 var claudeCode = defineConverter({ agent: AGENT, format: FORMAT, framing: jsonl, decode, encode, carrier });
 
+// src/transcript.ts
+var START = { offset: 0, lines: 0, mark: "" };
+var OVERLAP = 2 * 1024 * 1024;
+var MAX_WINDOW = 16 * 1024 * 1024;
+var NL = 10;
+function readAt(fd, start, length) {
+  const buf = Buffer.alloc(length);
+  let n = 0;
+  while (n < length) {
+    const r = readSync(fd, buf, n, length - n, start + n);
+    if (r === 0) break;
+    n += r;
+  }
+  return buf.subarray(0, n);
+}
+function newlines(buf, from, to) {
+  let n = 0;
+  for (let i = buf.indexOf(NL, from); i !== -1 && i < to; i = buf.indexOf(NL, i + 1)) n++;
+  return n;
+}
+var hash = (buf) => createHash2("sha256").update(buf).digest("base64");
+function intact(path2, cursor) {
+  if (cursor.offset === 0) return true;
+  const fd = openSync(path2, "r");
+  try {
+    if (fstatSync(fd).size < cursor.offset) return false;
+    const start = lineAt(fd, cursor.offset - 1);
+    return hash(readAt(fd, start, cursor.offset - start)) === cursor.mark;
+  } finally {
+    closeSync(fd);
+  }
+}
+function renumber(records, base, session) {
+  const tag = session.slice(0, 8);
+  const fix = (v) => {
+    const m = typeof v === "string" ? /^claude-line-(\d+)(.*)$/.exec(v) : null;
+    return m ? `claude-line-${Number(m[1]) + base}${m[2]}@${tag}` : v;
+  };
+  return records.map((r) => {
+    const out = { ...r, id: fix(r.id) };
+    for (const key of ["parentId", "targetId", "fromId"]) if (key in r) out[key] = fix(r[key]);
+    const parentUuid = r.native?.records?.[0]?.parentUuid;
+    if (out.parentId === null && typeof parentUuid === "string" && base > 0) out.parentId = parentUuid;
+    return out;
+  });
+}
+function lineAt(fd, pos) {
+  const block = 64 * 1024;
+  for (let end = pos; end > 0; ) {
+    const start = Math.max(0, end - block);
+    const i = readAt(fd, start, end - start).lastIndexOf(NL);
+    if (i !== -1) return start + i + 1;
+    end = start;
+  }
+  return 0;
+}
+function lastLine(buf, end) {
+  return end < 2 ? 0 : buf.lastIndexOf(NL, end - 2) + 1;
+}
+function readWindow(path2, cursor, session, limits = { maxBytes: MAX_WINDOW, overlap: OVERLAP }) {
+  const fd = openSync(path2, "r");
+  try {
+    const size = fstatSync(fd).size;
+    if (size <= cursor.offset) return void 0;
+    const start = lineAt(fd, Math.max(0, cursor.offset - Math.max(1, limits.overlap)));
+    let end = Math.min(size, cursor.offset + limits.maxBytes);
+    let buf = readAt(fd, start, end - start);
+    while (start + buf.lastIndexOf(NL) + 1 <= cursor.offset && end < size) {
+      end = Math.min(size, end + limits.maxBytes);
+      buf = readAt(fd, start, end - start);
+    }
+    const used = buf.lastIndexOf(NL) + 1;
+    if (start + used <= cursor.offset) return void 0;
+    const base = cursor.lines - newlines(buf, 0, cursor.offset - start);
+    const t = claudeCode.toAtxf(buf.toString("utf8", 0, used), { integrity: false });
+    return {
+      records: renumber(t.records, base, session),
+      header: t.header,
+      cursor: {
+        offset: start + used,
+        lines: base + newlines(buf, 0, used),
+        mark: hash(buf.subarray(lastLine(buf, used), used))
+      },
+      more: end < size
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 // src/version.ts
 var VERSION = "0.1.0";
 
@@ -1765,15 +1859,6 @@ function header(h, session) {
     ext: { braid: { version: 1 } }
   };
 }
-function scoped(records, session) {
-  const tag = session.slice(0, 8);
-  const fix = (v) => typeof v === "string" && v.startsWith("claude-line-") ? `${v}@${tag}` : v;
-  return records.map((r) => {
-    const out = { ...r, id: fix(r.id) };
-    for (const key of ["parentId", "targetId", "fromId"]) if (key in r) out[key] = fix(r[key]);
-    return out;
-  });
-}
 function forkSource(repo, session, native) {
   const firstMessage = native.find((r) => r.type === "message")?.id;
   const dir = join5(repo.dir, "sessions");
@@ -1795,84 +1880,114 @@ function save(repo, session, transcript, opts = {}) {
   return withLock(repo, `save-${session}`, () => {
     const state = loadState(repo, session) ?? newState(session, transcript);
     if (transcript) state.transcript = transcript;
-    if (!state.transcript || !existsSync4(state.transcript)) {
+    const path2 = state.transcript;
+    if (!path2 || !existsSync4(path2)) {
       if (opts.commit !== void 0) throw new Error("this session is not saved yet: braid saves sessions that start after it is set up");
       return { added: 0, state };
     }
-    const t = claudeCode.toAtxf(readFileSync4(state.transcript, "utf8"), { integrity: false });
-    const native = scoped(t.records, session);
-    const first = state.chunks === 0;
-    let fresh;
-    const source = first && !state.forkFrom ? forkSource(repo, session, native) : void 0;
-    if (source) {
-      state.conv = source.conv;
-      fresh = native.filter((r) => !source.known.has(r.id));
-    } else {
-      fresh = freshRecords(repo, state, native);
-    }
-    state.first ??= native.find((r) => r.type === "message")?.id;
-    const codeCommits = state.commits ?? [];
-    if (fresh.length === 0 && !state.pendingMerge && codeCommits.length === 0 && opts.commit === void 0) return { added: 0, state };
-    if (first && state.forkFrom) state.conv = state.forkFrom.conv;
-    for (const r of fresh) {
-      state.userAgent = nativeVersion(r) ? `claude-code/${nativeVersion(r)}` : state.userAgent;
-      state.model = modelOf(r) ?? state.model;
-    }
-    const actor = { actorId: actorId(repo), userAgent: state.userAgent ?? "claude-code" };
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const out = [];
-    if (first && state.conv === session) out.push(header(t.header, session));
-    for (const r of fresh) {
-      let rec = { ...r };
-      if (first && state.forkFrom && rec.parentId == null) rec.parentId = state.forkFrom.head;
-      if (state.reparent && rec.parentId === state.reparent.from) rec.parentId = state.reparent.to;
-      rec = withBraid(rec, { actor, session });
-      if (state.pendingMerge) rec = withBraid(rec, { partOf: state.pendingMerge.id });
-      out.push(rec);
-    }
-    const lastNative = fresh.at(-1)?.id ?? state.last ?? state.head ?? null;
-    if (first && state.forkFrom?.actor && state.forkFrom.actor !== actor.actorId) {
-      const target2 = fresh.find((r) => r.type === "message")?.id;
-      if (target2) {
-        out.push({
-          type: "label",
-          id: `braid-label-${randomUUID()}`,
-          time: now,
-          targetId: target2,
-          label: `review/${actor.actorId.split("@")[0]}`,
-          ext: { braid: { actor, session } }
-        });
-        state.review = true;
+    const rewritten = state.cursor ? !intact(path2, state.cursor) : state.chunks > 0;
+    let cursor = rewritten || !state.cursor ? START : state.cursor;
+    let saved;
+    const savedIds = () => saved ??= new Set(readRecords(storeRef(state.conv, session), { gitDir: repo.store }).map((r) => r.id));
+    let source;
+    let added = 0;
+    const fresh = (native) => {
+      if (source) return native.filter((r) => !source.known.has(r.id));
+      if (state.chunks === 0 && !state.last) return native;
+      if (!rewritten && state.last) {
+        const i = native.findIndex((r) => r.id === state.last);
+        if (i >= 0) return native.slice(i + 1);
       }
+      return native.filter((r) => !savedIds().has(r.id));
+    };
+    let window = readWindow(path2, cursor, session);
+    if (window && state.chunks === 0 && !state.forkFrom) {
+      source = forkSource(repo, session, window.records);
+      if (source) state.conv = source.conv;
     }
-    delete state.forkFrom;
-    if (state.pendingMerge && lastNative) {
-      const pm = state.pendingMerge;
+    for (; ; ) {
+      const records = window ? fresh(window.records) : [];
+      for (const r of records) saved?.add(r.id);
+      const final = !window?.more;
+      state.first ??= window?.records.find((r) => r.type === "message")?.id;
+      const pending = final && (state.pendingMerge || (state.commits ?? []).length > 0 || opts.commit !== void 0);
+      if (records.length > 0 || pending) added += writeChunk(repo, state, records, window?.header, final, opts);
+      if (window) cursor = window.cursor;
+      state.cursor = cursor;
+      if (final) break;
+      window = readWindow(path2, cursor, session);
+      if (!window) break;
+    }
+    saveState(repo, state);
+    if (state.chunks > 0 && state.chunks % 50 === 0) gitMaybe(["gc", "--auto", "--quiet"], { gitDir: repo.store });
+    return { added, state };
+  });
+}
+function writeChunk(repo, state, fresh, nativeHeader, final, opts) {
+  const session = state.session;
+  const first = state.chunks === 0;
+  if (first && state.forkFrom) state.conv = state.forkFrom.conv;
+  for (const r of fresh) {
+    state.userAgent = nativeVersion(r) ? `claude-code/${nativeVersion(r)}` : state.userAgent;
+    state.model = modelOf(r) ?? state.model;
+  }
+  const actor = { actorId: actorId(repo), userAgent: state.userAgent ?? "claude-code" };
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const out = [];
+  if (first && state.conv === session) out.push(header(nativeHeader ?? {}, session));
+  for (const r of fresh) {
+    let rec = { ...r };
+    if (first && state.forkFrom && rec.parentId == null) rec.parentId = state.forkFrom.head;
+    if (state.reparent && rec.parentId === state.reparent.from) rec.parentId = state.reparent.to;
+    rec = withBraid(rec, { actor, session });
+    if (state.pendingMerge) rec = withBraid(rec, { partOf: state.pendingMerge.id });
+    out.push(rec);
+  }
+  const lastNative = fresh.at(-1)?.id ?? state.last ?? state.head ?? null;
+  if (first && state.forkFrom?.actor && state.forkFrom.actor !== actor.actorId) {
+    const target = fresh.find((r) => r.type === "message")?.id;
+    if (target) {
       out.push({
-        type: "branch_summary",
-        id: pm.id,
-        parentId: lastNative,
+        type: "label",
+        id: `braid-label-${randomUUID()}`,
         time: now,
-        fromId: pm.fromHead,
-        summary: pm.summary,
-        ext: {
-          braid: {
-            actor: { actorId: actor.actorId, userAgent: `${actor.userAgent} braid/${VERSION}` },
-            session,
-            merge: {
-              base: pm.base,
-              heads: [lastNative, pm.fromHead],
-              instruction: pm.instruction,
-              strategy: pm.strategy,
-              model: state.model ?? "unknown",
-              conflicts: []
-            }
+        targetId: target,
+        label: `review/${actor.actorId.split("@")[0]}`,
+        ext: { braid: { actor, session } }
+      });
+      state.review = true;
+    }
+  }
+  delete state.forkFrom;
+  const codeCommits = final ? state.commits ?? [] : [];
+  if (final && state.pendingMerge && lastNative) {
+    const pm = state.pendingMerge;
+    out.push({
+      type: "branch_summary",
+      id: pm.id,
+      parentId: lastNative,
+      time: now,
+      fromId: pm.fromHead,
+      summary: pm.summary,
+      ext: {
+        braid: {
+          actor: { actorId: actor.actorId, userAgent: `${actor.userAgent} braid/${VERSION}` },
+          session,
+          merge: {
+            base: pm.base,
+            heads: [lastNative, pm.fromHead],
+            instruction: pm.instruction,
+            strategy: pm.strategy,
+            model: state.model ?? "unknown",
+            conflicts: []
           }
         }
-      });
-      state.reparent = { from: lastNative, to: pm.id };
-      delete state.pendingMerge;
-    }
+      }
+    });
+    state.reparent = { from: lastNative, to: pm.id };
+    delete state.pendingMerge;
+  }
+  if (final) {
     const target = lastTurn(out) ?? state.head;
     const commits = codeCommits.map((sha) => ({ sha, message: gitMaybe(["log", "-1", "--format=%s", sha], { cwd: repo.top })?.trim() ?? "" }));
     if (opts.commit !== void 0) commits.push({ sha: "", message: opts.commit });
@@ -1887,23 +2002,15 @@ function save(repo, session, transcript, opts = {}) {
         ext: { braid: { actor, session, commit: c.sha ? { sha: c.sha } : {} } }
       });
     }
-    const head = gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim();
-    appendChunk(storeRef(state.conv, session), out, { time: now, head, commits: codeCommits }, { gitDir: repo.store });
-    state.last = fresh.at(-1)?.id ?? state.last;
-    state.head = lastTurn(out) ?? state.head;
-    state.chunks += 1;
-    state.commits = [];
-    saveState(repo, state);
-    if (state.chunks % 50 === 0) gitMaybe(["gc", "--auto", "--quiet"], { gitDir: repo.store });
-    return { added: out.length, state };
-  });
-}
-function freshRecords(repo, state, native) {
-  if (!state.last) return native;
-  const i = native.findIndex((r) => r.id === state.last);
-  if (i >= 0) return native.slice(i + 1);
-  const saved = new Set(readRecords(storeRef(state.conv, state.session), { gitDir: repo.store }).map((r) => r.id));
-  return native.filter((r) => !saved.has(r.id));
+  }
+  if (out.length === 0) return 0;
+  const head = gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim();
+  appendChunk(storeRef(state.conv, session), out, { time: now, head, commits: codeCommits }, { gitDir: repo.store });
+  state.last = fresh.at(-1)?.id ?? state.last;
+  state.head = lastTurn(out) ?? state.head;
+  state.chunks += 1;
+  if (final) state.commits = [];
+  return out.length;
 }
 function register(repo, session, transcript) {
   ensureStore(repo);
@@ -1915,7 +2022,7 @@ function register(repo, session, transcript) {
 
 // src/setup.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { chmodSync as chmodSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { dirname, join as join6, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1954,7 +2061,7 @@ function init(repo, opts = {}) {
     notes.push(`wrote .braid/config.toml (publish = "${publish2}"${vis ? `, repository is ${vis.toLowerCase()}` : ", visibility unknown"})`);
     notes.push("commit it so teammates get braid too: git add .braid && git commit -m 'Set up braid'");
   } else if (opts.gitHooks !== void 0) {
-    const text = readFileSync5(file, "utf8");
+    const text = readFileSync4(file, "utf8");
     const line = `git-hooks = ${opts.gitHooks}`;
     writeFileSync4(file, /^git-hooks\s*=.*$/m.test(text) ? text.replace(/^git-hooks\s*=.*$/m, line) : `${line}
 ${text}`);
@@ -1978,10 +2085,10 @@ function setup(opts = {}) {
   const notes = [];
   const settingsFile = settingsPath();
   const saved = join6(configDir(), "statusline.json");
-  const settings = existsSync5(settingsFile) ? JSON.parse(readFileSync5(settingsFile, "utf8")) : {};
+  const settings = existsSync5(settingsFile) ? JSON.parse(readFileSync4(settingsFile, "utf8")) : {};
   const current = settings.statusLine;
   if (opts.undo) {
-    const prev = existsSync5(saved) ? JSON.parse(readFileSync5(saved, "utf8")) : {};
+    const prev = existsSync5(saved) ? JSON.parse(readFileSync4(saved, "utf8")) : {};
     if (prev.previous) settings.statusLine = { type: "command", command: prev.previous, ...prev.refreshInterval ? { refreshInterval: prev.refreshInterval } : {} };
     else delete settings.statusLine;
     writeFileSync4(settingsFile, JSON.stringify(settings, null, 2) + "\n");
@@ -2138,14 +2245,14 @@ function record(repo, session, chosen, opts) {
 
 // src/statusline.ts
 import { spawn as spawn2, spawnSync as spawnSync4 } from "node:child_process";
-import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync6, statSync as statSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { createHash as createHash3 } from "node:crypto";
+import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync5, statSync as statSync3, writeFileSync as writeFileSync5 } from "node:fs";
 import { join as join8 } from "node:path";
-var hash = (s) => createHash2("sha1").update(s).digest("hex").slice(0, 16);
+var hash2 = (s) => createHash3("sha1").update(s).digest("hex").slice(0, 16);
 function previous(stdin) {
   const file = join8(configDir(), "statusline.json");
   if (!existsSync6(file)) return "";
-  const { previous: previous2 } = JSON.parse(readFileSync6(file, "utf8"));
+  const { previous: previous2 } = JSON.parse(readFileSync5(file, "utf8"));
   if (!previous2) return "";
   const r = spawnSync4("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
   return (r.stdout ?? "").trimEnd();
@@ -2156,14 +2263,14 @@ function pullRequest(repo) {
   if (!branch) return "";
   const dir = join8(repo.dir, "cache");
   mkdirSync6(dir, { recursive: true });
-  const file = join8(dir, `pr-${hash(branch)}`);
+  const file = join8(dir, `pr-${hash2(branch)}`);
   let fresh = false;
   try {
     fresh = Date.now() - statSync3(file).mtimeMs < 5 * 6e4;
   } catch {
   }
   if (!fresh) {
-    writeFileSync5(file, existsSync6(file) ? readFileSync6(file) : "");
+    writeFileSync5(file, existsSync6(file) ? readFileSync5(file) : "");
     const tmp = `${file}.${process.pid}`;
     spawn2("sh", ["-c", 'gh pr view --json number -q .number > "$T" 2>/dev/null; mv "$T" "$F"'], {
       cwd: repo.top,
@@ -2172,13 +2279,13 @@ function pullRequest(repo) {
       stdio: "ignore"
     }).unref();
   }
-  const n = readFileSync6(file, "utf8").trim();
+  const n = readFileSync5(file, "utf8").trim();
   return /^\d{1,7}$/.test(n) ? `#${n}` : "";
 }
 function braidPart(repo, session, remote) {
   const conv = convOf(repo, session);
   const statePath = join8(repo.dir, "sessions", `${session}.json`);
-  const key = hash(
+  const key = hash2(
     [
       session,
       isEnabled(repo),
@@ -2190,7 +2297,7 @@ function braidPart(repo, session, remote) {
     ].join("\n")
   );
   const file = join8(repo.dir, "cache", `status-${key}`);
-  if (existsSync6(file)) return readFileSync6(file, "utf8");
+  if (existsSync6(file)) return readFileSync5(file, "utf8");
   const text = render(computeStatus(repo, session, remote));
   mkdirSync6(join8(repo.dir, "cache"), { recursive: true });
   writeFileSync5(file, text);
@@ -2249,7 +2356,7 @@ Other
 `;
 function readStdin() {
   try {
-    return readFileSync7(0, "utf8");
+    return readFileSync6(0, "utf8");
   } catch {
     return "";
   }

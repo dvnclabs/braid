@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Repo } from "./repo.ts";
+import type { Cursor } from "./transcript.ts";
 
 export interface PendingMerge {
   id: string;
@@ -19,6 +20,8 @@ export interface SessionState {
   conv: string;
   harness: "claude-code";
   transcript?: string;
+  /** Where the previous save stopped reading the transcript. */
+  cursor?: Cursor;
   /** Id of the last native record saved, so the next save starts after it. */
   last?: string;
   /** Id of the newest record of this session in the store. */

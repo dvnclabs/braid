@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { appendFileSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { publishedChunks } from "../src/publish.ts";
 import { parseJsonl, type Rec } from "../src/records.ts";
 import { redactString } from "../src/redact.ts";
 import { cleanName, render, uncovered, type Status } from "../src/status.ts";
+import { intact, readWindow, START } from "../src/transcript.ts";
+import { Transcript } from "./helpers.ts";
 
 const example = parseJsonl(readFileSync(join(import.meta.dirname, "..", "examples", "pr-review", "conversation.atxf.jsonl"), "utf8"));
 const ids = (...list: string[]) => example.filter((r) => list.includes(r.id));
@@ -76,4 +78,38 @@ test("published copies drop withheld and unpublished records and keep the tree c
   assert.equal(out.find((r) => r.id === "a3")!.parentId, "a2", "withheld records are skipped over");
   assert.equal(out.find((r) => r.id === "a3")!.native, undefined);
   assert.equal(counts.get("aws-access-key"), 1);
+});
+
+test("reading a transcript in windows gives the records of reading it whole", () => {
+  const dir = mkdtempSync(join(tmpdir(), "braid-window-"));
+  const session = "5b0e2c1a-7f3d-4c2e-9a61-0d8e4b2f6c13";
+  const t = new Transcript(dir, session);
+  for (let i = 0; i < 12; i++) {
+    t.user(`step ${i} ${"x".repeat(i * 40)}`);
+    appendFileSync(t.path, JSON.stringify({ type: "queue-operation", operation: "enqueue", sessionId: session }) + "\n");
+    t.assistant(`done ${i}`);
+  }
+  const whole = readWindow(t.path, START, session)!;
+  assert.equal(whole.more, false);
+
+  // Small windows with a small overlap: records cross every boundary.
+  const pieces: Rec[] = [];
+  let cursor = START;
+  for (let w = readWindow(t.path, cursor, session, { maxBytes: 700, overlap: 300 }); w; w = readWindow(t.path, cursor, session, { maxBytes: 700, overlap: 300 })) {
+    const seen = new Set(pieces.map((r) => r.id));
+    pieces.push(...w.records.filter((r) => !seen.has(r.id)));
+    cursor = w.cursor;
+  }
+  const shape = (rs: Rec[]) => rs.map((r) => `${r.type}:${r.id}<${r.parentId ?? ""}`);
+  assert.deepEqual(shape(pieces), shape(whole.records));
+  assert.ok(whole.records.some((r) => r.id === `claude-line-35@5b0e2c1a`), "line ids count lines of the whole file");
+  assert.equal(cursor.offset, statSync(t.path).size);
+  assert.equal(intact(t.path, cursor), true);
+
+  // A rewritten file no longer matches the cursor.
+  const text = readFileSync(t.path, "utf8");
+  writeFileSync(t.path, text.replace("done 11", "done XI"));
+  assert.equal(intact(t.path, cursor), false);
+  writeFileSync(t.path, text.slice(0, 100));
+  assert.equal(intact(t.path, cursor), false);
 });
