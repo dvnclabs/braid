@@ -23,21 +23,21 @@ braid init
 git add .braid && git commit -m "Set up braid"
 ```
 
-`braid init` turns publishing on for private repositories and leaves it off for public ones. Teammates who have the plugin need nothing more: braid sets up their clone the first time their agent opens it.
+`braid init` turns publishing on for private repositories and leaves it off for public ones, and installs git hooks so that git does the work: each commit the agent makes commits its conversation, and `git push` publishes it. `braid init --no-git-hooks` leaves git alone; you then use `/braid:commit` and `/braid:push`. Teammates who have the plugin need nothing more: braid sets up their clone the first time their agent opens it.
 
 ## Use
 
 Work with Claude Code and use git as usual:
 
 ```sh
-git commit -m "Retry webhook deliveries on 5xx"   # made by the agent: links its session
-git push                                          # publishes that session, redacted
+git commit -m "Retry webhook deliveries on 5xx"   # made by the agent: commits its conversation too
+git push                                          # publishes that conversation, redacted
 ```
 
 The status line shows where your session stands:
 
 ```
-5b0e2c1a · #128 · ↑4 · ↓ review/bob +5 → /braid:sync
+5b0e2c1a · #128 · ↑4 · ↓ review/bob +5 → /braid:merge
 ```
 
 | | |
@@ -45,8 +45,8 @@ The status line shows where your session stands:
 | `5b0e2c1a` | this session |
 | `#128` | the pull request of this branch |
 | `↑4` | 4 records not published yet |
-| `↓ review/bob +5` | a session built on yours has 5 records you have not merged |
-| `local` | saved here only: no commit names this session yet |
+| `↓ review/bob +5` | a session built on yours, such as a review or a branch, has 5 records you have not merged |
+| `local` | saved here only, never committed |
 | `✓` | everything published, nothing waiting |
 
 **Review a pull request.** Check it out and start Claude Code. It knows which sessions are behind the branch, and `/braid:review-pr 128` reviews the change together with them. Your review session is published when it ends.
@@ -54,18 +54,21 @@ The status line shows where your session stands:
 **Merge a review.** When `↓` appears, tell Claude what to keep:
 
 ```
-> /braid:sync keep my jitter, adopt the reviewer's time budget
+> /braid:merge keep my jitter, adopt the reviewer's time budget
 ```
 
-`/braid:sync skip review/bob` marks a review as seen without adopting it.
+`/braid:merge skip review/bob` marks a review as seen without adopting it.
+
+**Branch.** Claude Code's `/branch` branches the conversation, and braid records the branch by itself. Back in the original session, the branch waits in `↓` until you merge it or skip it.
 
 | Command | |
 |---|---|
-| `/braid:sync [instruction]` | merge the sessions waiting in `↓`, or `skip` them |
-| `/braid:load <id \| name \| pr:N>` | read another session as a briefing |
+| `/braid:commit [message]` | commit the conversation; git commits do this when the git hooks are on |
+| `/braid:fork [id \| name \| pr:N]` | continue a new session from another one, such as a teammate's |
+| `/braid:merge [id \| name] [instruction]` | merge the session waiting in `↓`, or any session, or `skip` it |
 | `/braid:review-pr <n>` | review a pull request with the sessions behind it |
 | `/braid:status` | everything the status line abbreviates |
-| `/braid:push` | publish this session now |
+| `/braid:push` | publish this session; `git push` does this when the git hooks are on |
 | `/braid:withhold` | keep part of this session, or all of it, from being published |
 | `/braid:setup` | set up the status line and the `braid` command |
 

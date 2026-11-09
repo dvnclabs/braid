@@ -21,6 +21,8 @@ export interface BraidExt {
   partOf?: string;
   merge?: MergeInfo;
   pr?: number;
+  /** On a label: the conversation was committed here, with this code commit when there is one. */
+  commit?: { sha?: string };
   redactions?: { rule: string; count: number }[];
 }
 
@@ -78,7 +80,7 @@ function blockText(block: unknown, max: number): string {
 export function describe(r: Rec, max = 400): string {
   if (r.type === "branch_summary") return clip(String(r.summary ?? ""), max * 4);
   if (r.type === "compaction") return clip(String(r.summary ?? ""), max);
-  if (r.type === "label") return `named ${String(r.label)}`;
+  if (r.type === "label") return braidOf(r).commit ? `commit: ${String(r.label)}` : `named ${String(r.label)}`;
   if (r.type !== "message") return "";
   const c = r.content;
   const parts = Array.isArray(c) ? c.map((b) => blockText(b, max)) : [blockText(c, max)];

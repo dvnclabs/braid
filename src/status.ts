@@ -21,7 +21,7 @@ export interface Status {
   saved: boolean;
   conv?: string;
   private: boolean;
-  /** Saved, never published, and no commit names it. */
+  /** Saved, never published, and never committed. */
   local: boolean;
   ahead: number;
   waiting: Waiting[];
@@ -33,7 +33,7 @@ export function cleanName(name: string): string {
 }
 
 export function sessionName(records: Rec[], session: string): string {
-  const label = records.find((r) => r.type === "label" && typeof r.label === "string");
+  const label = records.find((r) => r.type === "label" && typeof r.label === "string" && !braidOf(r).commit);
   return (label && cleanName(String(label.label))) || session.slice(0, 8);
 }
 
@@ -78,14 +78,21 @@ export function computeStatus(repo: Repo, session: string, remote = "origin"): S
   const published = new Set(readRecords(`${tracking}/${conv}/${session}`, { cwd: repo.top }).map((r) => r.id));
   const withheld = new Set(state?.withheld ?? []);
   status.ahead = mine.filter((r) => isTurn(r) && !published.has(r.id) && !withheld.has(r.id)).length;
-  status.local = published.size === 0 && !linkedByCommit(repo, session);
+  const committed = mine.some((r) => r.type === "label" && braidOf(r).commit);
+  status.local = published.size === 0 && !committed && !linkedByCommit(repo, session);
 
   const myIds = new Set(mine.map((r) => r.id));
   const pending = state?.pendingMerge ? [state.pendingMerge.fromHead] : [];
+  // Your own branches of this conversation, then everyone's published sessions.
+  const refs = new Map<string, { ref: string; opts: { gitDir?: string; cwd?: string } }>();
+  for (const { ref } of forEachRef([`${SESSION_REFS}/${conv}/`], { gitDir: repo.store })) refs.set(ref.slice(ref.lastIndexOf("/") + 1), { ref, opts: { gitDir: repo.store } });
   for (const { ref } of forEachRef([`${tracking}/${conv}/`], { cwd: repo.top })) {
     const other = ref.slice(ref.lastIndexOf("/") + 1);
+    if (!refs.has(other)) refs.set(other, { ref, opts: { cwd: repo.top } });
+  }
+  for (const [other, { ref, opts }] of refs) {
     if (other === session) continue;
-    const theirs = readRecords(ref, { cwd: repo.top });
+    const theirs = readRecords(ref, opts);
     const fork = theirs.find((r) => r.parentId && myIds.has(r.parentId));
     if (!fork) continue;
     const open = uncovered(mine, theirs, pending);
@@ -106,10 +113,10 @@ export function render(s: Status): string {
   else if (s.ahead > 0) parts.push(`↑${s.ahead}`);
   if (s.waiting.length === 1) {
     const w = s.waiting[0]!;
-    parts.push(`↓ ${w.name} +${w.count} → /braid:sync`);
+    parts.push(`↓ ${w.name} +${w.count} → /braid:merge`);
   } else if (s.waiting.length > 1) {
     const total = s.waiting.reduce((a, w) => a + w.count, 0);
-    parts.push(`↓ ${s.waiting.length} sessions +${total} → /braid:sync`);
+    parts.push(`↓ ${s.waiting.length} sessions +${total} → /braid:merge`);
   }
   return parts.length ? parts.join(" · ") : "✓";
 }

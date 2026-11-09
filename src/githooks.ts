@@ -1,5 +1,5 @@
 // Git hooks: link commits to sessions, and publish sessions on push.
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { config, git, gitMaybe } from "./git.ts";
 import { publish, type PublishResult } from "./publish.ts";
@@ -64,19 +64,37 @@ export function installHooks(repo: Repo): string[] {
   return notes;
 }
 
+/** Removes braid's git hooks and puts back the hooks they replaced. */
+export function uninstallHooks(repo: Repo): string[] {
+  const { dir, managed } = hooksDir(repo);
+  if (managed) return [`core.hooksPath is set to ${dir}: remove the braid git-hook lines from your hook manager`];
+  const notes: string[] = [];
+  for (const hook of HOOKS) {
+    const path = join(dir, hook);
+    if (!existsSync(path) || !readFileSync(path, "utf8").includes(MARK)) continue;
+    rmSync(path);
+    if (existsSync(`${path}.local`)) renameSync(`${path}.local`, path);
+    notes.push(`removed the ${hook} hook`);
+  }
+  return notes;
+}
+
+/** The git hooks act only where braid is set up and git-hooks is on. */
+const active = (repo: Repo) => isEnabled(repo) && readConfig(repo).gitHooks;
+
 /** prepare-commit-msg: adds the Braid-Session trailer for the agent session that runs git. */
 export function prepareCommitMsg(repo: Repo, file: string): void {
   const session = process.env.BRAID_SESSION;
-  if (!session || !isEnabled(repo) || !loadState(repo, session)) return;
+  if (!session || !active(repo) || !loadState(repo, session)) return;
   git(["interpret-trailers", "--in-place", "--if-exists", "addIfDifferent", "--trailer", `Braid-Session: ${session}`, file], {
     cwd: repo.top,
   });
 }
 
-/** post-commit: remembers the commit, so the next save records which code commit it follows. */
+/** post-commit: remembers the commit, so the next save commits the conversation with it. */
 export function postCommit(repo: Repo): void {
   const session = process.env.BRAID_SESSION;
-  if (!session) return;
+  if (!session || !active(repo)) return;
   withLock(repo, `save-${session}`, () => {
     const state = loadState(repo, session);
     if (!state) return;
@@ -106,7 +124,7 @@ export function prePush(repo: Repo, remote: string, stdin: string): { refuse?: s
     const log = gitMaybe(["log", "--format=%(trailers:key=Braid-Session,valueonly)", ...range], { cwd: repo.top }) ?? "";
     for (const id of log.split("\n").map((s) => s.trim()).filter(Boolean)) sessions.add(id);
   }
-  if (!isEnabled(repo) || readConfig(repo).publish === "off") return { results: [] };
+  if (!active(repo) || readConfig(repo).publish === "off") return { results: [] };
   const results = [...sessions].filter((s) => loadState(repo, s)).map((s) => publish(repo, s, { remote }));
   return { results };
 }

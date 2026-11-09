@@ -1,6 +1,6 @@
 // Test helpers: an isolated home, a bare remote, clones, and Claude Code transcripts.
 import { spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -88,6 +88,16 @@ export class Transcript {
     appendFileSync(this.path, JSON.stringify(entry) + "\n");
     this.last = uuid;
     return uuid;
+  }
+
+  /** A copy under a new session id with the same record uuids, as Claude Code's /branch and --fork-session write it. */
+  fork(dir: string, session: string): Transcript {
+    const t = new Transcript(dir, session);
+    const lines = readFileSync(this.path, "utf8").split("\n").filter(Boolean);
+    writeFileSync(t.path, lines.map((l) => JSON.stringify({ ...JSON.parse(l), sessionId: session }) + "\n").join(""));
+    t.last = this.last;
+    t.n = this.n;
+    return t;
   }
 
   user(text: string): string {

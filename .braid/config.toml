@@ -1,5 +1,7 @@
 # braid: https://github.com/gbarbalinardo/braid
-# publish = "on-push" publishes the sessions behind your commits when you git push.
-# publish = "off" keeps every session on this machine.
+# git-hooks = true: each commit the agent makes commits its conversation too, and git push
+# publishes it. false: braid leaves git alone; use /braid:commit and /braid:push.
+# publish = "on-push" lets sessions be published; "off" keeps every session on this machine.
+git-hooks = true
 publish = "on-push"
 remote = "origin"

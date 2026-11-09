@@ -55,8 +55,8 @@ test("the status line text", () => {
   assert.equal(render({ ...base, local: true, ahead: 3 }), "local");
   assert.equal(render({ ...base, ahead: 4 }), "↑4");
   const w = { session: "01a1bc3e", name: "review/bob", count: 5, head: "r5", base: "e8" };
-  assert.equal(render({ ...base, ahead: 4, waiting: [w] }), "↑4 · ↓ review/bob +5 → /braid:sync");
-  assert.equal(render({ ...base, waiting: [w, { ...w, count: 2 }] }), "↓ 2 sessions +7 → /braid:sync");
+  assert.equal(render({ ...base, ahead: 4, waiting: [w] }), "↑4 · ↓ review/bob +5 → /braid:merge");
+  assert.equal(render({ ...base, waiting: [w, { ...w, count: 2 }] }), "↓ 2 sessions +7 → /braid:merge");
   assert.equal(cleanName("\u001b[2Kall clear ✓"), "2Kallclear");
 });
 

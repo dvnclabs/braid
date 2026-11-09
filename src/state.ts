@@ -27,14 +27,18 @@ export interface SessionState {
   /** "anthropic:claude-sonnet-5-5": the model of the newest assistant record. */
   model?: string;
   userAgent?: string;
-  /** Another session this one loaded, before its first save (a fork) or after (a link). */
-  loaded?: { session: string; conv: string; head: string; actor?: string };
+  /** Id of the first message, which a fork's transcript shares with the session it was forked from. */
+  first?: string;
+  /** A session this one forks from, set by `braid fork` before the first save. */
+  forkFrom?: { session: string; conv: string; head: string; actor?: string };
   pendingMerge?: PendingMerge;
   /** Native records whose parent is `from` continue from the merge record `to`. */
   reparent?: { from: string; to: string };
-  /** Code commits made since the last save. */
+  /** Code commits made since the last save; the next save commits the conversation with each. */
   commits?: string[];
   withheld?: string[];
+  /** Forked from someone else's session: published when it ends, since a review has no commits to push. */
+  review?: boolean;
   private?: boolean;
   /** What the last after-turn notice reported, so it is not repeated. */
   notified?: string;

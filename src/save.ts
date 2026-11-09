@@ -1,12 +1,13 @@
 // Saving: import what a harness wrote since the last save into the store.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { claudeCode } from "@leostera/atxf/claude-code";
 import { appendChunk, readRecords } from "./chunks.ts";
-import { config, gitMaybe } from "./git.ts";
+import { config, forEachRef, gitMaybe } from "./git.ts";
 import { lastTurn, withBraid, type Actor, type Rec } from "./records.ts";
-import { ensureStore, storeRef, type Repo } from "./repo.ts";
+import { ensureStore, SESSION_REFS, storeRef, type Repo } from "./repo.ts";
 import { loadState, newState, saveState, withLock, type SessionState } from "./state.ts";
 import { VERSION } from "./version.ts";
 
@@ -44,24 +45,71 @@ export interface SaveResult {
   state: SessionState;
 }
 
+/** The converter names records without a uuid by line number, which repeats across sessions: scope those ids to this one. */
+function scoped(records: Rec[], session: string): Rec[] {
+  const tag = session.slice(0, 8);
+  const fix = (v: unknown) => (typeof v === "string" && v.startsWith("claude-line-") ? `${v}@${tag}` : v);
+  return records.map((r) => {
+    const out: Rec = { ...r, id: fix(r.id) as string };
+    for (const key of ["parentId", "targetId", "fromId"]) if (key in r) out[key] = fix(r[key]);
+    return out;
+  });
+}
+
+/**
+ * The conversation this session was copied from. Claude Code's /branch and
+ * --fork-session copy the transcript with the same record ids, so a new
+ * session whose first message belongs to a saved session is a fork of it.
+ */
+function forkSource(repo: Repo, session: string, native: Rec[]): { conv: string; known: Set<string> } | undefined {
+  const firstMessage = native.find((r) => r.type === "message")?.id;
+  const dir = join(repo.dir, "sessions");
+  if (!firstMessage || !existsSync(dir)) return undefined;
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".json") || name === `${session}.json`) continue;
+    const other = loadState(repo, name.slice(0, -".json".length));
+    if (!other || other.first !== firstMessage || other.chunks === 0) continue;
+    const known = new Set<string>();
+    for (const { ref } of forEachRef([`${SESSION_REFS}/${other.conv}/`], { gitDir: repo.store })) {
+      for (const r of readRecords(ref, { gitDir: repo.store })) known.add(r.id);
+    }
+    return { conv: other.conv, known };
+  }
+  return undefined;
+}
+
 /**
  * Saves a session: converts the native transcript with ATXF's converter and
- * appends the records written since the previous save as one chunk.
+ * appends the records written since the previous save as one chunk. A save
+ * commits the conversation, as a label on its newest turn, for each code
+ * commit made since the previous save and for `opts.commit`.
  */
-export function save(repo: Repo, session: string, transcript?: string): SaveResult {
+export function save(repo: Repo, session: string, transcript?: string, opts: { commit?: string } = {}): SaveResult {
   ensureStore(repo);
   return withLock(repo, `save-${session}`, () => {
     const state = loadState(repo, session) ?? newState(session, transcript);
     if (transcript) state.transcript = transcript;
-    if (!state.transcript || !existsSync(state.transcript)) return { added: 0, state };
+    if (!state.transcript || !existsSync(state.transcript)) {
+      if (opts.commit !== undefined) throw new Error("this session is not saved yet: braid saves sessions that start after it is set up");
+      return { added: 0, state };
+    }
 
     const t = claudeCode.toAtxf(readFileSync(state.transcript, "utf8"), { integrity: false });
-    const native = t.records as unknown as Rec[];
-    const fresh = freshRecords(repo, state, native);
-    if (fresh.length === 0 && !state.pendingMerge) return { added: 0, state };
-
+    const native = scoped(t.records as unknown as Rec[], session);
     const first = state.chunks === 0;
-    if (first && state.loaded) state.conv = state.loaded.conv;
+    let fresh: Rec[];
+    const source = first && !state.forkFrom ? forkSource(repo, session, native) : undefined;
+    if (source) {
+      state.conv = source.conv;
+      fresh = native.filter((r) => !source.known.has(r.id));
+    } else {
+      fresh = freshRecords(repo, state, native);
+    }
+    state.first ??= native.find((r) => r.type === "message")?.id;
+    const codeCommits = state.commits ?? [];
+    if (fresh.length === 0 && !state.pendingMerge && codeCommits.length === 0 && opts.commit === undefined) return { added: 0, state };
+
+    if (first && state.forkFrom) state.conv = state.forkFrom.conv;
     for (const r of fresh) {
       state.userAgent = nativeVersion(r) ? `claude-code/${nativeVersion(r)}` : state.userAgent;
       state.model = modelOf(r) ?? state.model;
@@ -73,8 +121,8 @@ export function save(repo: Repo, session: string, transcript?: string): SaveResu
     if (first && state.conv === session) out.push(header(t.header as unknown as Record<string, unknown>, session));
     for (const r of fresh) {
       let rec: Rec = { ...r };
-      // A session that loaded another before its first save continues from it.
-      if (first && state.loaded && rec.parentId == null) rec.parentId = state.loaded.head;
+      // A session forked from another before its first save continues from it.
+      if (first && state.forkFrom && rec.parentId == null) rec.parentId = state.forkFrom.head;
       if (state.reparent && rec.parentId === state.reparent.from) rec.parentId = state.reparent.to;
       rec = withBraid(rec, { actor, session });
       if (state.pendingMerge) rec = withBraid(rec, { partOf: state.pendingMerge.id });
@@ -82,7 +130,7 @@ export function save(repo: Repo, session: string, transcript?: string): SaveResu
     }
     const lastNative = fresh.at(-1)?.id ?? state.last ?? state.head ?? null;
 
-    if (first && state.loaded && state.loaded.actor && state.loaded.actor !== actor.actorId) {
+    if (first && state.forkFrom?.actor && state.forkFrom.actor !== actor.actorId) {
       const target = fresh.find((r) => r.type === "message")?.id;
       if (target) {
         out.push({
@@ -93,19 +141,10 @@ export function save(repo: Repo, session: string, transcript?: string): SaveResu
           label: `review/${actor.actorId.split("@")[0]}`,
           ext: { braid: { actor, session } },
         });
+        state.review = true;
       }
-    } else if (!first && state.loaded && lastNative) {
-      out.push({
-        type: "agent_link",
-        id: `braid-link-${randomUUID()}`,
-        parentId: lastNative,
-        time: now,
-        relation: "message",
-        transcriptId: state.loaded.session,
-        ext: { braid: { actor, session } },
-      });
     }
-    delete state.loaded;
+    delete state.forkFrom;
 
     if (state.pendingMerge && lastNative) {
       const pm = state.pendingMerge;
@@ -135,8 +174,23 @@ export function save(repo: Repo, session: string, transcript?: string): SaveResu
       delete state.pendingMerge;
     }
 
+    const target = lastTurn(out) ?? state.head;
+    const commits = codeCommits.map((sha) => ({ sha, message: gitMaybe(["log", "-1", "--format=%s", sha], { cwd: repo.top })?.trim() ?? "" }));
+    if (opts.commit !== undefined) commits.push({ sha: "", message: opts.commit });
+    if (opts.commit !== undefined && !target) throw new Error("nothing to commit: this session has no saved turns yet");
+    for (const c of target ? commits : []) {
+      out.push({
+        type: "label",
+        id: `braid-commit-${randomUUID()}`,
+        time: now,
+        targetId: target,
+        label: c.message || "commit",
+        ext: { braid: { actor, session, commit: c.sha ? { sha: c.sha } : {} } },
+      });
+    }
+
     const head = gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim();
-    appendChunk(storeRef(state.conv, session), out, { time: now, head, commits: state.commits ?? [] }, { gitDir: repo.store });
+    appendChunk(storeRef(state.conv, session), out, { time: now, head, commits: codeCommits }, { gitDir: repo.store });
     state.last = fresh.at(-1)?.id ?? state.last;
     state.head = lastTurn(out) ?? state.head;
     state.chunks += 1;

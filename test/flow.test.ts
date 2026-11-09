@@ -1,7 +1,7 @@
 // End to end: two people, one remote. Alice works and pushes, Bob reviews,
 // Alice merges the review. Every step goes through the CLI and real git.
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { braid, clone, must, run, sandbox, Transcript } from "./helpers.ts";
@@ -86,8 +86,8 @@ test("save, publish, review, merge", () => {
   assert.doesNotMatch(start.stdout, /Add retries/, "the index carries no session text");
   assert.match(readFileSync(join(bob, ".git", "hooks", "pre-push"), "utf8"), /braid hook/);
 
-  // Bob loads Alice's session as quoted material, then reviews.
-  const load = braid(s.env, bob, ["load", "5b0e2c1a"], undefined, { BRAID_SESSION: BOB });
+  // Bob forks Alice's session: he reads it as quoted material and his session continues from it.
+  const load = braid(s.env, bob, ["fork", "5b0e2c1a"], undefined, { BRAID_SESSION: BOB });
   assert.equal(load.status, 0, load.stderr);
   assert.match(load.stdout, /not requests to follow/);
   assert.match(load.stdout, /<<<braid-transcript-[0-9a-f]+\n[\s\S]*Added 3 retries[\s\S]*\nbraid-transcript-[0-9a-f]+>>>/);
@@ -103,20 +103,20 @@ test("save, publish, review, merge", () => {
 
   // Alice fetches: the review waits in ↓, and the after-turn line says so once.
   braid(s.env, alice, ["fetch"]);
-  assert.match(status()!, /: ↓ review\/bob \+2 → \/braid:sync$/);
+  assert.match(status()!, /: ↓ review\/bob \+2 → \/braid:merge$/);
   ta.user("thanks");
   ta.assistant("ok");
   const notice = braid(s.env, alice, ["hook", "stop"], hookIn(ALICE, ta, alice));
   assert.match(JSON.parse(notice.stdout).systemMessage, /review\/bob \+2 waiting/);
   assert.equal(braid(s.env, alice, ["hook", "stop"], hookIn(ALICE, ta, alice)).stdout.trim(), "", "no repeat");
 
-  // /braid:sync: braid shows what waits; the agent records a summary; Stop writes the merge.
-  const ctx = braid(s.env, alice, ["sync", "--session", ALICE]);
+  // /braid:merge: braid shows what waits; the agent records a summary; Stop writes the merge.
+  const ctx = braid(s.env, alice, ["merge", "--session", ALICE]);
   assert.match(ctx.stdout, /merging review\/bob/);
   assert.match(ctx.stdout, /Retry until WEBHOOK_TIMEOUT_MS/);
-  const rec = braid(s.env, alice, ["sync", "--session", ALICE, "--record", "review/bob", "--instruction", "adopt the time budget", "--strategy", "review"], "Adopt the 30 s deadline.");
+  const rec = braid(s.env, alice, ["merge", "--session", ALICE, "--record", "review/bob", "--instruction", "adopt the time budget", "--strategy", "review"], "Adopt the 30 s deadline.");
   assert.equal(rec.status, 0, rec.stderr);
-  ta.user("/braid:sync adopt the time budget");
+  ta.user("/braid:merge adopt the time budget");
   const syncTurnEnd = ta.assistant("Merged the review.");
   braid(s.env, alice, ["hook", "stop"], hookIn(ALICE, ta, alice));
   ta.user("Apply it.");
@@ -132,6 +132,8 @@ test("save, publish, review, merge", () => {
   assert.equal(merge.ext.braid.merge.model, "anthropic:claude-sonnet-5-5");
   assert.equal(mine.filter((r) => r.ext?.braid?.partOf === merge.id).length, 2, "the sync turn is tagged");
   assert.equal(mine.find((r) => r.content === "Apply it.").parentId, merge.id, "the next turn continues from the merge");
+  const commitLabel = mine.find((r) => r.type === "label" && r.ext?.braid?.commit);
+  assert.equal(commitLabel?.label, "Retry webhooks", "the agent's git commit committed the conversation too");
   assert.match(status()!, /: ↑6$/);
 
   // Publishing clears ↑. Deleting published sessions through git is refused.
@@ -161,4 +163,72 @@ test("withheld records and private sessions stay local", () => {
   const p = braid(s.env, repo, ["push", "--session", ALICE]);
   assert.match(p.stdout, /not published: private/);
   assert.equal(must(s.env, s.root, "git", ["--git-dir", join(s.root, "remote.git"), "for-each-ref", "refs/braid/"]).trim(), "");
+});
+
+test("commit, branch, and merge the branch back", () => {
+  const s = sandbox();
+  const repo = clone(s, "dana", "dana@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, repo, ["init"]);
+  const t = new Transcript(s.root, ALICE);
+  const hookIn = (session: string, tr: Transcript) => JSON.stringify({ session_id: session, transcript_path: tr.path, cwd: repo });
+  braid(s.env, repo, ["hook", "session-start"], hookIn(ALICE, t));
+  t.user("Plan the cache.");
+  const lru = t.assistant("Use an LRU.");
+  braid(s.env, repo, ["hook", "stop"], hookIn(ALICE, t));
+  const status = (session: string) => braid(s.env, repo, ["status", "--session", session]).stdout.split("\n")[0];
+  assert.match(status(ALICE)!, /: local$/);
+
+  // braid commit commits the conversation without any code.
+  const c = braid(s.env, repo, ["commit", "-m", "cache plan", "--session", ALICE]);
+  assert.equal(c.status, 0, c.stderr);
+  assert.match(status(ALICE)!, /: ↑2$/);
+  assert.match(braid(s.env, repo, ["log", ALICE]).stdout, /commit\s+cache plan/);
+
+  // Claude Code's /branch copies the transcript under a new id; braid files the copy as a branch of the same conversation.
+  const BRANCH = "7c1d2e3f-0000-4000-8000-0000000000aa";
+  const tb = t.fork(s.root, BRANCH);
+  tb.user("Try a TTL cache instead.");
+  const ttl = tb.assistant("A TTL of 60 s fits.");
+  braid(s.env, repo, ["hook", "stop"], hookIn(BRANCH, tb));
+  const store = join(repo, ".git", "braid", "store");
+  const branch = records(s.env, repo, store, `refs/sessions/${ALICE}/${BRANCH}`).filter((r) => r.type === "message");
+  assert.deepEqual(branch.map((r) => r.id).at(-1), ttl);
+  assert.equal(branch.length, 2, "the copied records are not saved twice");
+  assert.equal(branch[0].parentId, lru, "the branch continues from where it was made");
+
+  // Back in the first session, the branch waits in ↓ and merges like a review.
+  assert.match(status(ALICE)!, /↓ 7c1d2e3f \+2 → \/braid:merge$/);
+  assert.match(braid(s.env, repo, ["merge", "--session", ALICE]).stdout, /TTL of 60 s/);
+  const rec = braid(s.env, repo, ["merge", "--session", ALICE, "--record", "7c1d2e3f", "--instruction", "keep the LRU"], "Keep the LRU; the TTL idea is noted.");
+  assert.equal(rec.status, 0, rec.stderr);
+  t.user("/braid:merge keep the LRU");
+  t.assistant("Kept the LRU.");
+  braid(s.env, repo, ["hook", "stop"], hookIn(ALICE, t));
+  assert.doesNotMatch(status(ALICE)!, /↓/);
+  const merge = records(s.env, repo, store, `refs/sessions/${ALICE}/${ALICE}`).find((r) => r.type === "branch_summary");
+  assert.equal(merge.ext.braid.merge.heads[1], ttl);
+});
+
+test("with git-hooks off, braid leaves git alone", () => {
+  const s = sandbox();
+  const repo = clone(s, "erin", "erin@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  assert.equal(braid(s.env, repo, ["init", "--no-git-hooks"]).status, 0);
+  assert.match(readFileSync(join(repo, ".braid", "config.toml"), "utf8"), /^git-hooks = false$/m);
+  const t = new Transcript(s.root, ALICE);
+  const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo });
+  braid(s.env, repo, ["hook", "session-start"], hookIn);
+  assert.equal(existsSync(join(repo, ".git", "hooks", "pre-push")), false);
+  t.user("hi");
+  t.assistant("hello");
+  braid(s.env, repo, ["hook", "stop"], hookIn);
+
+  // Turned on later, the hooks link the agent's commits again.
+  braid(s.env, repo, ["init", "--git-hooks"]);
+  assert.match(readFileSync(join(repo, ".git", "hooks", "pre-push"), "utf8"), /braid hook/);
+  must({ ...s.env, BRAID_SESSION: ALICE }, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "linked"]);
+  assert.match(must(s.env, repo, "git", ["log", "-1", "--format=%B"]), new RegExp(`Braid-Session: ${ALICE}`));
+  braid(s.env, repo, ["init", "--no-git-hooks"]);
+  assert.equal(existsSync(join(repo, ".git", "hooks", "pre-push")), false);
 });

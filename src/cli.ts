@@ -6,7 +6,8 @@ import { readRecords } from "./chunks.ts";
 import { fetchSessions } from "./fetch.ts";
 import { postCommit, prePush, prepareCommitMsg } from "./githooks.ts";
 import { sessionEnd, sessionStart, stop } from "./hooks.ts";
-import { allSessions, briefing, markLoaded, resolve } from "./load.ts";
+import { allSessions, briefing, markFork, resolve, type Briefing } from "./load.ts";
+import { context, pick, record } from "./merge.ts";
 import { publish, type PublishResult } from "./publish.ts";
 import { braidOf, describe, isTurn } from "./records.ts";
 import { findRepo, isEnabled, readConfig, storeRef, type Repo } from "./repo.ts";
@@ -15,27 +16,28 @@ import { configDir, init, setup } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
 import { computeStatus, render, sessionName } from "./status.ts";
 import { statusline } from "./statusline.ts";
-import { context, pick, record } from "./sync.ts";
 import { VERSION } from "./version.ts";
 
 const HELP = `braid ${VERSION}: version control for agent conversations
 
 Setup
   braid setup                 once per machine: the braid command and the status line
-  braid init                  once per repository: .braid/config.toml and git hooks
+  braid init [--no-git-hooks] once per repository: .braid/config.toml, and git hooks unless turned off
 
 Everyday (inside an agent session; the session comes from $BRAID_SESSION)
   braid status                where this session stands, and the sessions around it
-  braid push                  publish this session now
-  braid load <id|name|pr:N>   read another session as a briefing
-  braid sync [<id|name>]      show what waits to be merged, for the agent to summarize
-  braid sync --record <id> --instruction "<text>"   record a merge; summary on stdin
-  braid sync --skip <id>      mark a session seen without adopting anything
+  braid commit -m "<message>" commit the conversation (git commits do this when git-hooks is on)
+  braid push                  publish this session (git push does this when git-hooks is on)
+  braid fork [<id|name|pr:N>] start this new session from another; with no target, how to branch this one
+  braid merge [<id|name|pr:N>]   show what another session has that this one lacks, for the agent to summarize
+  braid merge --record <id> --instruction "<text>"   record a merge; summary on stdin
+  braid merge --skip <id>     mark a session seen without adopting anything
   braid withhold --last 30m | --all   keep records, or the whole session, from being published
 
 Other
+  braid show <id|name|pr:N>   read a session as a briefing, without linking to it
   braid sessions              every session braid can see in this repository
-  braid log <id>              the records of a session
+  braid log [<id>]            the turns and commits of a session
   braid fetch [--all]         fetch published sessions
   braid save                  save the current session now (the Stop hook does this)
 `;
@@ -91,6 +93,9 @@ function main(argv: string[]): number {
     strict: false,
     options: {
       session: { type: "string" },
+      message: { type: "string", short: "m" },
+      "git-hooks": { type: "boolean" },
+      "no-git-hooks": { type: "boolean" },
       transcript: { type: "string" },
       remote: { type: "string" },
       record: { type: "string" },
@@ -148,7 +153,8 @@ function main(argv: string[]): number {
       return 0;
     case "init": {
       const repo = needRepo();
-      for (const note of init(repo)) out(`braid: ${note}`);
+      const gitHooks = opts["no-git-hooks"] === true ? false : opts["git-hooks"] === true ? true : undefined;
+      for (const note of init(repo, { gitHooks })) out(`braid: ${note}`);
       return 0;
     }
     case "setup":
@@ -158,6 +164,14 @@ function main(argv: string[]): number {
       const repo = needRepo();
       const r = save(repo, needSession(str("session")), str("transcript"));
       out(`braid: saved ${r.added} records`);
+      return 0;
+    }
+    case "commit": {
+      const repo = needRepo();
+      const message = str("message") ?? args.join(" ");
+      if (!message.trim()) throw new Error('usage: braid commit -m "<message>"');
+      const r = save(repo, needSession(str("session")), str("transcript"), { commit: message.trim() });
+      out(`braid: committed ${r.state.session.slice(0, 8)}: ${message.trim()}`);
       return 0;
     }
     case "push": {
@@ -210,35 +224,57 @@ function main(argv: string[]): number {
       const remote = str("remote") ?? readConfig(repo).remote;
       const found = resolve(repo, args[0] ?? needSession(str("session")), remote);
       if (found.length !== 1) throw new Error(found.length ? "more than one session matches" : "no such session");
-      for (const r of readRecords(found[0]!.ref, found[0]!.opts).filter(isTurn)) {
-        out(`${r.id.slice(0, 12)}  ${(r.role ?? "merge").padEnd(9)} ${describe(r, 160).split("\n")[0]}`);
+      for (const r of readRecords(found[0]!.ref, found[0]!.opts)) {
+        const commit = r.type === "label" ? braidOf(r).commit : undefined;
+        if (!isTurn(r) && !commit) continue;
+        const kind = commit ? "commit" : r.type === "branch_summary" ? "merge" : (r.role ?? r.type);
+        const text = commit ? `${String(r.label)}${commit.sha ? ` (${commit.sha.slice(0, 7)})` : ""}` : describe(r, 160).split("\n")[0];
+        out(`${r.id.slice(0, 12)}  ${kind.padEnd(9)} ${text}`);
       }
       return 0;
     }
-    case "load": {
+    case "show":
+    case "fork": {
       const repo = needRepo();
       const remote = str("remote") ?? readConfig(repo).remote;
-      if (!args[0]) throw new Error("usage: braid load <id|name|pr:N>");
-      const found = resolve(repo, args[0], remote);
+      const current = str("session") ?? process.env.BRAID_SESSION;
+      if (!args[0]) {
+        if (command === "show") throw new Error("usage: braid show <id|name|pr:N>");
+        out(
+          [
+            "braid: to branch this conversation, run /branch in Claude Code, or from a terminal:",
+            `  claude --resume ${current ?? "<session id>"} --fork-session`,
+            "braid records the branch in this conversation when its first turn is saved.",
+          ].join("\n"),
+        );
+        return 0;
+      }
+      const found = resolve(repo, args[0], remote).filter((f) => f.session !== current);
       if (found.length === 0) throw new Error(`no session matches ${args[0]}; try braid fetch --all, then braid sessions`);
-      const current = process.env.BRAID_SESSION;
-      const others = found.filter((f) => f.session !== current);
-      for (const f of others) {
-        const b = briefing(repo, f, remote);
-        out(b.text);
-        if (current && others.length === 1) markLoaded(repo, current, b);
+      const briefings = found.map((f) => briefing(repo, f, remote));
+      for (const b of briefings) out(b.text);
+      if (command === "fork") {
+        if (!current) throw new Error("no session to fork into: run inside an agent session, or pass --session <id>");
+        const newest = (b: Briefing) => readRecords(b.found.ref, b.found.opts).findLast((r) => r.id === b.head)?.time ?? "";
+        const from = briefings.reduce((a, b) => (newest(b) > newest(a) ? b : a));
+        markFork(repo, current, from);
+        out(`braid: this session continues from ${from.found.session.slice(0, 8)} (${from.head.slice(0, 12)})`);
       }
       return 0;
     }
-    case "sync": {
+    case "merge": {
       const repo = needRepo();
       const remote = str("remote") ?? readConfig(repo).remote;
       const session = needSession(str("session"));
       const target = str("record") ?? str("skip") ?? args[0];
       const { waiting, chosen } = pick(repo, session, remote, target);
       if (!chosen) {
-        if (waiting.length === 0) out("braid: nothing waiting to be merged into this session");
+        if (waiting.length === 0) out("braid: nothing waiting to be merged into this session; name a session to merge (braid sessions lists them)");
         else out(["braid: several sessions are waiting; name one:", ...waiting.map((w) => `  ${w.session.slice(0, 8)} ${w.name} +${w.count}`)].join("\n"));
+        return 0;
+      }
+      if (chosen.records.length === 0 && !str("skip")) {
+        out(`braid: nothing to merge from ${chosen.name}: this session already has all of it`);
         return 0;
       }
       if (str("skip")) {
@@ -250,7 +286,7 @@ function main(argv: string[]): number {
         record(repo, session, chosen, { instruction: str("instruction") ?? "", summary, strategy: str("strategy") ?? "default" });
         out(`braid: merge of ${chosen.name} recorded; it is written into this session when this turn ends`);
       } else {
-        out(context(repo, session, remote, chosen));
+        out(context(chosen));
       }
       return 0;
     }

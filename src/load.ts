@@ -1,4 +1,4 @@
-// Loading: resolve a session and render it as a briefing for the current agent.
+// Finding sessions and rendering them as briefings for the current agent.
 // Other people's records are quoted as material inside a fenced block.
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -115,11 +115,12 @@ export function briefing(repo: Repo, found: Found, remote: string): Briefing {
   return { found, head, text: quote(title, path) };
 }
 
-/** Notes that the current session loaded another: a fork before its first save, a link after. */
-export function markLoaded(repo: Repo, current: string, b: Briefing): void {
+/** Makes the current session, before its first save, continue from another session's head. */
+export function markFork(repo: Repo, current: string, b: Briefing): void {
   const state = loadState(repo, current) ?? newState(current);
+  if (state.chunks > 0) throw new Error("this session already has saved turns; start a new session to fork, or use braid merge to bring the other session into this one");
   const own = readRecords(b.found.ref, b.found.opts);
   const first = own.find((r) => braidOf(r).actor);
-  state.loaded = { session: b.found.session, conv: b.found.conv, head: b.head, actor: first ? braidOf(first).actor?.actorId : undefined };
+  state.forkFrom = { session: b.found.session, conv: b.found.conv, head: b.head, actor: first ? braidOf(first).actor?.actorId : undefined };
   saveState(repo, state);
 }

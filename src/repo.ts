@@ -34,20 +34,23 @@ export function ensureStore(repo: Repo): void {
 }
 
 export interface Config {
-  /** "on-push" publishes sessions with git push; "off" never publishes. */
+  /** Git hooks: the agent's commits name its session, and git push publishes those sessions. On by default. */
+  gitHooks: boolean;
+  /** "on-push" publishes sessions with git push and braid push; "off" never publishes. */
   publish: "on-push" | "off";
   remote: string;
 }
 
 /** Reads the few keys braid uses from `.braid/config.toml`, a flat `key = "value"` file. */
 export function readConfig(repo: Repo): Config {
-  const config: Config = { publish: "off", remote: "origin" };
+  const config: Config = { gitHooks: true, publish: "off", remote: "origin" };
   const path = join(repo.top, ".braid", "config.toml");
   if (!existsSync(path)) return config;
   for (const line of readFileSync(path, "utf8").split("\n")) {
-    const m = /^\s*([a-z_]+)\s*=\s*"?([^"#\n]*?)"?\s*(#.*)?$/.exec(line);
+    const m = /^\s*([a-z_-]+)\s*=\s*"?([^"#\n]*?)"?\s*(#.*)?$/.exec(line);
     if (!m) continue;
     const [, key, value] = m;
+    if (key === "git-hooks" && (value === "true" || value === "false")) config.gitHooks = value === "true";
     if (key === "publish" && (value === "on-push" || value === "off")) config.publish = value;
     if (key === "remote" && value) config.remote = value;
   }

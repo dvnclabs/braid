@@ -133,10 +133,10 @@ records = [
     msg("r5", "r4", "2026-11-08T17:41:30Z", "user",
         "Agreed. Recommendation for the author: retry until WEBHOOK_TIMEOUT_MS is spent and drop the fixed count.",
         BOB, CX_RAW, 7),
-    # Alice runs /braid:sync. The turn's native records are kept and tagged partOf m1,
+    # Alice runs /braid:merge. The turn's native records are kept and tagged partOf m1,
     # and the merge record continues from them, so the path from the root passes through m1.
     msg("s1", "e12", "2026-11-08T18:00:58Z", "user",
-        "/braid:sync keep my jitter, adopt the reviewer's time budget",
+        "/braid:merge keep my jitter, adopt the reviewer's time budget",
         ALICE, CC_RAW, 16, part_of="m1"),
     msg("s2", "s1", "2026-11-08T18:01:00Z", "assistant",
         [call("toolu_05", "Bash", {"command": "braid merge --context 01a1bc3e"})],

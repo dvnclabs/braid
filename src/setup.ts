@@ -4,8 +4,8 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { installHooks } from "./githooks.ts";
-import { ensureStore, type Repo } from "./repo.ts";
+import { installHooks, uninstallHooks } from "./githooks.ts";
+import { ensureStore, readConfig, type Repo } from "./repo.ts";
 
 export function configDir(): string {
   return join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "braid");
@@ -27,29 +27,37 @@ function visibility(repo: Repo): string | undefined {
   return r.status === 0 ? r.stdout.trim() : undefined;
 }
 
-export function init(repo: Repo): string[] {
+const TEMPLATE = (publish: string, gitHooks: boolean) =>
+  [
+    "# braid: https://github.com/gbarbalinardo/braid",
+    "# git-hooks = true: each commit the agent makes commits its conversation too, and git push",
+    "# publishes it. false: braid leaves git alone; use /braid:commit and /braid:push.",
+    '# publish = "on-push" lets sessions be published; "off" keeps every session on this machine.',
+    `git-hooks = ${gitHooks}`,
+    `publish = "${publish}"`,
+    'remote = "origin"',
+    "",
+  ].join("\n");
+
+/** Once per repository: `.braid/config.toml`, the store, and the git hooks when git-hooks is on. */
+export function init(repo: Repo, opts: { gitHooks?: boolean } = {}): string[] {
   const notes: string[] = [];
   const file = join(repo.top, ".braid", "config.toml");
   if (!existsSync(file)) {
     const vis = visibility(repo);
     const publish = vis === "PRIVATE" || vis === "INTERNAL" ? "on-push" : "off";
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(
-      file,
-      [
-        "# braid: https://github.com/gbarbalinardo/braid",
-        '# publish = "on-push" publishes the sessions behind your commits when you git push.',
-        '# publish = "off" keeps every session on this machine.',
-        `publish = "${publish}"`,
-        'remote = "origin"',
-        "",
-      ].join("\n"),
-    );
+    writeFileSync(file, TEMPLATE(publish, opts.gitHooks ?? true));
     notes.push(`wrote .braid/config.toml (publish = "${publish}"${vis ? `, repository is ${vis.toLowerCase()}` : ", visibility unknown"})`);
     notes.push("commit it so teammates get braid too: git add .braid && git commit -m 'Set up braid'");
+  } else if (opts.gitHooks !== undefined) {
+    const text = readFileSync(file, "utf8");
+    const line = `git-hooks = ${opts.gitHooks}`;
+    writeFileSync(file, /^git-hooks\s*=.*$/m.test(text) ? text.replace(/^git-hooks\s*=.*$/m, line) : `${line}\n${text}`);
+    notes.push(`set ${line} in .braid/config.toml`);
   }
   ensureStore(repo);
-  notes.push(...installHooks(repo));
+  notes.push(...(readConfig(repo).gitHooks ? installHooks(repo) : uninstallHooks(repo)));
   writePointer();
   return notes;
 }
