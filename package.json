@@ -1,0 +1,39 @@
+{
+  "name": "@gbarbalinardo/braid",
+  "version": "0.1.0",
+  "description": "Version control for agent conversations: save coding-agent sessions into git, publish them with git push, and merge teammates' sessions into yours.",
+  "license": "MIT",
+  "author": "Giuseppe Barbalinardo",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gbarbalinardo/braid.git"
+  },
+  "type": "module",
+  "bin": {
+    "braid": "dist/braid.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "hooks",
+    "skills",
+    ".claude-plugin"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/braid.mjs --banner:js=\"#!/usr/bin/env node\" --log-level=warning",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@leostera/atxf": "0.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,34 +1,37 @@
 # braid
 
-Version control for agent conversations. braid saves every Claude Code and Codex session into your git repository, ties it to the commits it produced, and publishes it when you `git push`. Reviewers can question the session behind a pull request, and you can merge their review sessions back into yours.
+Version control for agent conversations. braid saves every Claude Code session into your git repository, ties it to the commits it produced, and publishes it when you `git push`. Reviewers can question the session behind a pull request, and you can merge their review sessions back into yours.
 
-> **Design draft.** braid is not built yet. This repository holds the [design](docs/design.md), a [worked example](examples/pr-review) and a working [status line prototype](prototype/statusline). Feedback is welcome in issues.
+> **v0.1, for Claude Code.** Codex support is next. See [Status of v0.1](docs/design.md#status-of-v01) for what is built and what is planned.
 
 ## Install
 
-Once per machine:
+You need Node 22 or later and git. `gh` is optional: it adds pull request numbers to the status line.
 
-```sh
-npm install -g braid    # planned; the package name is not final
-braid install           # adds braid's hooks, status line and skills to Claude Code and Codex
+In Claude Code, once per machine:
+
+```
+/plugin marketplace add gbarbalinardo/braid
+/plugin install braid@braid
+/braid:setup
 ```
 
-Once per repository:
+Then, once per repository, run `braid init` (or ask Claude to set up braid here) and commit what it writes:
 
 ```sh
-braid init              # installs the git hooks and writes .braid/config.toml
+braid init
 git add .braid && git commit -m "Set up braid"
 ```
 
-Teammates who have run `braid install` need nothing more. braid sets up their clone the first time their agent opens it.
+`braid init` turns publishing on for private repositories and leaves it off for public ones. Teammates who have the plugin need nothing more: braid sets up their clone the first time their agent opens it.
 
 ## Use
 
-Work with your agent and use git as usual:
+Work with Claude Code and use git as usual:
 
 ```sh
-git commit -m "Retry webhook deliveries on 5xx"   # links the session behind the commit
-git push                                          # publishes it, with secrets redacted
+git commit -m "Retry webhook deliveries on 5xx"   # made by the agent: links its session
+git push                                          # publishes that session, redacted
 ```
 
 The status line shows where your session stands:
@@ -43,18 +46,12 @@ The status line shows where your session stands:
 | `#128` | the pull request of this branch |
 | `↑4` | 4 records not published yet |
 | `↓ review/bob +5` | a session built on yours has 5 records you have not merged |
+| `local` | saved here only: no commit names this session yet |
 | `✓` | everything published, nothing waiting |
 
-**Review a pull request.** Check it out and open your agent. It knows which sessions are behind the branch:
+**Review a pull request.** Check it out and start Claude Code. It knows which sessions are behind the branch, and `/braid:review-pr 128` reviews the change together with them. Your review session is published when it ends.
 
-```
-$ gh pr checkout 128 && codex
-> review this PR. why a fixed 3 retries instead of the 30s timeout?
-```
-
-Your review session is published when it ends.
-
-**Merge a review.** When `↓` appears, tell your agent what to keep:
+**Merge a review.** When `↓` appears, tell Claude what to keep:
 
 ```
 > /braid:sync keep my jitter, adopt the reviewer's time budget
@@ -62,32 +59,32 @@ Your review session is published when it ends.
 
 `/braid:sync skip review/bob` marks a review as seen without adopting it.
 
-**Commands.** Everything above works without them. They are `/braid:…` in Claude Code and `$braid:…` in Codex, and asking in plain language works too.
-
 | Command | |
 |---|---|
-| `sync [instruction]` | merge the sessions waiting in `↓`, or `skip` them |
-| `load <session> \| #<pr>` | bring another session into this one, or replay it in a new session |
-| `status` | everything the status line abbreviates |
-| `withhold <range>` | keep part of this session from being published |
-| `review-pr <n>` | review a pull request with consistency checks |
+| `/braid:sync [instruction]` | merge the sessions waiting in `↓`, or `skip` them |
+| `/braid:load <id \| name \| pr:N>` | read another session as a briefing |
+| `/braid:review-pr <n>` | review a pull request with the sessions behind it |
+| `/braid:status` | everything the status line abbreviates |
+| `/braid:push` | publish this session now |
+| `/braid:withhold` | keep part of this session, or all of it, from being published |
+| `/braid:setup` | set up the status line and the `braid` command |
 
-**Privacy.** Secrets are redacted before anything leaves your machine, and public repositories publish nothing until you turn publishing on. Anyone who can read the repository can read its published sessions. See [Publishing](docs/design.md#publishing) and [Trust](docs/design.md#trust).
+Asking in plain language works too: "pull in Bob's review but keep my jitter".
 
-## Try the status line
-
-The status line works today. It needs `git` and `jq`:
-
-```sh
-git clone https://github.com/gbarbalinardo/braid
-braid/prototype/statusline/test.sh
-```
-
-[prototype/statusline](prototype/statusline) shows how to add it to Claude Code.
+**Privacy.** Published copies hold the conversation's messages and tool calls only. Reasoning, images and the harness's raw files stay on your machine, and common credentials are redacted before anything leaves it. Anyone who can read the repository can read its published sessions. See [Publishing](docs/design.md#publishing) and [Trust](docs/design.md#trust).
 
 ## How it works
 
-Each session lives on its own git ref under `refs/braid/`, in [ATXF](https://github.com/leostera/atxf), an open format for agent transcripts, next to the harness's own session file kept byte for byte. Your unredacted copy stays in `.git/braid/`, where no push can reach it. [docs/design.md](docs/design.md) covers the model, storage, publishing, trust, merging and review.
+Each session lives on its own git ref under `refs/braid/`, in [ATXF](https://github.com/leostera/atxf), an open format for agent transcripts. Your unredacted copy stays in `.git/braid/`, where no push can reach it. No server or GitHub App is involved. [docs/design.md](docs/design.md) covers the model, storage, publishing, trust, merging and review, and [examples/pr-review](examples/pr-review) is a complete conversation between an author and a reviewer.
+
+## Development
+
+```sh
+npm install
+npm run check    # typecheck, tests, and the bundle in dist/
+```
+
+`dist/braid.mjs` is committed, because the plugin runs it straight from the repository. `npm run check` rebuilds it, so commit it together with the change to `src/`.
 
 ## License
 

@@ -1,0 +1,5 @@
+# braid: https://github.com/gbarbalinardo/braid
+# publish = "on-push" publishes the sessions behind your commits when you git push.
+# publish = "off" keeps every session on this machine.
+publish = "on-push"
+remote = "origin"

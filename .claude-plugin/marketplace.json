@@ -1,0 +1,14 @@
+{
+  "name": "braid",
+  "description": "braid: version control for agent conversations.",
+  "owner": {
+    "name": "Giuseppe Barbalinardo"
+  },
+  "plugins": [
+    {
+      "name": "braid",
+      "source": "./",
+      "description": "Version control for agent conversations: saves each session into git, publishes it with git push, and merges teammates' sessions into yours."
+    }
+  ]
+}

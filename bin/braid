@@ -1,0 +1,4 @@
+#!/bin/sh
+# Runs the braid CLI bundled next to this script.
+dir=$(cd "$(dirname "$0")/.." && pwd)
+exec node "$dir/dist/braid.mjs" "$@"
