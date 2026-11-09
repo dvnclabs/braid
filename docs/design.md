@@ -259,7 +259,7 @@ The ATXF 0.2 draft adds `actorId` and `userAgent` to every record envelope. brai
 | replay | `/resume`, `claude --resume <id>` | `codex resume <id>` |
 | headless | `claude -p` | `codex exec` |
 
-`braid import openclaw` imports [OpenClaw](https://openclaw.ai) sessions: it opens each agent's SQLite store read-only, decompresses the events, which are in pi's session format, converts them with ATXF's pi converter in batches of at most 16 MB, and picks up after the last event it imported. A spawned session joins its parent's conversation. Gemini CLI, OpenCode and Pi can be imported the same way through ATXF's converters. Any harness that supports MCP can use `braid mcp`, which offers the commands as tools and sessions as resources (`@braid:session://5b0e2c1a`). It offers no prompts, because the skills already provide the commands.
+`braid import openclaw` imports OpenClaw sessions: it opens each agent's SQLite store read-only, decompresses the events, which are in pi's session format, converts them with ATXF's pi converter in batches of at most 16 MB, and picks up after the last event it imported. A spawned session joins its parent's conversation. ATXF also has converters for Gemini CLI, OpenCode and Pi, so importing those would follow the same path. Any harness that supports MCP can use `braid mcp`, which offers the commands as tools and sessions as resources (`@braid:session://5b0e2c1a`). It offers no prompts, because the skills already provide the commands.
 
 Harnesses name their tools differently: Claude Code edits with `Edit`, Codex with `apply_patch`, and Codex runs commands with `exec_command`. Each adapter maps tool names to a few kinds (read, edit, write, shell, search, web, subagent), and digests, checks and the commit rule work from the kinds.
 
@@ -308,15 +308,23 @@ braid ships as a Claude Code plugin served from this repository. The plugin carr
 
 ## Status of v0.1
 
-Built, for Claude Code: saving each turn into the store, `/braid:commit`, commit trailers and conversation commits for the agent's code commits (git hooks on by default, `git-hooks = false` to turn them off), publishing on `git push` with redaction and withholding, fetching, the status line and the after-turn line, `/braid:fork` from another session and recording Claude Code's `/branch` as a branch, `/braid:merge` of waiting or named sessions and skips, publishing review sessions when they end, and the skills. `npm test` runs the whole flow between two people through git, with no mocks.
+Built, for Claude Code:
+- **Saving:** each turn is saved into the store, read incrementally in bounded windows, and subagents are saved with their session.
+- **Git:** `/braid:commit` commits the conversation. The agent's code commits get trailers and commit the conversation too, or with `link = "store"` they carry no trailer. `post-rewrite` carries those links across amends and rebases. The git hooks are on by default; `git-hooks = false` turns them off.
+- **Repositories:** a session is saved and published in every repository it commits in.
+- **Publishing:** `git push` publishes, with built-in and team redaction rules, withholding by time and by path, `--dry-run`, and a personal opt-out. The status line and the after-turn line show where each session stands, and `braid fetch` gets teammates' sessions.
+- **Forks and merges:** `/braid:fork` continues from another session, Claude Code's `/branch` is recorded as a branch, and `/braid:merge` merges or skips waiting or named sessions.
+- **Machines:** `braid replay` resumes a session here or on another machine, and two machines can publish the same session.
+- **Imports and reviews:** `braid import openclaw` imports OpenClaw sessions, and review sessions publish when they end. All of it is reachable through the skills.
+
+`npm test` runs these flows through git, with no mocks.
 
 Next:
 
 1. Codex, through its hooks, skills and ATXF's converter.
-2. Commits you make yourself, `post-rewrite`, and `braid prune`.
+2. Commits you make yourself, and `braid prune`.
 3. Review: digests on pull requests, `braid check` for CI, and contributors on forks.
-4. Replay in a new session, through ATXF's writers.
-5. gitleaks and team redaction rules, and the MCP server.
+4. gitleaks, and the MCP server.
 
 Open questions:
 
