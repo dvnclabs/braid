@@ -7,8 +7,10 @@
 //   patterns = ['CUST-\d{6}']                   # regular expressions
 //   withhold = ["customers/**", "*.pem"]        # tool calls on these paths, and their results
 //   withhold-session = false                    # true: a match withholds the whole session
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, relative } from "node:path";
+//   withhold-gitignored = true                  # tool calls on files git ignores; false turns it off
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, normalize, relative } from "node:path";
 import { gitMaybe } from "./git.ts";
 import type { Rec } from "./records.ts";
 import type { Rule } from "./redact.ts";
@@ -19,6 +21,8 @@ export interface Rules {
   redact: Rule[];
   withhold: { glob: string; re: RegExp }[];
   withholdSession: boolean;
+  /** Withhold tool calls on files git ignores, such as .env: they are not in the repository, so a session is their only way out. */
+  withholdIgnored: boolean;
   /** Where the rules came from, for --dry-run. */
   sources: string[];
   /** Rules that could not be used, such as an invalid pattern. */
@@ -77,7 +81,7 @@ function defaultBranch(repo: Repo, remote: string): string | undefined {
 }
 
 export function loadRules(repo: Repo, remote: string): Rules {
-  const rules: Rules = { redact: [], withhold: [], withholdSession: false, sources: [], problems: [] };
+  const rules: Rules = { redact: [], withhold: [], withholdSession: false, withholdIgnored: true, sources: [], problems: [] };
   const texts: [string, string][] = [];
   const own = join(configDir(), "redact.toml");
   if (existsSync(own)) texts.push([own.replace(process.env.HOME ?? "\0", "~"), readFileSync(own, "utf8")]);
@@ -99,6 +103,7 @@ export function loadRules(repo: Repo, remote: string): Rules {
     }
     for (const glob of Array.isArray(t.withhold) ? t.withhold : []) rules.withhold.push({ glob, re: globToRegExp(glob) });
     if (t["withhold-session"] === true) rules.withholdSession = true;
+    if (t["withhold-gitignored"] === false) rules.withholdIgnored = false;
   }
   return rules;
 }
@@ -130,28 +135,55 @@ function candidates(p: string, top: string): string[] {
   return out;
 }
 
+/** A path as git names it inside the working tree, or undefined when it is outside. */
+function inRepo(p: string, top: string): string | undefined {
+  let rel = isAbsolute(p) ? relative(top, p) : normalize(p);
+  if (isAbsolute(p) && rel.startsWith("..")) {
+    // The transcript may name the checkout through a symlink: resolve what exists.
+    const real = existsSync(p) ? realpathSync(p) : existsSync(dirname(p)) ? join(realpathSync(dirname(p)), p.slice(dirname(p).length + 1)) : undefined;
+    rel = real ? relative(top, real) : "..";
+  }
+  return rel && !rel.startsWith("..") && !isAbsolute(rel) && !rel.includes("\0") ? rel : undefined;
+}
+
+/** The paths among `paths` that git ignores in this working tree. */
+function gitIgnored(paths: string[], top: string): { ignored: Set<string>; problem?: string } {
+  if (paths.length === 0) return { ignored: new Set() };
+  const r = spawnSync("git", ["check-ignore", "--stdin", "-z"], { cwd: top, input: paths.join("\0"), encoding: "utf8", maxBuffer: 1 << 26 });
+  // 0: some are ignored, 1: none are.
+  if (r.status !== 0 && r.status !== 1) return { ignored: new Set(), problem: `git check-ignore failed: ${(r.stderr ?? "").trim().split("\n")[0]}` };
+  return { ignored: new Set((r.stdout ?? "").split("\0").filter(Boolean)) };
+}
+
 /**
  * Records to withhold under the path rules: each assistant record with a tool
- * call on a matching path, and the tool results of those calls. Counts are per glob.
+ * call on a matching path or on a file git ignores, and the tool results of
+ * those calls. Counts are per glob, and ".gitignore" for ignored files.
  */
-export function pathWithheld(records: Rec[], rules: Rules, top: string): { ids: Set<string>; counts: Map<string, number> } {
+export function pathWithheld(records: Rec[], rules: Rules, top: string): { ids: Set<string>; counts: Map<string, number>; problem?: string } {
   const ids = new Set<string>();
   const counts = new Map<string, number>();
-  if (rules.withhold.length === 0) return { ids, counts };
-  const calls = new Set<string>();
+  const calls: { record: string; id?: string; paths: string[] }[] = [];
   for (const r of records) {
     if (!Array.isArray(r.content)) continue;
     for (const block of r.content as { type?: string; id?: string; arguments?: unknown }[]) {
       if (block?.type !== "tool_call" || !block.arguments || typeof block.arguments !== "object") continue;
-      const paths = pathsOf(block.arguments as Record<string, unknown>).flatMap((p) => candidates(p, top));
-      const hit = rules.withhold.find((w) => paths.some((p) => w.re.test(p)));
-      if (!hit) continue;
-      if (!ids.has(r.id)) counts.set(hit.glob, (counts.get(hit.glob) ?? 0) + 1);
-      ids.add(r.id);
-      if (block.id) calls.add(block.id);
+      calls.push({ record: r.id, id: block.id, paths: pathsOf(block.arguments as Record<string, unknown>) });
     }
   }
+  const ignored = rules.withholdIgnored ? gitIgnored([...new Set(calls.flatMap((c) => c.paths.map((p) => inRepo(p, top)).filter((p): p is string => !!p)))], top) : { ignored: new Set<string>() };
+
+  const withheldCalls = new Set<string>();
+  for (const call of calls) {
+    const forms = call.paths.flatMap((p) => candidates(p, top));
+    const glob = rules.withhold.find((w) => forms.some((p) => w.re.test(p)))?.glob;
+    const cause = glob ?? (call.paths.some((p) => ignored.ignored.has(inRepo(p, top) ?? "")) ? ".gitignore" : undefined);
+    if (!cause) continue;
+    if (!ids.has(call.record)) counts.set(cause, (counts.get(cause) ?? 0) + 1);
+    ids.add(call.record);
+    if (call.id) withheldCalls.add(call.id);
+  }
   // The results of those calls go too; they are counted with their call.
-  for (const r of records) if (r.role === "tool" && typeof r.toolCallId === "string" && calls.has(r.toolCallId)) ids.add(r.id);
-  return { ids, counts };
+  for (const r of records) if (r.role === "tool" && typeof r.toolCallId === "string" && withheldCalls.has(r.toolCallId)) ids.add(r.id);
+  return { ids, counts, problem: ignored.problem };
 }

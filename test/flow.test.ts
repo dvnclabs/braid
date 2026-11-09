@@ -552,3 +552,40 @@ test("OpenClaw sessions import from SQLite, incrementally", async () => {
   assert.match(shown.stdout, /via openclaw · assistant\] → read ci\/build\.log/);
   assert.match(shown.stdout, /The build passes\./);
 });
+
+test("tool calls on files git ignores are withheld, unless turned off", () => {
+  const s = sandbox();
+  const repo = clone(s, "jo", "jo@example.com");
+  writeFileSync(join(repo, ".gitignore"), ".env\ndata/\n");
+  mkdirSync(join(repo, "data"));
+  mkdirSync(join(repo, "src"));
+  writeFileSync(join(repo, ".env"), "DB_URL=postgres://localhost/app\n");
+  writeFileSync(join(repo, "data", "clients.csv"), "name,revenue\n");
+  writeFileSync(join(repo, "src", "app.ts"), "export {};\n");
+  must(s.env, repo, "git", ["add", ".gitignore", "src"]);
+  must(s.env, repo, "git", ["commit", "--quiet", "-m", "initial"]);
+  braid(s.env, repo, ["init", "--publish", "on-push"]);
+
+  const t = new Transcript(s.root, ALICE);
+  const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo });
+  braid(s.env, repo, ["hook", "session-start"], hookIn);
+  t.user("Why is the import failing?");
+  t.toolCall("Read", { file_path: join(repo, ".env") }, "toolu_env", "DB_URL=postgres://localhost/app");
+  t.toolCall("Bash", { command: "head -3 data/clients.csv" }, "toolu_csv", "name,revenue\nAcme,1200000");
+  t.toolCall("Read", { file_path: join(repo, "src", "app.ts") }, "toolu_app", "export {};");
+  t.assistant("The CSV has no header row for region.");
+  braid(s.env, repo, ["hook", "stop"], hookIn);
+
+  const dry = braid(s.env, repo, ["push", "--dry-run", "--session", ALICE]).stdout;
+  assert.match(dry, /withheld: \.gitignore 2/);
+  assert.match(dry, /would publish 4 records/, "the prompt, the tracked file's call and result, and the answer");
+  braid(s.env, repo, ["push", "--session", ALICE]);
+  const text = JSON.stringify(records(s.env, s.root, join(s.root, "remote.git"), `refs/braid/sessions/${ALICE}/${ALICE}`));
+  assert.doesNotMatch(text, /DB_URL|Acme,1200000|clients\.csv/);
+  assert.match(text, /src\/app\.ts/);
+
+  // withhold-gitignored = false in your own rules turns it off.
+  mkdirSync(join(s.env.XDG_CONFIG_HOME!, "braid"), { recursive: true });
+  writeFileSync(join(s.env.XDG_CONFIG_HOME!, "braid", "redact.toml"), "withhold-gitignored = false\n");
+  assert.match(braid(s.env, repo, ["push", "--dry-run", "--session", ALICE]).stdout, /withheld: none/);
+});

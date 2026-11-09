@@ -497,8 +497,9 @@ function redactValue(value, counts, extra = []) {
 }
 
 // src/rules.ts
-import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
-import { isAbsolute, join as join5, relative } from "node:path";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { existsSync as existsSync4, readFileSync as readFileSync4, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join as join5, normalize, relative } from "node:path";
 function parseToml(text) {
   const out = {};
   const clean2 = text.replace(/^\s*#.*$/gm, "");
@@ -543,7 +544,7 @@ function defaultBranch(repo, remote) {
   return void 0;
 }
 function loadRules(repo, remote) {
-  const rules = { redact: [], withhold: [], withholdSession: false, sources: [], problems: [] };
+  const rules = { redact: [], withhold: [], withholdSession: false, withholdIgnored: true, sources: [], problems: [] };
   const texts = [];
   const own = join5(configDir(), "redact.toml");
   if (existsSync4(own)) texts.push([own.replace(process.env.HOME ?? "\0", "~"), readFileSync4(own, "utf8")]);
@@ -565,6 +566,7 @@ function loadRules(repo, remote) {
     }
     for (const glob of Array.isArray(t.withhold) ? t.withhold : []) rules.withhold.push({ glob, re: globToRegExp(glob) });
     if (t["withhold-session"] === true) rules.withholdSession = true;
+    if (t["withhold-gitignored"] === false) rules.withholdIgnored = false;
   }
   return rules;
 }
@@ -585,25 +587,44 @@ function candidates(p, top) {
   if (!inside.startsWith("..")) out.push(inside);
   return out;
 }
+function inRepo(p, top) {
+  let rel = isAbsolute(p) ? relative(top, p) : normalize(p);
+  if (isAbsolute(p) && rel.startsWith("..")) {
+    const real = existsSync4(p) ? realpathSync(p) : existsSync4(dirname(p)) ? join5(realpathSync(dirname(p)), p.slice(dirname(p).length + 1)) : void 0;
+    rel = real ? relative(top, real) : "..";
+  }
+  return rel && !rel.startsWith("..") && !isAbsolute(rel) && !rel.includes("\0") ? rel : void 0;
+}
+function gitIgnored(paths, top) {
+  if (paths.length === 0) return { ignored: /* @__PURE__ */ new Set() };
+  const r = spawnSync2("git", ["check-ignore", "--stdin", "-z"], { cwd: top, input: paths.join("\0"), encoding: "utf8", maxBuffer: 1 << 26 });
+  if (r.status !== 0 && r.status !== 1) return { ignored: /* @__PURE__ */ new Set(), problem: `git check-ignore failed: ${(r.stderr ?? "").trim().split("\n")[0]}` };
+  return { ignored: new Set((r.stdout ?? "").split("\0").filter(Boolean)) };
+}
 function pathWithheld(records, rules, top) {
   const ids = /* @__PURE__ */ new Set();
   const counts = /* @__PURE__ */ new Map();
-  if (rules.withhold.length === 0) return { ids, counts };
-  const calls = /* @__PURE__ */ new Set();
+  const calls = [];
   for (const r of records) {
     if (!Array.isArray(r.content)) continue;
     for (const block of r.content) {
       if (block?.type !== "tool_call" || !block.arguments || typeof block.arguments !== "object") continue;
-      const paths = pathsOf(block.arguments).flatMap((p) => candidates(p, top));
-      const hit = rules.withhold.find((w) => paths.some((p) => w.re.test(p)));
-      if (!hit) continue;
-      if (!ids.has(r.id)) counts.set(hit.glob, (counts.get(hit.glob) ?? 0) + 1);
-      ids.add(r.id);
-      if (block.id) calls.add(block.id);
+      calls.push({ record: r.id, id: block.id, paths: pathsOf(block.arguments) });
     }
   }
-  for (const r of records) if (r.role === "tool" && typeof r.toolCallId === "string" && calls.has(r.toolCallId)) ids.add(r.id);
-  return { ids, counts };
+  const ignored = rules.withholdIgnored ? gitIgnored([...new Set(calls.flatMap((c) => c.paths.map((p) => inRepo(p, top)).filter((p) => !!p)))], top) : { ignored: /* @__PURE__ */ new Set() };
+  const withheldCalls = /* @__PURE__ */ new Set();
+  for (const call of calls) {
+    const forms = call.paths.flatMap((p) => candidates(p, top));
+    const glob = rules.withhold.find((w) => forms.some((p) => w.re.test(p)))?.glob;
+    const cause = glob ?? (call.paths.some((p) => ignored.ignored.has(inRepo(p, top) ?? "")) ? ".gitignore" : void 0);
+    if (!cause) continue;
+    if (!ids.has(call.record)) counts.set(cause, (counts.get(cause) ?? 0) + 1);
+    ids.add(call.record);
+    if (call.id) withheldCalls.add(call.id);
+  }
+  for (const r of records) if (r.role === "tool" && typeof r.toolCallId === "string" && withheldCalls.has(r.toolCallId)) ids.add(r.id);
+  return { ids, counts, problem: ignored.problem };
 }
 
 // src/publish.ts
@@ -678,7 +699,7 @@ function publish(repo, session, opts = {}) {
     const localAgents = readAgentChunks(ref, { gitDir: repo.store });
     const rules = loadRules(repo, remote);
     const byPath = pathWithheld([...local.flat(), ...[...localAgents.values()].flat(2)], rules, repo.top);
-    const report = { counts: /* @__PURE__ */ new Map(), withheld: new Map(byPath.counts), sources: rules.sources, problems: rules.problems };
+    const report = { counts: /* @__PURE__ */ new Map(), withheld: new Map(byPath.counts), sources: rules.sources, problems: [...rules.problems, ...byPath.problem ? [byPath.problem] : []] };
     if ((state.withheld ?? []).length) report.withheld.set("braid withhold", state.withheld.length);
     if (rules.withholdSession && byPath.ids.size > 0) return { ...result, reason: "withheld whole: it touched a path under the withhold rules", report };
     const withheld = /* @__PURE__ */ new Set([...state.withheld ?? [], ...byPath.ids]);
@@ -763,7 +784,7 @@ import { randomUUID as randomUUID2 } from "node:crypto";
 
 // src/load.ts
 import { randomBytes } from "node:crypto";
-import { spawnSync as spawnSync2 } from "node:child_process";
+import { spawnSync as spawnSync3 } from "node:child_process";
 
 // src/status.ts
 function cleanName(name2) {
@@ -861,7 +882,7 @@ function allSessions(repo, remote) {
   return [...out.values()];
 }
 function prSessions(repo, n, remote) {
-  const r = spawnSync2("gh", ["pr", "view", n, "--json", "commits"], { cwd: repo.top, encoding: "utf8" });
+  const r = spawnSync3("gh", ["pr", "view", n, "--json", "commits"], { cwd: repo.top, encoding: "utf8" });
   let commits = [];
   try {
     commits = JSON.parse(r.stdout || "{}").commits ?? [];
@@ -950,7 +971,7 @@ function markFork(repo, current, b) {
 
 // src/replay.ts
 import { randomUUID } from "node:crypto";
-import { mkdirSync as mkdirSync6, realpathSync, writeFileSync as writeFileSync5 } from "node:fs";
+import { mkdirSync as mkdirSync6, realpathSync as realpathSync2, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join7 } from "node:path";
 
@@ -1966,7 +1987,7 @@ function replay(repo, found, remote, opts = {}) {
   if (!head) throw new Error(`session ${found.session.slice(0, 8)} has no records to replay`);
   const parents = new Map([...all.values()].map((r) => [r.id, r.parentId ?? null]));
   const path2 = ancestry(head, parents).reverse().map((id) => all.get(id)).filter((r) => r && r.type !== "transcript");
-  const cwd = realpathSync(opts.cwd ?? process.cwd());
+  const cwd = realpathSync2(opts.cwd ?? process.cwd());
   const from = sourceCwd([...all.values()]);
   const pairs = [...from ? [[from, cwd]] : [], ...userConfig().paths];
   const session = randomUUID();
@@ -2473,13 +2494,13 @@ function prePush(repo, remote, stdin) {
 
 // src/hooks.ts
 import { appendFileSync, existsSync as existsSync9 } from "node:fs";
-import { dirname as dirname2, join as join11 } from "node:path";
+import { dirname as dirname3, join as join11 } from "node:path";
 
 // src/setup.ts
-import { spawnSync as spawnSync3 } from "node:child_process";
+import { spawnSync as spawnSync4 } from "node:child_process";
 import { chmodSync as chmodSync2, existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync8, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { dirname, join as join10, resolve as resolve2 } from "node:path";
+import { dirname as dirname2, join as join10, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 function cliPath() {
   return resolve2(process.argv[1] ?? fileURLToPath(import.meta.url));
@@ -2489,7 +2510,7 @@ function writePointer() {
   writeFileSync7(join10(configDir(), "cli"), cliPath());
 }
 function visibility(repo) {
-  const r = spawnSync3("gh", ["repo", "view", "--json", "visibility", "-q", ".visibility"], { cwd: repo.top, encoding: "utf8" });
+  const r = spawnSync4("gh", ["repo", "view", "--json", "visibility", "-q", ".visibility"], { cwd: repo.top, encoding: "utf8" });
   return r.status === 0 ? r.stdout.trim() : void 0;
 }
 var TEMPLATE = (publish2, gitHooks) => [
@@ -2510,7 +2531,7 @@ function init(repo, opts = {}) {
     const chosen = opts.publish ?? userConfig().publish;
     const vis = chosen ? void 0 : visibility(repo);
     const publish2 = chosen ?? (vis === "PRIVATE" || vis === "INTERNAL" ? "on-push" : "off");
-    mkdirSync8(dirname(file2), { recursive: true });
+    mkdirSync8(dirname2(file2), { recursive: true });
     writeFileSync7(file2, TEMPLATE(publish2, opts.gitHooks ?? true));
     const why = opts.publish ? "as asked" : chosen ? "your default in ~/.config/braid/config.toml" : vis ? `repository is ${vis.toLowerCase()}` : "visibility unknown";
     notes.push(`wrote .braid/config.toml (publish = "${publish2}", ${why})`);
@@ -2561,7 +2582,7 @@ function setup(opts = {}) {
     mkdirSync8(configDir(), { recursive: true });
     writeFileSync7(saved, JSON.stringify({ previous: current?.command ?? "", refreshInterval: current?.refreshInterval }, null, 2) + "\n");
     settings.statusLine = { type: "command", command, refreshInterval: 30 };
-    mkdirSync8(dirname(settingsFile), { recursive: true });
+    mkdirSync8(dirname2(settingsFile), { recursive: true });
     writeFileSync7(settingsFile, JSON.stringify(settings, null, 2) + "\n");
     notes.push(`status line set in ${settingsFile}${current?.command ? "; braid runs your previous one first" : ""}`);
   }
@@ -2604,7 +2625,7 @@ function sessionStart(input) {
   recordSession(session, { transcript: input.transcript_path });
   const envFile = process.env.CLAUDE_ENV_FILE;
   if (envFile) {
-    const bin = join11(dirname2(dirname2(cliPath())), "bin");
+    const bin = join11(dirname3(dirname3(cliPath())), "bin");
     appendFileSync(envFile, `export BRAID_SESSION=${session}
 export PATH="${bin}:$PATH"
 `);
@@ -3368,7 +3389,7 @@ function importOpenclaw(repo, dbPath, only) {
 }
 
 // src/statusline.ts
-import { spawn as spawn2, spawnSync as spawnSync4 } from "node:child_process";
+import { spawn as spawn2, spawnSync as spawnSync5 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
 import { existsSync as existsSync11, mkdirSync as mkdirSync9, readFileSync as readFileSync9, statSync as statSync3, writeFileSync as writeFileSync8 } from "node:fs";
 import { join as join13 } from "node:path";
@@ -3378,7 +3399,7 @@ function previous(stdin) {
   if (!existsSync11(file2)) return "";
   const { previous: previous2 } = JSON.parse(readFileSync9(file2, "utf8"));
   if (!previous2) return "";
-  const r = spawnSync4("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
+  const r = spawnSync5("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
   return (r.stdout ?? "").trimEnd();
 }
 function pullRequest(repo) {

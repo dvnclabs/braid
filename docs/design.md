@@ -124,7 +124,10 @@ terms = ["Acme Corp", "Project Falcon"]   # replaced in any case, as [REDACTED:t
 patterns = ['CUST-\d{6}']                  # regular expressions, as [REDACTED:pattern]
 withhold = ["customers/**", "*.pem"]      # tool calls on these paths, and their results
 withhold-session = false                  # true: such a call withholds the whole session
+withhold-gitignored = true                # the default; false publishes calls on files git ignores
 ```
+
+Files git ignores, such as `.env`, credentials and local data, are not in the repository, so a published session would be their only way out. braid withholds every tool call on a path that `git check-ignore` reports as ignored, with its results, unless a rules file sets `withhold-gitignored = false`. Reads of ignored build output and dependencies are withheld too, which costs those sessions some detail; `--dry-run` counts them under `.gitignore`.
 
 `braid push --dry-run` shows what would be published: the records, the redactions per rule, the records withheld per cause, and where the rules came from. `publish = "off"` in `~/.config/braid/config.toml` keeps all of your sessions on your machine, whatever a repository says, and `braid init --publish off` writes a repository's config that way. Running [gitleaks](https://github.com/gitleaks/gitleaks) is *planned*.
 
