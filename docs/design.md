@@ -117,17 +117,26 @@ A session built on someone else's, such as a review, makes no commits, so it pub
 
 **What leaves the machine.** Published copies hold ATXF records only. Native lines, reasoning, images, system messages and harness metadata stay in the store. braid redacts every remaining string with built-in rules for common credentials (cloud, GitHub, Anthropic, OpenAI, Slack, Stripe and npm keys, private keys, JWTs, passwords in URLs, and secret-looking assignments), and replaces home directories, of any user and machine (`/Users/<name>`, `/home/<name>`), with `~`. Matches become markers like `[REDACTED:aws-access-key]`, and each record lists what was removed in `ext.braid.redactions`.
 
-Teams add their own rules in `.braid/redact.toml`, which braid reads from the default branch only, and anyone can add personal ones in `~/.config/braid/redact.toml`:
+**`.braidignore`** lists paths whose tool calls, and their results, are never published, in the syntax of `.gitignore`:
+
+```
+# .braidignore
+.env
+.env.*
+!.env.example
+*.pem
+customers/
+```
+
+`braid init` writes one that covers `.env` files and keys. braid applies the working tree's `.braidignore`, the default branch's, and your own `~/.config/braid/ignore`, each on its own: a path any of them ignores is withheld, so a `!` line on a branch cannot re-include what the default branch ignores. A tool call names its paths through its path arguments and the path-like words of a shell command.
+
+Teams add terms and patterns to redact in `.braid/redact.toml`, which braid reads from the default branch only, and anyone can add personal ones in `~/.config/braid/redact.toml`:
 
 ```toml
 terms = ["Acme Corp", "Project Falcon"]   # replaced in any case, as [REDACTED:term]
 patterns = ['CUST-\d{6}']                  # regular expressions, as [REDACTED:pattern]
-withhold = ["customers/**", "*.pem"]      # tool calls on these paths, and their results
-withhold-session = false                  # true: such a call withholds the whole session
-withhold-gitignored = true                # the default; false publishes calls on files git ignores
+withhold-session = false                  # true: a call on an ignored path withholds the whole session
 ```
-
-Files git ignores, such as `.env`, credentials and local data, are not in the repository, so a published session would be their only way out. braid withholds every tool call on a path that `git check-ignore` reports as ignored, with its results, unless a rules file sets `withhold-gitignored = false`. Reads of ignored build output and dependencies are withheld too, which costs those sessions some detail; `--dry-run` counts them under `.gitignore`.
 
 `braid push --dry-run` shows what would be published: the records, the redactions per rule, the records withheld per cause, and where the rules came from. `publish = "off"` in `~/.config/braid/config.toml` keeps all of your sessions on your machine, whatever a repository says, and `braid init --publish off` writes a repository's config that way. Running [gitleaks](https://github.com/gitleaks/gitleaks) is *planned*.
 

@@ -401,15 +401,18 @@ test("team rules withhold paths and redact terms, and a dry run shows it first",
   const repo = clone(s, "hal", "hal@example.com");
   must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
   braid(s.env, repo, ["init", "--publish", "on-push"]);
-  writeFileSync(join(repo, ".braid", "redact.toml"), 'terms = ["Acme Corp"]\nwithhold = ["customers/**"]\n');
-  must(s.env, repo, "git", ["add", ".braid"]);
+  writeFileSync(join(repo, ".braid", "redact.toml"), 'terms = ["Acme Corp"]\n');
+  appendFileSync(join(repo, ".braidignore"), "customers/\n");
+  must(s.env, repo, "git", ["add", ".braid", ".braidignore"]);
   must(s.env, repo, "git", ["commit", "--quiet", "-m", "Set up braid"]);
   must(s.env, repo, "git", ["push", "--quiet", "origin", "HEAD:main"]);
   must(s.env, repo, "git", ["fetch", "--quiet", "origin"]);
 
-  // Rules on a feature branch do not count: they come from the default branch.
+  // A feature branch cannot weaken the rules: redaction rules come from the
+  // default branch, and its .braidignore applies whatever the branch's says.
   must(s.env, repo, "git", ["checkout", "--quiet", "-b", "feature"]);
   writeFileSync(join(repo, ".braid", "redact.toml"), "terms = []\n");
+  appendFileSync(join(repo, ".braidignore"), "!customers/x.md\n");
   must(s.env, repo, "git", ["commit", "--quiet", "-am", "Drop the rules"]);
 
   const t = new Transcript(s.root, ALICE);
@@ -423,8 +426,8 @@ test("team rules withhold paths and redact terms, and a dry run shows it first",
   const dry = braid(s.env, repo, ["push", "--dry-run", "--session", ALICE]);
   assert.match(dry.stdout, /would publish 2 records/);
   assert.match(dry.stdout, /redacted: term 2/);
-  assert.match(dry.stdout, /withheld: customers\/\*\* 1/);
-  assert.match(dry.stdout, /rules: built in, \.braid\/redact\.toml on origin\/main/);
+  assert.match(dry.stdout, /withheld: customers\/ 1/);
+  assert.match(dry.stdout, /rules: built in, \.braid\/redact\.toml on origin\/main, \.braidignore on origin\/main, \.braidignore\n/);
   const remote = join(s.root, "remote.git");
   assert.equal(must(s.env, s.root, "git", ["--git-dir", remote, "for-each-ref", "refs/braid/"]).trim(), "", "a dry run pushes nothing");
 
@@ -553,18 +556,19 @@ test("OpenClaw sessions import from SQLite, incrementally", async () => {
   assert.match(shown.stdout, /The build passes\./);
 });
 
-test("tool calls on files git ignores are withheld, unless turned off", () => {
+test(".braidignore withholds tool calls on the paths it names", () => {
   const s = sandbox();
   const repo = clone(s, "jo", "jo@example.com");
-  writeFileSync(join(repo, ".gitignore"), ".env\ndata/\n");
   mkdirSync(join(repo, "data"));
   mkdirSync(join(repo, "src"));
   writeFileSync(join(repo, ".env"), "DB_URL=postgres://localhost/app\n");
   writeFileSync(join(repo, "data", "clients.csv"), "name,revenue\n");
   writeFileSync(join(repo, "src", "app.ts"), "export {};\n");
-  must(s.env, repo, "git", ["add", ".gitignore", "src"]);
-  must(s.env, repo, "git", ["commit", "--quiet", "-m", "initial"]);
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  // braid init writes a .braidignore that covers .env files; this team adds its data.
   braid(s.env, repo, ["init", "--publish", "on-push"]);
+  assert.match(readFileSync(join(repo, ".braidignore"), "utf8"), /^\.env$/m);
+  appendFileSync(join(repo, ".braidignore"), "data/\n");
 
   const t = new Transcript(s.root, ALICE);
   const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo });
@@ -577,15 +581,15 @@ test("tool calls on files git ignores are withheld, unless turned off", () => {
   braid(s.env, repo, ["hook", "stop"], hookIn);
 
   const dry = braid(s.env, repo, ["push", "--dry-run", "--session", ALICE]).stdout;
-  assert.match(dry, /withheld: \.gitignore 2/);
-  assert.match(dry, /would publish 4 records/, "the prompt, the tracked file's call and result, and the answer");
+  assert.match(dry, /withheld: \.env 1, data\/ 1/);
+  assert.match(dry, /would publish 4 records/, "the prompt, the call on src/app.ts and its result, and the answer");
   braid(s.env, repo, ["push", "--session", ALICE]);
   const text = JSON.stringify(records(s.env, s.root, join(s.root, "remote.git"), `refs/braid/sessions/${ALICE}/${ALICE}`));
   assert.doesNotMatch(text, /DB_URL|Acme,1200000|clients\.csv/);
   assert.match(text, /src\/app\.ts/);
 
-  // withhold-gitignored = false in your own rules turns it off.
+  // Your own ~/.config/braid/ignore adds to it.
   mkdirSync(join(s.env.XDG_CONFIG_HOME!, "braid"), { recursive: true });
-  writeFileSync(join(s.env.XDG_CONFIG_HOME!, "braid", "redact.toml"), "withhold-gitignored = false\n");
-  assert.match(braid(s.env, repo, ["push", "--dry-run", "--session", ALICE]).stdout, /withheld: none/);
+  writeFileSync(join(s.env.XDG_CONFIG_HOME!, "braid", "ignore"), "src/\n");
+  assert.match(braid(s.env, repo, ["push", "--dry-run", "--session", ALICE]).stdout, /withheld: \.env 1, data\/ 1, src\/ 1/);
 });

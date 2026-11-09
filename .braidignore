@@ -1,0 +1,7 @@
+# braid: tool calls on these paths, and their results, are never published.
+# Same syntax as .gitignore. Commit this file so that it applies to everyone.
+.env
+.env.*
+!.env.example
+*.pem
+*.key

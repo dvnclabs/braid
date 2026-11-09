@@ -38,6 +38,17 @@ const TEMPLATE = (publish: string, gitHooks: boolean) =>
     "",
   ].join("\n");
 
+const IGNORE_TEMPLATE = [
+  "# braid: tool calls on these paths, and their results, are never published.",
+  "# Same syntax as .gitignore. Commit this file so that it applies to everyone.",
+  ".env",
+  ".env.*",
+  "!.env.example",
+  "*.pem",
+  "*.key",
+  "",
+].join("\n");
+
 /** Once per repository: `.braid/config.toml`, the store, and the git hooks when git-hooks is on. */
 export function init(repo: Repo, opts: { gitHooks?: boolean; publish?: "on-push" | "off" } = {}): string[] {
   const notes: string[] = [];
@@ -50,12 +61,17 @@ export function init(repo: Repo, opts: { gitHooks?: boolean; publish?: "on-push"
     writeFileSync(file, TEMPLATE(publish, opts.gitHooks ?? true));
     const why = opts.publish ? "as asked" : chosen ? "your default in ~/.config/braid/config.toml" : vis ? `repository is ${vis.toLowerCase()}` : "visibility unknown";
     notes.push(`wrote .braid/config.toml (publish = "${publish}", ${why})`);
-    notes.push("commit it so teammates get braid too: git add .braid && git commit -m 'Set up braid'");
+    notes.push("commit it so teammates get braid too: git add .braid .braidignore && git commit -m 'Set up braid'");
   } else if (opts.gitHooks !== undefined) {
     const text = readFileSync(file, "utf8");
     const line = `git-hooks = ${opts.gitHooks}`;
     writeFileSync(file, /^git-hooks\s*=.*$/m.test(text) ? text.replace(/^git-hooks\s*=.*$/m, line) : `${line}\n${text}`);
     notes.push(`set ${line} in .braid/config.toml`);
+  }
+  const ignore = join(repo.top, ".braidignore");
+  if (!existsSync(ignore)) {
+    writeFileSync(ignore, IGNORE_TEMPLATE);
+    notes.push("wrote .braidignore: tool calls on .env files and keys are never published; add your own paths");
   }
   ensureStore(repo);
   notes.push(...(readConfig(repo).gitHooks ? installHooks(repo) : uninstallHooks(repo)));

@@ -497,9 +497,60 @@ function redactValue(value, counts, extra = []) {
 }
 
 // src/rules.ts
-import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync4, readFileSync as readFileSync4, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join as join5, normalize, relative } from "node:path";
+
+// src/ignore.ts
+function globBody(glob) {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "\\" && i + 1 < glob.length) {
+      re += glob[++i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    } else if (c === "*" && glob[i + 1] === "*") {
+      const slash = glob[i + 2] === "/";
+      re += slash ? "(?:.*/)?" : ".*";
+      i += slash ? 2 : 1;
+    } else if (c === "*") re += "[^/]*";
+    else if (c === "?") re += "[^/]";
+    else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  }
+  return re;
+}
+function parseIgnore(text) {
+  const rules = [];
+  for (const raw of text.split(/\r?\n/)) {
+    let line = raw.replace(/(?<!\\)\s+$/, "");
+    if (!line || line.startsWith("#")) continue;
+    const pattern = line;
+    const negate = line.startsWith("!");
+    if (negate) line = line.slice(1);
+    if (line.startsWith("\\#") || line.startsWith("\\!")) line = line.slice(1);
+    const dirOnly = line.endsWith("/");
+    if (dirOnly) line = line.slice(0, -1);
+    const anchored = line.includes("/");
+    if (line.startsWith("/")) line = line.slice(1);
+    if (!line) continue;
+    rules.push({ pattern, negate, dirOnly, re: new RegExp(anchored ? `^${globBody(line)}$` : `(?:^|/)${globBody(line)}$`) });
+  }
+  return rules;
+}
+function lastMatch(rules, path2, isDir) {
+  let hit;
+  for (const rule of rules) if ((isDir || !rule.dirOnly) && rule.re.test(path2)) hit = rule;
+  return hit;
+}
+function ignoredBy(rules, path2) {
+  const parts = path2.split("/").filter(Boolean);
+  for (let i = 1; i < parts.length; i++) {
+    const dir = lastMatch(rules, parts.slice(0, i).join("/"), true);
+    if (dir && !dir.negate) return dir;
+  }
+  const hit = lastMatch(rules, parts.join("/"), true);
+  return hit && !hit.negate ? hit : void 0;
+}
+
+// src/rules.ts
 function parseToml(text) {
   const out = {};
   const clean2 = text.replace(/^\s*#.*$/gm, "");
@@ -523,19 +574,6 @@ function parseToml(text) {
   }
   return out;
 }
-function globToRegExp(glob) {
-  let re = "";
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
-    if (c === "*" && glob[i + 1] === "*") {
-      re += glob[i + 2] === "/" ? "(?:.*/)?" : ".*";
-      i += glob[i + 2] === "/" ? 2 : 1;
-    } else if (c === "*") re += "[^/]*";
-    else if (c === "?") re += "[^/]";
-    else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-  }
-  return new RegExp(glob.includes("/") ? `^/?${re}$` : `(?:^|/)${re}$`);
-}
 function defaultBranch(repo, remote) {
   const head = gitMaybe(["symbolic-ref", "-q", `refs/remotes/${remote}/HEAD`], { cwd: repo.top })?.trim();
   for (const ref of [head, `refs/remotes/${remote}/main`, `refs/remotes/${remote}/master`, "refs/heads/main", "refs/heads/master"]) {
@@ -544,7 +582,7 @@ function defaultBranch(repo, remote) {
   return void 0;
 }
 function loadRules(repo, remote) {
-  const rules = { redact: [], withhold: [], withholdSession: false, withholdIgnored: true, sources: [], problems: [] };
+  const rules = { redact: [], ignores: [], withholdSession: false, sources: [], problems: [] };
   const texts = [];
   const own = join5(configDir(), "redact.toml");
   if (existsSync4(own)) texts.push([own.replace(process.env.HOME ?? "\0", "~"), readFileSync4(own, "utf8")]);
@@ -564,9 +602,19 @@ function loadRules(repo, remote) {
         rules.problems.push(`${source}: not a valid pattern: ${pattern}`);
       }
     }
-    for (const glob of Array.isArray(t.withhold) ? t.withhold : []) rules.withhold.push({ glob, re: globToRegExp(glob) });
     if (t["withhold-session"] === true) rules.withholdSession = true;
-    if (t["withhold-gitignored"] === false) rules.withholdIgnored = false;
+  }
+  const ignores = [
+    ["~/.config/braid/ignore", existsSync4(join5(configDir(), "ignore")) ? readFileSync4(join5(configDir(), "ignore"), "utf8") : void 0],
+    [`.braidignore on ${(branch ?? "").replace(/^refs\/(remotes|heads)\//, "")}`, branch ? gitMaybe(["show", `${branch}:.braidignore`], { cwd: repo.top }) : void 0],
+    [".braidignore", existsSync4(join5(repo.top, ".braidignore")) ? readFileSync4(join5(repo.top, ".braidignore"), "utf8") : void 0]
+  ];
+  const seen = /* @__PURE__ */ new Set();
+  for (const [source, text] of ignores) {
+    if (text === void 0 || seen.has(text)) continue;
+    seen.add(text);
+    rules.sources.push(source);
+    rules.ignores.push({ source, rules: parseIgnore(text) });
   }
   return rules;
 }
@@ -579,52 +627,43 @@ function pathsOf(args) {
   }
   return out;
 }
-function candidates(p, top) {
-  if (!isAbsolute(p)) return [p.replace(/^\.\//, "")];
-  const parts = p.split("/").filter(Boolean);
-  const out = parts.map((_, i) => parts.slice(i).join("/"));
-  const inside = relative(top, p);
-  if (!inside.startsWith("..")) out.push(inside);
-  return out;
-}
 function inRepo(p, top) {
   let rel = isAbsolute(p) ? relative(top, p) : normalize(p);
   if (isAbsolute(p) && rel.startsWith("..")) {
     const real = existsSync4(p) ? realpathSync(p) : existsSync4(dirname(p)) ? join5(realpathSync(dirname(p)), p.slice(dirname(p).length + 1)) : void 0;
     rel = real ? relative(top, real) : "..";
   }
-  return rel && !rel.startsWith("..") && !isAbsolute(rel) && !rel.includes("\0") ? rel : void 0;
+  return rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel : void 0;
 }
-function gitIgnored(paths, top) {
-  if (paths.length === 0) return { ignored: /* @__PURE__ */ new Set() };
-  const r = spawnSync2("git", ["check-ignore", "--stdin", "-z"], { cwd: top, input: paths.join("\0"), encoding: "utf8", maxBuffer: 1 << 26 });
-  if (r.status !== 0 && r.status !== 1) return { ignored: /* @__PURE__ */ new Set(), problem: `git check-ignore failed: ${(r.stderr ?? "").trim().split("\n")[0]}` };
-  return { ignored: new Set((r.stdout ?? "").split("\0").filter(Boolean)) };
+function forms(p, top) {
+  const rel = inRepo(p, top);
+  if (rel) return [rel];
+  if (!isAbsolute(p)) return [];
+  const parts = p.split("/").filter(Boolean);
+  return parts.map((_, i) => parts.slice(i).join("/"));
 }
 function pathWithheld(records, rules, top) {
   const ids = /* @__PURE__ */ new Set();
   const counts = /* @__PURE__ */ new Map();
-  const calls = [];
+  if (rules.ignores.length === 0) return { ids, counts };
+  const calls = /* @__PURE__ */ new Set();
   for (const r of records) {
     if (!Array.isArray(r.content)) continue;
     for (const block of r.content) {
       if (block?.type !== "tool_call" || !block.arguments || typeof block.arguments !== "object") continue;
-      calls.push({ record: r.id, id: block.id, paths: pathsOf(block.arguments) });
+      const paths = pathsOf(block.arguments).flatMap((p) => forms(p, top));
+      let cause;
+      for (const source of rules.ignores) {
+        for (const p of paths) cause ??= ignoredBy(source.rules, p)?.pattern;
+      }
+      if (!cause) continue;
+      if (!ids.has(r.id)) counts.set(cause, (counts.get(cause) ?? 0) + 1);
+      ids.add(r.id);
+      if (block.id) calls.add(block.id);
     }
   }
-  const ignored = rules.withholdIgnored ? gitIgnored([...new Set(calls.flatMap((c) => c.paths.map((p) => inRepo(p, top)).filter((p) => !!p)))], top) : { ignored: /* @__PURE__ */ new Set() };
-  const withheldCalls = /* @__PURE__ */ new Set();
-  for (const call of calls) {
-    const forms = call.paths.flatMap((p) => candidates(p, top));
-    const glob = rules.withhold.find((w) => forms.some((p) => w.re.test(p)))?.glob;
-    const cause = glob ?? (call.paths.some((p) => ignored.ignored.has(inRepo(p, top) ?? "")) ? ".gitignore" : void 0);
-    if (!cause) continue;
-    if (!ids.has(call.record)) counts.set(cause, (counts.get(cause) ?? 0) + 1);
-    ids.add(call.record);
-    if (call.id) withheldCalls.add(call.id);
-  }
-  for (const r of records) if (r.role === "tool" && typeof r.toolCallId === "string" && withheldCalls.has(r.toolCallId)) ids.add(r.id);
-  return { ids, counts, problem: ignored.problem };
+  for (const r of records) if (r.role === "tool" && typeof r.toolCallId === "string" && calls.has(r.toolCallId)) ids.add(r.id);
+  return { ids, counts };
 }
 
 // src/publish.ts
@@ -699,9 +738,9 @@ function publish(repo, session, opts = {}) {
     const localAgents = readAgentChunks(ref, { gitDir: repo.store });
     const rules = loadRules(repo, remote);
     const byPath = pathWithheld([...local.flat(), ...[...localAgents.values()].flat(2)], rules, repo.top);
-    const report = { counts: /* @__PURE__ */ new Map(), withheld: new Map(byPath.counts), sources: rules.sources, problems: [...rules.problems, ...byPath.problem ? [byPath.problem] : []] };
+    const report = { counts: /* @__PURE__ */ new Map(), withheld: new Map(byPath.counts), sources: rules.sources, problems: rules.problems };
     if ((state.withheld ?? []).length) report.withheld.set("braid withhold", state.withheld.length);
-    if (rules.withholdSession && byPath.ids.size > 0) return { ...result, reason: "withheld whole: it touched a path under the withhold rules", report };
+    if (rules.withholdSession && byPath.ids.size > 0) return { ...result, reason: "withheld whole: it touched a path in .braidignore", report };
     const withheld = /* @__PURE__ */ new Set([...state.withheld ?? [], ...byPath.ids]);
     const { chunks, counts } = publishedChunks(local, withheld, rules.redact);
     const agents = /* @__PURE__ */ new Map();
@@ -784,7 +823,7 @@ import { randomUUID as randomUUID2 } from "node:crypto";
 
 // src/load.ts
 import { randomBytes } from "node:crypto";
-import { spawnSync as spawnSync3 } from "node:child_process";
+import { spawnSync as spawnSync2 } from "node:child_process";
 
 // src/status.ts
 function cleanName(name2) {
@@ -882,7 +921,7 @@ function allSessions(repo, remote) {
   return [...out.values()];
 }
 function prSessions(repo, n, remote) {
-  const r = spawnSync3("gh", ["pr", "view", n, "--json", "commits"], { cwd: repo.top, encoding: "utf8" });
+  const r = spawnSync2("gh", ["pr", "view", n, "--json", "commits"], { cwd: repo.top, encoding: "utf8" });
   let commits = [];
   try {
     commits = JSON.parse(r.stdout || "{}").commits ?? [];
@@ -2497,7 +2536,7 @@ import { appendFileSync, existsSync as existsSync9 } from "node:fs";
 import { dirname as dirname3, join as join11 } from "node:path";
 
 // src/setup.ts
-import { spawnSync as spawnSync4 } from "node:child_process";
+import { spawnSync as spawnSync3 } from "node:child_process";
 import { chmodSync as chmodSync2, existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync8, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname2, join as join10, resolve as resolve2 } from "node:path";
@@ -2510,7 +2549,7 @@ function writePointer() {
   writeFileSync7(join10(configDir(), "cli"), cliPath());
 }
 function visibility(repo) {
-  const r = spawnSync4("gh", ["repo", "view", "--json", "visibility", "-q", ".visibility"], { cwd: repo.top, encoding: "utf8" });
+  const r = spawnSync3("gh", ["repo", "view", "--json", "visibility", "-q", ".visibility"], { cwd: repo.top, encoding: "utf8" });
   return r.status === 0 ? r.stdout.trim() : void 0;
 }
 var TEMPLATE = (publish2, gitHooks) => [
@@ -2524,6 +2563,16 @@ var TEMPLATE = (publish2, gitHooks) => [
   'remote = "origin"',
   ""
 ].join("\n");
+var IGNORE_TEMPLATE = [
+  "# braid: tool calls on these paths, and their results, are never published.",
+  "# Same syntax as .gitignore. Commit this file so that it applies to everyone.",
+  ".env",
+  ".env.*",
+  "!.env.example",
+  "*.pem",
+  "*.key",
+  ""
+].join("\n");
 function init(repo, opts = {}) {
   const notes = [];
   const file2 = join10(repo.top, ".braid", "config.toml");
@@ -2535,13 +2584,18 @@ function init(repo, opts = {}) {
     writeFileSync7(file2, TEMPLATE(publish2, opts.gitHooks ?? true));
     const why = opts.publish ? "as asked" : chosen ? "your default in ~/.config/braid/config.toml" : vis ? `repository is ${vis.toLowerCase()}` : "visibility unknown";
     notes.push(`wrote .braid/config.toml (publish = "${publish2}", ${why})`);
-    notes.push("commit it so teammates get braid too: git add .braid && git commit -m 'Set up braid'");
+    notes.push("commit it so teammates get braid too: git add .braid .braidignore && git commit -m 'Set up braid'");
   } else if (opts.gitHooks !== void 0) {
     const text = readFileSync8(file2, "utf8");
     const line = `git-hooks = ${opts.gitHooks}`;
     writeFileSync7(file2, /^git-hooks\s*=.*$/m.test(text) ? text.replace(/^git-hooks\s*=.*$/m, line) : `${line}
 ${text}`);
     notes.push(`set ${line} in .braid/config.toml`);
+  }
+  const ignore = join10(repo.top, ".braidignore");
+  if (!existsSync8(ignore)) {
+    writeFileSync7(ignore, IGNORE_TEMPLATE);
+    notes.push("wrote .braidignore: tool calls on .env files and keys are never published; add your own paths");
   }
   ensureStore(repo);
   notes.push(...readConfig(repo).gitHooks ? installHooks(repo) : uninstallHooks(repo));
@@ -3389,7 +3443,7 @@ function importOpenclaw(repo, dbPath, only) {
 }
 
 // src/statusline.ts
-import { spawn as spawn2, spawnSync as spawnSync5 } from "node:child_process";
+import { spawn as spawn2, spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
 import { existsSync as existsSync11, mkdirSync as mkdirSync9, readFileSync as readFileSync9, statSync as statSync3, writeFileSync as writeFileSync8 } from "node:fs";
 import { join as join13 } from "node:path";
@@ -3399,7 +3453,7 @@ function previous(stdin) {
   if (!existsSync11(file2)) return "";
   const { previous: previous2 } = JSON.parse(readFileSync9(file2, "utf8"));
   if (!previous2) return "";
-  const r = spawnSync5("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
+  const r = spawnSync4("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
   return (r.stdout ?? "").trimEnd();
 }
 function pullRequest(repo) {

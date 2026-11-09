@@ -8,7 +8,8 @@ import { parseJsonl, type Rec } from "../src/records.ts";
 import { redactString } from "../src/redact.ts";
 import { cleanName, render, uncovered, type Status } from "../src/status.ts";
 import { intact, readWindow, START } from "../src/transcript.ts";
-import { globToRegExp, parseToml } from "../src/rules.ts";
+import { parseToml } from "../src/rules.ts";
+import { ignoredBy, parseIgnore } from "../src/ignore.ts";
 import { Transcript } from "./helpers.ts";
 
 const example = parseJsonl(readFileSync(join(import.meta.dirname, "..", "examples", "pr-review", "conversation.atxf.jsonl"), "utf8"));
@@ -115,21 +116,39 @@ test("reading a transcript in windows gives the records of reading it whole", ()
   assert.equal(intact(t.path, cursor), false);
 });
 
-test("rules files, globs and home directories", () => {
+test("rules files, .braidignore and home directories", () => {
   const t = parseToml(`# team rules
 terms = ["Acme Corp",
   "Project Falcon"]   # names under NDA
 patterns = ['CUST-\\d{6}']
-withhold = ["customers/**", "*.pem"]
 withhold-session = true
 `);
   assert.deepEqual(t.terms, ["Acme Corp", "Project Falcon"]);
   assert.deepEqual(t.patterns, ["CUST-\\d{6}"]);
   assert.equal(t["withhold-session"], true);
-  assert.ok(globToRegExp("customers/**").test("customers/a/b.md"));
-  assert.ok(!globToRegExp("customers/**").test("other/customers/x.md"));
-  assert.ok(globToRegExp("*.pem").test("keys/server.pem"));
-  assert.ok(!globToRegExp("*.pem").test("keys/server.pem.txt"));
+
+  const rules = parseIgnore(`# .braidignore
+.env
+.env.*
+!.env.example
+*.pem
+/customers/
+data/raw/**
+secrets
+!secrets/README.md
+`);
+  const ignored = (p: string) => ignoredBy(rules, p)?.pattern;
+  assert.equal(ignored(".env"), ".env");
+  assert.equal(ignored("api/.env.local"), ".env.*", "a pattern without a slash matches in any directory");
+  assert.equal(ignored(".env.example"), undefined, "! re-includes");
+  assert.equal(ignored("keys/server.pem"), "*.pem");
+  assert.equal(ignored("keys/server.pem.txt"), undefined);
+  assert.equal(ignored("customers/acme/contract.md"), "/customers/", "everything under an ignored directory");
+  assert.equal(ignored("old/customers/x.md"), undefined, "a leading slash anchors to the root");
+  assert.equal(ignored("data/raw/2026/x.csv"), "data/raw/**");
+  assert.equal(ignored("src/data/raw/x.csv"), undefined, "a slash inside anchors too");
+  assert.equal(ignored("secrets/README.md"), "secrets", "nothing is re-included inside an ignored directory");
+  assert.equal(ignored("src/app.ts"), undefined);
   const counts = new Map<string, number>();
   assert.equal(redactString("ran /home/alice/dev/app and C:\\Users\\bob\\x and /Users/carol", counts), "ran ~/dev/app and ~\\x and ~");
 });

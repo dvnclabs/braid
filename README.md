@@ -20,7 +20,7 @@ Then, once per repository, run `braid init` (or ask Claude to set up braid here)
 
 ```sh
 braid init
-git add .braid && git commit -m "Set up braid"
+git add .braid .braidignore && git commit -m "Set up braid"
 ```
 
 `braid init` turns publishing on for private repositories and leaves it off for public ones, and installs git hooks so that git does the work: each commit the agent makes commits its conversation, and `git push` publishes it. `braid init --no-git-hooks` leaves git alone; you then use `/braid:commit` and `/braid:push`. Teammates who have the plugin need nothing more: braid sets up their clone the first time their agent opens it.
@@ -74,7 +74,7 @@ The status line shows where your session stands:
 
 Asking in plain language works too: "pull in Bob's review but keep my jitter".
 
-**Privacy.** Published copies hold the conversation's messages and tool calls only. Reasoning, images and the harness's raw files stay on your machine, and common credentials are redacted before anything leaves it. Tool calls on files your `.gitignore` covers, such as `.env`, are withheld. Teams add terms, patterns and paths to withhold in `.braid/redact.toml`, `/braid:push` with a dry run shows what would go, and `publish = "off"` in `~/.config/braid/config.toml` keeps all of your sessions local. Anyone who can read the repository can read its published sessions. See [Publishing](docs/design.md#publishing) and [Trust](docs/design.md#trust).
+**Privacy.** Published copies hold the conversation's messages and tool calls only. Reasoning, images and the harness's raw files stay on your machine, and common credentials are redacted before anything leaves it. Tool calls on the paths in `.braidignore` (same syntax as `.gitignore`; `braid init` starts it with `.env` files and keys) are never published. Teams add terms and patterns to redact in `.braid/redact.toml`, `/braid:push` with a dry run shows what would go, and `publish = "off"` in `~/.config/braid/config.toml` keeps all of your sessions local. Anyone who can read the repository can read its published sessions. See [Publishing](docs/design.md#publishing) and [Trust](docs/design.md#trust).
 
 ## How it works
 

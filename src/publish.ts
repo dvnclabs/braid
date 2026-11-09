@@ -102,9 +102,9 @@ export function publish(repo: Repo, session: string, opts: { remote?: string; fo
     const localAgents = readAgentChunks(ref, { gitDir: repo.store });
     const rules = loadRules(repo, remote);
     const byPath = pathWithheld([...local.flat(), ...[...localAgents.values()].flat(2)], rules, repo.top);
-    const report = { counts: new Map() as Counts, withheld: new Map(byPath.counts), sources: rules.sources, problems: [...rules.problems, ...(byPath.problem ? [byPath.problem] : [])] };
+    const report = { counts: new Map() as Counts, withheld: new Map(byPath.counts), sources: rules.sources, problems: rules.problems };
     if ((state.withheld ?? []).length) report.withheld.set("braid withhold", state.withheld!.length);
-    if (rules.withholdSession && byPath.ids.size > 0) return { ...result, reason: "withheld whole: it touched a path under the withhold rules", report };
+    if (rules.withholdSession && byPath.ids.size > 0) return { ...result, reason: "withheld whole: it touched a path in .braidignore", report };
     const withheld = new Set([...(state.withheld ?? []), ...byPath.ids]);
 
     const { chunks, counts } = publishedChunks(local, withheld, rules.redact);

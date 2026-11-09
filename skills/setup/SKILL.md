@@ -7,7 +7,7 @@ description: Set up braid on this machine (the braid command and the status line
 
 1. Run `braid setup`. It installs a `braid` command in `~/.local/bin` and adds braid's part to the Claude Code status line, running any existing status line first.
 2. If the user wants braid in the current repository, run `braid init`. It writes `.braid/config.toml`, with publishing on for private repositories and off for public ones, and installs git hooks that keep any existing hooks. With the hooks, each commit the agent makes commits its conversation, and git push publishes it. If the user wants braid to leave git alone, run `braid init --no-git-hooks` instead; they then use `/braid:commit` and `/braid:push`.
-3. Suggest committing `.braid/config.toml`, so teammates with the plugin get braid in this repository too.
+3. `braid init` also writes `.braidignore`, in `.gitignore` syntax: tool calls on those paths, and their results, are never published. It starts with `.env` files and keys; ask whether there are other paths to add, such as client data. Suggest committing `.braid/` and `.braidignore`, so teammates with the plugin get braid in this repository too.
 4. A new session picks up the hooks and the status line.
 
 If `braid` is not on PATH, run `node "$(cat "${XDG_CONFIG_HOME:-$HOME/.config}/braid/cli")"` in its place.
