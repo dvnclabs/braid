@@ -1,7 +1,7 @@
 // End to end: two people, one remote. Alice works and pushes, Bob reviews,
 // Alice merges the review. Every step goes through the CLI and real git.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { braid, clone, must, run, sandbox, Transcript } from "./helpers.ts";
@@ -337,4 +337,61 @@ test("a session publishes to each repository it commits in", () => {
   // A has no commit from the session, so pushing A publishes nothing.
   must(s.env, a, "git", ["push", "--quiet", "origin", "HEAD:main"]);
   assert.equal(published("remote"), "");
+});
+
+test("with link = store, commits carry no trailer and still lead to their sessions", () => {
+  const s = sandbox();
+  const alice = clone(s, "alice", "alice@example.com");
+  must(s.env, alice, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, alice, ["init"]);
+  writeFileSync(join(alice, ".braid", "config.toml"), 'publish = "on-push"\nlink = "store"\n');
+  must(s.env, alice, "git", ["add", ".braid"]);
+  must(s.env, alice, "git", ["commit", "--quiet", "-m", "Set up braid"]);
+  must(s.env, alice, "git", ["push", "--quiet", "origin", "HEAD:main"]);
+
+  const t = new Transcript(s.root, ALICE);
+  const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: alice });
+  braid(s.env, alice, ["hook", "session-start"], hookIn);
+  t.user("Add retries.");
+  t.assistant("Added.");
+  braid(s.env, alice, ["hook", "stop"], hookIn);
+  must(s.env, alice, "git", ["checkout", "--quiet", "-b", "retries"]);
+  writeFileSync(join(alice, "send.ts"), "export const retries = 3;\n");
+  must(s.env, alice, "git", ["add", "send.ts"]);
+  const agent = { ...s.env, BRAID_SESSION: ALICE };
+  must(agent, alice, "git", ["commit", "--quiet", "-m", "Retry webhooks"]);
+  assert.doesNotMatch(must(s.env, alice, "git", ["log", "-1", "--format=%B"]), /Braid-Session/);
+
+  // An amend keeps the link: post-rewrite carries it to the new commit.
+  const before = must(s.env, alice, "git", ["rev-parse", "HEAD"]).trim();
+  must(agent, alice, "git", ["commit", "--quiet", "--amend", "-m", "Retry webhook deliveries"]);
+  const commit = must(s.env, alice, "git", ["rev-parse", "HEAD"]).trim();
+  assert.notEqual(commit, before);
+
+  // git push publishes the session, found through the commit, not a trailer.
+  const push = run(s.env, alice, "git", ["push", "origin", "retries"]);
+  assert.match(push.stderr, /braid: published 5b0e2c1a/);
+  const published = records(s.env, s.root, join(s.root, "remote.git"), `refs/braid/sessions/${ALICE}/${ALICE}`);
+  assert.deepEqual(
+    published.filter((r) => r.type === "label").map((r) => r.ext.braid.commit.sha).sort(),
+    [before, commit].sort(),
+  );
+
+  // A teammate on the branch sees the session in the index.
+  const bob = clone(s, "bob", "bob@example.com");
+  must(s.env, bob, "git", ["checkout", "--quiet", "retries"]);
+  braid(s.env, bob, ["fetch"]);
+  const tb = new Transcript(s.root, BOB);
+  const start = braid(s.env, bob, ["hook", "session-start"], JSON.stringify({ session_id: BOB, transcript_path: tb.path, cwd: bob }));
+  assert.match(start.stdout, /5b0e2c1a .*alice@example.com/);
+
+  // After a squash merge, pr:N still finds the session through the pull request's own commits.
+  must(s.env, bob, "git", ["checkout", "--quiet", "main"]);
+  must(s.env, bob, "git", ["merge", "--quiet", "--squash", "retries"]);
+  must(s.env, bob, "git", ["commit", "--quiet", "-m", "Retry webhook deliveries (#7)"]);
+  writeFileSync(join(s.root, "bin", "gh"), `#!/bin/sh\necho '${JSON.stringify({ commits: [{ oid: commit, messageBody: "" }] })}'\n`);
+  chmodSync(join(s.root, "bin", "gh"), 0o755);
+  const shown = braid(s.env, bob, ["show", "pr:7"]);
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.match(shown.stdout, /session 5b0e2c1a/);
 });

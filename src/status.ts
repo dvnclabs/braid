@@ -79,7 +79,7 @@ export function computeStatus(repo: Repo, session: string, remote = "origin"): S
   const withheld = new Set(state?.withheld ?? []);
   status.ahead = mine.filter((r) => isTurn(r) && !published.has(r.id) && !withheld.has(r.id)).length;
   const committed = mine.some((r) => r.type === "label" && braidOf(r).commit);
-  status.local = published.size === 0 && !committed && !linkedByCommit(repo, session);
+  status.local = published.size === 0 && !committed && !(state?.commits ?? []).length && !linkedByCommit(repo, session);
 
   const myIds = new Set(mine.map((r) => r.id));
   const pending = state?.pendingMerge ? [state.pendingMerge.fromHead] : [];

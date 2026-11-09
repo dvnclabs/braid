@@ -1,7 +1,8 @@
 // Claude Code hooks: SessionStart registers the session, Stop saves each turn.
 import { appendFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fetchInBackground, trailerSessions } from "./fetch.ts";
+import { fetchInBackground } from "./fetch.ts";
+import { sessionsBehind } from "./links.ts";
 import { hooksInstalled, installHooks } from "./githooks.ts";
 import { allSessions } from "./load.ts";
 import { readRecords } from "./chunks.ts";
@@ -23,7 +24,7 @@ export interface HookInput {
 
 /** Sessions behind the current branch, without any of their text. */
 function index(repo: Repo, current: string, remote: string): string {
-  const named = trailerSessions(repo, 200);
+  const named = sessionsBehind(repo, remote, ["-n", "200", "HEAD"]);
   const sessions = allSessions(repo, remote);
   const convs = new Set(sessions.filter((s) => named.has(s.session)).map((s) => s.conv));
   const lines = sessions

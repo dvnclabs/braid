@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { readAgents, readRecords } from "./chunks.ts";
 import { forEachRef, type GitOptions } from "./git.ts";
 import { ancestry, braidOf, describe, isTurn, type Rec } from "./records.ts";
+import { sessionsFor } from "./links.ts";
 import { remoteRefs, SESSION_REFS, type Repo } from "./repo.ts";
 import { loadState, newState, saveState } from "./state.ts";
 import { sessionName } from "./status.ts";
@@ -30,10 +31,21 @@ export function allSessions(repo: Repo, remote: string): Found[] {
   return [...out.values()];
 }
 
-function prSessions(repo: Repo, n: string): Set<string> {
-  const r = spawnSync("gh", ["pr", "view", n, "--json", "commits", "-q", ".commits[].messageBody"], { cwd: repo.top, encoding: "utf8" });
-  const ids = new Set<string>();
-  for (const m of (r.stdout ?? "").matchAll(/^Braid-Session:\s*(\S+)\s*$/gm)) ids.add(m[1]!);
+/**
+ * The sessions behind a pull request's own commits, by trailer and by commit
+ * label. These are the commits as pushed, so they still lead to the sessions
+ * after a squash merge rewrote them on the base branch.
+ */
+function prSessions(repo: Repo, n: string, remote: string): Set<string> {
+  const r = spawnSync("gh", ["pr", "view", n, "--json", "commits"], { cwd: repo.top, encoding: "utf8" });
+  let commits: { oid?: string; messageBody?: string }[] = [];
+  try {
+    commits = (JSON.parse(r.stdout || "{}") as { commits?: typeof commits }).commits ?? [];
+  } catch {
+    return new Set();
+  }
+  const ids = sessionsFor(repo, remote, commits.map((c) => c.oid ?? "").filter(Boolean));
+  for (const c of commits) for (const m of (c.messageBody ?? "").matchAll(/^Braid-Session:\s*(\S+)\s*$/gm)) ids.add(m[1]!);
   return ids;
 }
 
@@ -42,7 +54,7 @@ export function resolve(repo: Repo, target: string, remote: string): Found[] {
   const sessions = allSessions(repo, remote);
   const pr = /^(?:pr:|#)(\d+)$/.exec(target);
   if (pr) {
-    const ids = prSessions(repo, pr[1]!);
+    const ids = prSessions(repo, pr[1]!, remote);
     const convs = new Set(sessions.filter((s) => ids.has(s.session)).map((s) => s.conv));
     return sessions.filter((s) => convs.has(s.conv));
   }

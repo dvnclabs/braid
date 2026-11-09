@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { readAgents, readRecords } from "./chunks.ts";
 import { fetchSessions } from "./fetch.ts";
-import { postCommit, prePush, prepareCommitMsg } from "./githooks.ts";
+import { postCommit, postRewrite, prePush, prepareCommitMsg } from "./githooks.ts";
 import { sessionEnd, sessionStart, stop } from "./hooks.ts";
 import { allSessions, briefing, markFork, resolve, type Briefing } from "./load.ts";
 import { context, pick, record } from "./merge.ts";
@@ -140,6 +140,7 @@ function main(argv: string[]): number {
         const [hook, ...hookArgs] = args;
         if (hook === "prepare-commit-msg" && hookArgs[0]) prepareCommitMsg(repo, hookArgs[0]);
         if (hook === "post-commit") postCommit(repo);
+        if (hook === "post-rewrite") postRewrite(repo, readStdin());
         if (hook === "pre-push") {
           const { refuse, results } = prePush(repo, hookArgs[0] ?? "origin", readStdin());
           if (refuse) {

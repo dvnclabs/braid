@@ -33,6 +33,7 @@ const TEMPLATE = (publish: string, gitHooks: boolean) =>
     "# git-hooks = true: each commit the agent makes commits its conversation too, and git push",
     "# publishes it. false: braid leaves git alone; use /braid:commit and /braid:push.",
     '# publish = "on-push" lets sessions be published; "off" keeps every session on this machine.',
+    '# link = "store" names sessions inside the sessions only, without a Braid-Session trailer.',
     `git-hooks = ${gitHooks}`,
     `publish = "${publish}"`,
     'remote = "origin"',

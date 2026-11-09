@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync8, readFileSync as readFileSync8 } from "node:fs";
-import { join as join10 } from "node:path";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync9, readFileSync as readFileSync9 } from "node:fs";
+import { join as join11 } from "node:path";
 import { parseArgs } from "node:util";
 
 // src/git.ts
@@ -239,7 +239,11 @@ function writeChunks(chunks, parent, message, opts, agents = /* @__PURE__ */ new
 
 // src/fetch.ts
 import { spawn } from "node:child_process";
-import { mkdirSync as mkdirSync3, statSync as statSync2, utimesSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { mkdirSync as mkdirSync4, statSync as statSync2, utimesSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join4 } from "node:path";
+
+// src/links.ts
+import { existsSync as existsSync3, mkdirSync as mkdirSync3, readdirSync, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join3 } from "node:path";
 
 // src/repo.ts
@@ -261,7 +265,7 @@ function ensureStore(repo) {
   git(["init", "--quiet", "--bare", repo.store]);
 }
 function readConfig(repo) {
-  const config2 = { gitHooks: true, publish: "off", remote: "origin" };
+  const config2 = { gitHooks: true, link: "trailer", publish: "off", remote: "origin" };
   const path2 = join(repo.top, ".braid", "config.toml");
   if (!existsSync(path2)) return config2;
   for (const line of readFileSync(path2, "utf8").split("\n")) {
@@ -270,6 +274,7 @@ function readConfig(repo) {
     const [, key, value] = m;
     if (key === "git-hooks" && (value === "true" || value === "false")) config2.gitHooks = value === "true";
     if (key === "publish" && (value === "on-push" || value === "off")) config2.publish = value;
+    if (key === "link" && (value === "trailer" || value === "store")) config2.link = value;
     if (key === "remote" && value) config2.remote = value;
   }
   return config2;
@@ -332,21 +337,74 @@ function withLock(repo, name2, fn) {
   }
 }
 
-// src/fetch.ts
-function trailerSessions(repo, limit = 500) {
-  const log = gitMaybe(["log", "-n", String(limit), "--format=%(trailers:key=Braid-Session,valueonly)", "HEAD"], { cwd: repo.top }) ?? "";
+// src/links.ts
+var TRAILER = "Braid-Session";
+function trailerSessions(repo, logArgs) {
+  const log = gitMaybe(["log", `--format=%(trailers:key=${TRAILER},valueonly)`, ...logArgs], { cwd: repo.top }) ?? "";
   return new Set(log.split("\n").map((s) => s.trim()).filter(Boolean));
 }
+function commitsOf(repo, logArgs) {
+  return (gitMaybe(["log", "--format=%H", ...logArgs], { cwd: repo.top }) ?? "").split("\n").filter(Boolean);
+}
+function commitIndex(repo, remote) {
+  const cacheFile = join3(repo.dir, "cache", "commits.json");
+  let cache = {};
+  try {
+    cache = JSON.parse(readFileSync3(cacheFile, "utf8"));
+  } catch {
+  }
+  const next = {};
+  const refs = [
+    ...forEachRef([SESSION_REFS], { gitDir: repo.store }).map((r) => ({ ...r, key: `store:${r.ref}`, opts: { gitDir: repo.store } })),
+    ...forEachRef([remoteRefs(remote)], { cwd: repo.top }).map((r) => ({ ...r, key: r.ref, opts: { cwd: repo.top } }))
+  ];
+  for (const r of refs) {
+    const hit = cache[r.key];
+    if (hit?.sha === r.sha) {
+      next[r.key] = hit;
+      continue;
+    }
+    const commits = readRecords(r.ref, r.opts).map((rec) => rec.type === "label" ? braidOf(rec).commit?.sha : void 0).filter((sha) => !!sha);
+    next[r.key] = { sha: r.sha, session: r.ref.slice(r.ref.lastIndexOf("/") + 1), commits };
+  }
+  try {
+    mkdirSync3(join3(repo.dir, "cache"), { recursive: true });
+    writeFileSync2(cacheFile, JSON.stringify(next));
+  } catch {
+  }
+  const index2 = /* @__PURE__ */ new Map();
+  const add = (sha, session) => index2.set(sha, (index2.get(sha) ?? /* @__PURE__ */ new Set()).add(session));
+  for (const { session, commits } of Object.values(next)) for (const sha of commits) add(sha, session);
+  const states = join3(repo.dir, "sessions");
+  for (const name2 of existsSync3(states) ? readdirSync(states) : []) {
+    const state = name2.endsWith(".json") ? loadState(repo, name2.slice(0, -".json".length)) : void 0;
+    for (const sha of state?.commits ?? []) add(sha, state.session);
+  }
+  return index2;
+}
+function sessionsBehind(repo, remote, logArgs) {
+  const out = trailerSessions(repo, logArgs);
+  const index2 = commitIndex(repo, remote);
+  for (const sha of commitsOf(repo, logArgs)) for (const s of index2.get(sha) ?? []) out.add(s);
+  return out;
+}
+function sessionsFor(repo, remote, shas) {
+  const index2 = commitIndex(repo, remote);
+  return new Set(shas.flatMap((sha) => [...index2.get(sha) ?? []]));
+}
+
+// src/fetch.ts
 function fetchSessions(repo, remote, opts = {}) {
   return withLock(repo, "fetch", () => {
     const wanted = /* @__PURE__ */ new Set();
     for (const { ref } of forEachRef([SESSION_REFS], { gitDir: repo.store })) wanted.add(ref.split("/")[2]);
-    const sessions = trailerSessions(repo);
+    const all = opts.all || readConfig(repo).link === "store";
+    const sessions = trailerSessions(repo, ["-n", "500", "HEAD"]);
     const listing = gitMaybe(["ls-remote", "--quiet", remote, `${PUBLISHED_REFS}/*`], { cwd: repo.top }) ?? "";
     for (const line of listing.split("\n").filter(Boolean)) {
       const parts = line.split("	")[1]?.split("/") ?? [];
       const [conv, session] = [parts[3], parts[4]];
-      if (conv && session && (opts.all || sessions.has(session) || wanted.has(conv))) wanted.add(conv);
+      if (conv && session && (all || sessions.has(session) || wanted.has(conv))) wanted.add(conv);
     }
     if (wanted.size === 0) return 0;
     const specs = [...wanted].map((c) => `+${PUBLISHED_REFS}/${c}/*:${remoteRefs(remote)}/${c}/*`);
@@ -355,13 +413,13 @@ function fetchSessions(repo, remote, opts = {}) {
   });
 }
 function fetchInBackground(repo, remote, minutes = 3) {
-  const stamp = join3(repo.dir, "cache", "fetch");
+  const stamp = join4(repo.dir, "cache", "fetch");
   try {
     if (Date.now() - statSync2(stamp).mtimeMs < minutes * 6e4) return;
   } catch {
   }
-  mkdirSync3(join3(repo.dir, "cache"), { recursive: true });
-  writeFileSync2(stamp, "");
+  mkdirSync4(join4(repo.dir, "cache"), { recursive: true });
+  writeFileSync3(stamp, "");
   const now = /* @__PURE__ */ new Date();
   utimesSync(stamp, now, now);
   const cli = process.argv[1];
@@ -370,8 +428,8 @@ function fetchInBackground(repo, remote, minutes = 3) {
 }
 
 // src/githooks.ts
-import { chmodSync, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync5, renameSync as renameSync3, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
-import { isAbsolute, join as join6 } from "node:path";
+import { chmodSync, existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync6, renameSync as renameSync3, rmSync as rmSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { isAbsolute, join as join7 } from "node:path";
 
 // src/redact.ts
 import { homedir } from "node:os";
@@ -513,18 +571,18 @@ function publish(repo, session, opts = {}) {
 }
 
 // src/registry.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync3, renameSync as renameSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync4, renameSync as renameSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 function file(session) {
   if (!/^[A-Za-z0-9-]{8,80}$/.test(session)) return void 0;
-  return join4(process.env.XDG_DATA_HOME || join4(homedir2(), ".local", "share"), "braid", "sessions", `${session}.json`);
+  return join5(process.env.XDG_DATA_HOME || join5(homedir2(), ".local", "share"), "braid", "sessions", `${session}.json`);
 }
 function readEntry(session) {
   const path2 = file(session);
-  if (!path2 || !existsSync3(path2)) return void 0;
+  if (!path2 || !existsSync4(path2)) return void 0;
   try {
-    const entry = JSON.parse(readFileSync3(path2, "utf8"));
+    const entry = JSON.parse(readFileSync4(path2, "utf8"));
     return { transcript: entry.transcript, repos: Array.isArray(entry.repos) ? entry.repos : [] };
   } catch {
     return void 0;
@@ -536,16 +594,16 @@ function recordSession(session, update) {
   const entry = readEntry(session) ?? { repos: [] };
   if (update.transcript) entry.transcript = update.transcript;
   if (update.repo && !entry.repos.includes(update.repo)) entry.repos.push(update.repo);
-  mkdirSync4(join4(path2, ".."), { recursive: true });
+  mkdirSync5(join5(path2, ".."), { recursive: true });
   const tmp = `${path2}.${process.pid}.tmp`;
-  writeFileSync3(tmp, JSON.stringify(entry, null, 2) + "\n");
+  writeFileSync4(tmp, JSON.stringify(entry, null, 2) + "\n");
   renameSync2(tmp, path2);
 }
 
 // src/save.ts
-import { existsSync as existsSync4, readdirSync, readFileSync as readFileSync4 } from "node:fs";
+import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "node:fs";
 import { hostname, userInfo } from "node:os";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // src/transcript.ts
@@ -1646,9 +1704,9 @@ function header(h, session) {
 }
 function forkSource(repo, session, native) {
   const firstMessage = native.find((r) => r.type === "message")?.id;
-  const dir = join5(repo.dir, "sessions");
-  if (!firstMessage || !existsSync4(dir)) return void 0;
-  for (const name2 of readdirSync(dir)) {
+  const dir = join6(repo.dir, "sessions");
+  if (!firstMessage || !existsSync5(dir)) return void 0;
+  for (const name2 of readdirSync2(dir)) {
     if (!name2.endsWith(".json") || name2 === `${session}.json`) continue;
     const other = loadState(repo, name2.slice(0, -".json".length));
     if (!other || other.first !== firstMessage || other.chunks === 0) continue;
@@ -1666,7 +1724,7 @@ function save(repo, session, transcript, opts = {}) {
     const state = loadState(repo, session) ?? newState(session, transcript);
     if (transcript) state.transcript = transcript;
     const path2 = state.transcript;
-    if (!path2 || !existsSync4(path2)) {
+    if (!path2 || !existsSync5(path2)) {
       if (opts.commit !== void 0) throw new Error("this session is not saved yet: braid saves sessions that start after it is set up");
       return { added: 0, state };
     }
@@ -1817,13 +1875,13 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
 }
 function collectAgents(repo, state, path2) {
   const out = /* @__PURE__ */ new Map();
-  const dir = join5(path2.replace(/\.jsonl$/, ""), "subagents");
-  if (!existsSync4(dir)) return out;
+  const dir = join6(path2.replace(/\.jsonl$/, ""), "subagents");
+  if (!existsSync5(dir)) return out;
   state.agents ??= {};
-  for (const file2 of readdirSync(dir).sort()) {
+  for (const file2 of readdirSync2(dir).sort()) {
     const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file2)?.[1];
     if (!id) continue;
-    const fp = join5(dir, file2);
+    const fp = join6(dir, file2);
     const prior = state.agents[id];
     const rescan = !!prior && !intact(fp, prior.cursor);
     const st = rescan || !prior ? { cursor: START, linked: prior?.linked } : prior;
@@ -1847,7 +1905,7 @@ function collectAgents(repo, state, path2) {
     if (!st.linked) {
       st.linked = true;
       try {
-        const meta = JSON.parse(readFileSync4(join5(dir, `agent-${id}.meta.json`), "utf8"));
+        const meta = JSON.parse(readFileSync5(join6(dir, `agent-${id}.meta.json`), "utf8"));
         const str = (k) => typeof meta[k] === "string" ? meta[k] : void 0;
         link = { toolUseId: str("toolUseId"), description: str("description"), agentType: str("agentType") };
       } catch {
@@ -1873,9 +1931,9 @@ function register(repo, session, transcript) {
 
 // src/githooks.ts
 var MARK = "# braid hook";
-var HOOKS = ["prepare-commit-msg", "post-commit", "pre-push"];
+var HOOKS = ["prepare-commit-msg", "post-commit", "post-rewrite", "pre-push"];
 function script(hook) {
-  const stdin = hook === "pre-push";
+  const stdin = hook === "pre-push" || hook === "post-rewrite";
   return `#!/bin/sh
 ${MARK}: runs the hook it replaced (kept as ${hook}.local), then braid.
 ${stdin ? "input=$(cat)\n" : ""}if [ -x "$0.local" ]; then
@@ -1891,12 +1949,12 @@ ${stdin ? `printf '%s\\n' "$input" | "$@"` : '"$@" || true'}
 }
 function hooksDir(repo) {
   const custom = config("core.hooksPath", { cwd: repo.top });
-  if (custom) return { dir: isAbsolute(custom) ? custom : join6(repo.top, custom), managed: true };
-  return { dir: join6(repo.common, "hooks"), managed: false };
+  if (custom) return { dir: isAbsolute(custom) ? custom : join7(repo.top, custom), managed: true };
+  return { dir: join7(repo.common, "hooks"), managed: false };
 }
 function hooksInstalled(repo) {
   const { dir } = hooksDir(repo);
-  return HOOKS.every((h) => existsSync5(join6(dir, h)) && readFileSync5(join6(dir, h), "utf8").includes(MARK));
+  return HOOKS.every((h) => existsSync6(join7(dir, h)) && readFileSync6(join7(dir, h), "utf8").includes(MARK));
 }
 function installHooks(repo) {
   const { dir, managed } = hooksDir(repo);
@@ -1904,20 +1962,20 @@ function installHooks(repo) {
     return [
       `core.hooksPath is set to ${dir}, so braid did not install its hooks there.`,
       `Add these lines to your hook manager's ${HOOKS.join(", ")} hooks:`,
-      ...HOOKS.map((h) => `  ${h}: braid git-hook ${h} "$@"${h === "pre-push" ? "   (pass stdin through)" : ""}`)
+      ...HOOKS.map((h) => `  ${h}: braid git-hook ${h} "$@"${h === "pre-push" || h === "post-rewrite" ? "   (pass stdin through)" : ""}`)
     ];
   }
-  mkdirSync5(dir, { recursive: true });
+  mkdirSync6(dir, { recursive: true });
   const notes = [];
   for (const hook of HOOKS) {
-    const path2 = join6(dir, hook);
-    if (existsSync5(path2) && !readFileSync5(path2, "utf8").includes(MARK)) {
-      if (!existsSync5(`${path2}.local`)) {
+    const path2 = join7(dir, hook);
+    if (existsSync6(path2) && !readFileSync6(path2, "utf8").includes(MARK)) {
+      if (!existsSync6(`${path2}.local`)) {
         renameSync3(path2, `${path2}.local`);
         notes.push(`kept your ${hook} hook as ${hook}.local; braid runs it first`);
       }
     }
-    writeFileSync4(path2, script(hook));
+    writeFileSync5(path2, script(hook));
     chmodSync(path2, 493);
   }
   return notes;
@@ -1927,10 +1985,10 @@ function uninstallHooks(repo) {
   if (managed) return [`core.hooksPath is set to ${dir}: remove the braid git-hook lines from your hook manager`];
   const notes = [];
   for (const hook of HOOKS) {
-    const path2 = join6(dir, hook);
-    if (!existsSync5(path2) || !readFileSync5(path2, "utf8").includes(MARK)) continue;
+    const path2 = join7(dir, hook);
+    if (!existsSync6(path2) || !readFileSync6(path2, "utf8").includes(MARK)) continue;
     rmSync2(path2);
-    if (existsSync5(`${path2}.local`)) renameSync3(`${path2}.local`, path2);
+    if (existsSync6(`${path2}.local`)) renameSync3(`${path2}.local`, path2);
     notes.push(`removed the ${hook} hook`);
   }
   return notes;
@@ -1948,10 +2006,25 @@ function agentSession(repo) {
 }
 function prepareCommitMsg(repo, file2) {
   const session = agentSession(repo);
-  if (!session) return;
+  if (!session || readConfig(repo).link === "store") return;
   git(["interpret-trailers", "--in-place", "--if-exists", "addIfDifferent", "--trailer", `Braid-Session: ${session}`, file2], {
     cwd: repo.top
   });
+}
+function postRewrite(repo, stdin) {
+  if (!active(repo)) return;
+  const index2 = commitIndex(repo, readConfig(repo).remote);
+  for (const line of stdin.split("\n").filter(Boolean)) {
+    const [oldSha = "", newSha = ""] = line.split(" ");
+    for (const session of index2.get(oldSha) ?? []) {
+      withLock(repo, `save-${session}`, () => {
+        const state = loadState(repo, session);
+        if (!state || state.commits?.includes(newSha)) return;
+        state.commits = [...state.commits ?? [], newSha];
+        saveState(repo, state);
+      });
+    }
+  }
 }
 function postCommit(repo) {
   const session = agentSession(repo);
@@ -1966,7 +2039,8 @@ function postCommit(repo) {
 }
 var ZERO = /^0+$/;
 function prePush(repo, remote, stdin) {
-  const sessions = /* @__PURE__ */ new Set();
+  const trailers = /* @__PURE__ */ new Set();
+  const shas = [];
   for (const line of stdin.split("\n").filter(Boolean)) {
     const [, localSha = "", remoteRef = "", remoteSha = ""] = line.split(" ");
     if (remoteRef.startsWith("refs/braid/")) {
@@ -1976,17 +2050,18 @@ function prePush(repo, remote, stdin) {
     if (ZERO.test(localSha)) continue;
     const known = !ZERO.test(remoteSha) && gitMaybe(["cat-file", "-e", remoteSha], { cwd: repo.top }) !== void 0;
     const range = known ? [`${remoteSha}..${localSha}`] : [localSha, "--not", `--remotes=${remote}`];
-    const log = gitMaybe(["log", "--format=%(trailers:key=Braid-Session,valueonly)", ...range], { cwd: repo.top }) ?? "";
-    for (const id of log.split("\n").map((s) => s.trim()).filter(Boolean)) sessions.add(id);
+    for (const id of trailerSessions(repo, range)) trailers.add(id);
+    shas.push(...commitsOf(repo, range));
   }
+  const sessions = /* @__PURE__ */ new Set([...trailers, ...sessionsFor(repo, remote, shas)]);
   if (!active(repo) || readConfig(repo).publish === "off") return { results: [] };
   const results = [...sessions].filter((s) => loadState(repo, s)).map((s) => (save(repo, s), publish(repo, s, { remote })));
   return { results };
 }
 
 // src/hooks.ts
-import { appendFileSync, existsSync as existsSync7 } from "node:fs";
-import { dirname as dirname2, join as join8 } from "node:path";
+import { appendFileSync, existsSync as existsSync8 } from "node:fs";
+import { dirname as dirname2, join as join9 } from "node:path";
 
 // src/load.ts
 import { randomBytes } from "node:crypto";
@@ -2036,7 +2111,7 @@ function computeStatus(repo, session, remote = "origin") {
   const withheld = new Set(state?.withheld ?? []);
   status.ahead = mine.filter((r) => isTurn(r) && !published.has(r.id) && !withheld.has(r.id)).length;
   const committed = mine.some((r) => r.type === "label" && braidOf(r).commit);
-  status.local = published.size === 0 && !committed && !linkedByCommit(repo, session);
+  status.local = published.size === 0 && !committed && !(state?.commits ?? []).length && !linkedByCommit(repo, session);
   const myIds = new Set(mine.map((r) => r.id));
   const pending = state?.pendingMerge ? [state.pendingMerge.fromHead] : [];
   const refs = /* @__PURE__ */ new Map();
@@ -2087,17 +2162,23 @@ function allSessions(repo, remote) {
   }
   return [...out.values()];
 }
-function prSessions(repo, n) {
-  const r = spawnSync2("gh", ["pr", "view", n, "--json", "commits", "-q", ".commits[].messageBody"], { cwd: repo.top, encoding: "utf8" });
-  const ids = /* @__PURE__ */ new Set();
-  for (const m of (r.stdout ?? "").matchAll(/^Braid-Session:\s*(\S+)\s*$/gm)) ids.add(m[1]);
+function prSessions(repo, n, remote) {
+  const r = spawnSync2("gh", ["pr", "view", n, "--json", "commits"], { cwd: repo.top, encoding: "utf8" });
+  let commits = [];
+  try {
+    commits = JSON.parse(r.stdout || "{}").commits ?? [];
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+  const ids = sessionsFor(repo, remote, commits.map((c) => c.oid ?? "").filter(Boolean));
+  for (const c of commits) for (const m of (c.messageBody ?? "").matchAll(/^Braid-Session:\s*(\S+)\s*$/gm)) ids.add(m[1]);
   return ids;
 }
 function resolve(repo, target, remote) {
   const sessions = allSessions(repo, remote);
   const pr = /^(?:pr:|#)(\d+)$/.exec(target);
   if (pr) {
-    const ids = prSessions(repo, pr[1]);
+    const ids = prSessions(repo, pr[1], remote);
     const convs = new Set(sessions.filter((s) => ids.has(s.session)).map((s) => s.conv));
     return sessions.filter((s) => convs.has(s.conv));
   }
@@ -2171,19 +2252,19 @@ function markFork(repo, current, b) {
 
 // src/setup.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { chmodSync as chmodSync2, existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync6, writeFileSync as writeFileSync5 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync7, mkdirSync as mkdirSync7, readFileSync as readFileSync7, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname, join as join7, resolve as resolve2 } from "node:path";
+import { dirname, join as join8, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 function configDir() {
-  return join7(process.env.XDG_CONFIG_HOME || join7(homedir3(), ".config"), "braid");
+  return join8(process.env.XDG_CONFIG_HOME || join8(homedir3(), ".config"), "braid");
 }
 function cliPath() {
   return resolve2(process.argv[1] ?? fileURLToPath(import.meta.url));
 }
 function writePointer() {
-  mkdirSync6(configDir(), { recursive: true });
-  writeFileSync5(join7(configDir(), "cli"), cliPath());
+  mkdirSync7(configDir(), { recursive: true });
+  writeFileSync6(join8(configDir(), "cli"), cliPath());
 }
 function visibility(repo) {
   const r = spawnSync3("gh", ["repo", "view", "--json", "visibility", "-q", ".visibility"], { cwd: repo.top, encoding: "utf8" });
@@ -2194,6 +2275,7 @@ var TEMPLATE = (publish2, gitHooks) => [
   "# git-hooks = true: each commit the agent makes commits its conversation too, and git push",
   "# publishes it. false: braid leaves git alone; use /braid:commit and /braid:push.",
   '# publish = "on-push" lets sessions be published; "off" keeps every session on this machine.',
+  '# link = "store" names sessions inside the sessions only, without a Braid-Session trailer.',
   `git-hooks = ${gitHooks}`,
   `publish = "${publish2}"`,
   'remote = "origin"',
@@ -2201,18 +2283,18 @@ var TEMPLATE = (publish2, gitHooks) => [
 ].join("\n");
 function init(repo, opts = {}) {
   const notes = [];
-  const file2 = join7(repo.top, ".braid", "config.toml");
-  if (!existsSync6(file2)) {
+  const file2 = join8(repo.top, ".braid", "config.toml");
+  if (!existsSync7(file2)) {
     const vis = visibility(repo);
     const publish2 = vis === "PRIVATE" || vis === "INTERNAL" ? "on-push" : "off";
-    mkdirSync6(dirname(file2), { recursive: true });
-    writeFileSync5(file2, TEMPLATE(publish2, opts.gitHooks ?? true));
+    mkdirSync7(dirname(file2), { recursive: true });
+    writeFileSync6(file2, TEMPLATE(publish2, opts.gitHooks ?? true));
     notes.push(`wrote .braid/config.toml (publish = "${publish2}"${vis ? `, repository is ${vis.toLowerCase()}` : ", visibility unknown"})`);
     notes.push("commit it so teammates get braid too: git add .braid && git commit -m 'Set up braid'");
   } else if (opts.gitHooks !== void 0) {
-    const text = readFileSync6(file2, "utf8");
+    const text = readFileSync7(file2, "utf8");
     const line = `git-hooks = ${opts.gitHooks}`;
-    writeFileSync5(file2, /^git-hooks\s*=.*$/m.test(text) ? text.replace(/^git-hooks\s*=.*$/m, line) : `${line}
+    writeFileSync6(file2, /^git-hooks\s*=.*$/m.test(text) ? text.replace(/^git-hooks\s*=.*$/m, line) : `${line}
 ${text}`);
     notes.push(`set ${line} in .braid/config.toml`);
   }
@@ -2222,7 +2304,7 @@ ${text}`);
   return notes;
 }
 function settingsPath() {
-  return join7(process.env.CLAUDE_CONFIG_DIR || join7(homedir3(), ".claude"), "settings.json");
+  return join8(process.env.CLAUDE_CONFIG_DIR || join8(homedir3(), ".claude"), "settings.json");
 }
 var SHIM = `#!/bin/sh
 # braid: runs the braid CLI wherever the Claude Code plugin installed it.
@@ -2233,30 +2315,30 @@ exec node "$(cat "$cli")" "$@"
 function setup(opts = {}) {
   const notes = [];
   const settingsFile = settingsPath();
-  const saved = join7(configDir(), "statusline.json");
-  const settings = existsSync6(settingsFile) ? JSON.parse(readFileSync6(settingsFile, "utf8")) : {};
+  const saved = join8(configDir(), "statusline.json");
+  const settings = existsSync7(settingsFile) ? JSON.parse(readFileSync7(settingsFile, "utf8")) : {};
   const current = settings.statusLine;
   if (opts.undo) {
-    const prev = existsSync6(saved) ? JSON.parse(readFileSync6(saved, "utf8")) : {};
+    const prev = existsSync7(saved) ? JSON.parse(readFileSync7(saved, "utf8")) : {};
     if (prev.previous) settings.statusLine = { type: "command", command: prev.previous, ...prev.refreshInterval ? { refreshInterval: prev.refreshInterval } : {} };
     else delete settings.statusLine;
-    writeFileSync5(settingsFile, JSON.stringify(settings, null, 2) + "\n");
+    writeFileSync6(settingsFile, JSON.stringify(settings, null, 2) + "\n");
     return [`restored the previous status line in ${settingsFile}`];
   }
   writePointer();
-  const bin = join7(homedir3(), ".local", "bin");
-  mkdirSync6(bin, { recursive: true });
-  writeFileSync5(join7(bin, "braid"), SHIM);
-  chmodSync2(join7(bin, "braid"), 493);
-  notes.push(`installed ${join7(bin, "braid")}`);
+  const bin = join8(homedir3(), ".local", "bin");
+  mkdirSync7(bin, { recursive: true });
+  writeFileSync6(join8(bin, "braid"), SHIM);
+  chmodSync2(join8(bin, "braid"), 493);
+  notes.push(`installed ${join8(bin, "braid")}`);
   if (!(process.env.PATH ?? "").split(":").includes(bin)) notes.push(`add ${bin} to your PATH to run braid from a terminal`);
-  const command = `${join7(bin, "braid")} statusline`;
+  const command = `${join8(bin, "braid")} statusline`;
   if (current?.command !== command) {
-    mkdirSync6(configDir(), { recursive: true });
-    writeFileSync5(saved, JSON.stringify({ previous: current?.command ?? "", refreshInterval: current?.refreshInterval }, null, 2) + "\n");
+    mkdirSync7(configDir(), { recursive: true });
+    writeFileSync6(saved, JSON.stringify({ previous: current?.command ?? "", refreshInterval: current?.refreshInterval }, null, 2) + "\n");
     settings.statusLine = { type: "command", command, refreshInterval: 30 };
-    mkdirSync6(dirname(settingsFile), { recursive: true });
-    writeFileSync5(settingsFile, JSON.stringify(settings, null, 2) + "\n");
+    mkdirSync7(dirname(settingsFile), { recursive: true });
+    writeFileSync6(settingsFile, JSON.stringify(settings, null, 2) + "\n");
     notes.push(`status line set in ${settingsFile}${current?.command ? "; braid runs your previous one first" : ""}`);
   }
   return notes;
@@ -2264,7 +2346,7 @@ function setup(opts = {}) {
 
 // src/hooks.ts
 function index(repo, current, remote) {
-  const named = trailerSessions(repo, 200);
+  const named = sessionsBehind(repo, remote, ["-n", "200", "HEAD"]);
   const sessions = allSessions(repo, remote);
   const convs = new Set(sessions.filter((s) => named.has(s.session)).map((s) => s.conv));
   const lines = sessions.filter((s) => convs.has(s.conv) && s.session !== current).map((s) => {
@@ -2284,7 +2366,7 @@ function otherRepos(session, current) {
   const seen = new Set(current ? [current.common] : []);
   const out = [];
   for (const top of readEntry(session)?.repos ?? []) {
-    const repo = existsSync7(top) ? findRepo(top) : void 0;
+    const repo = existsSync8(top) ? findRepo(top) : void 0;
     if (!repo || seen.has(repo.common) || !isEnabled(repo)) continue;
     seen.add(repo.common);
     out.push(repo);
@@ -2298,7 +2380,7 @@ function sessionStart(input) {
   recordSession(session, { transcript: input.transcript_path });
   const envFile = process.env.CLAUDE_ENV_FILE;
   if (envFile) {
-    const bin = join8(dirname2(dirname2(cliPath())), "bin");
+    const bin = join9(dirname2(dirname2(cliPath())), "bin");
     appendFileSync(envFile, `export BRAID_SESSION=${session}
 export PATH="${bin}:$PATH"
 `);
@@ -2410,13 +2492,13 @@ function record(repo, session, chosen, opts) {
 // src/statusline.ts
 import { spawn as spawn2, spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync8, mkdirSync as mkdirSync7, readFileSync as readFileSync7, statSync as statSync3, writeFileSync as writeFileSync6 } from "node:fs";
-import { join as join9 } from "node:path";
+import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync8, statSync as statSync3, writeFileSync as writeFileSync7 } from "node:fs";
+import { join as join10 } from "node:path";
 var hash2 = (s) => createHash3("sha1").update(s).digest("hex").slice(0, 16);
 function previous(stdin) {
-  const file2 = join9(configDir(), "statusline.json");
-  if (!existsSync8(file2)) return "";
-  const { previous: previous2 } = JSON.parse(readFileSync7(file2, "utf8"));
+  const file2 = join10(configDir(), "statusline.json");
+  if (!existsSync9(file2)) return "";
+  const { previous: previous2 } = JSON.parse(readFileSync8(file2, "utf8"));
   if (!previous2) return "";
   const r = spawnSync4("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
   return (r.stdout ?? "").trimEnd();
@@ -2425,16 +2507,16 @@ function pullRequest(repo) {
   if (process.env.BRAID_STATUS_NO_PR) return "";
   const branch = gitMaybe(["branch", "--show-current"], { cwd: repo.top })?.trim();
   if (!branch) return "";
-  const dir = join9(repo.dir, "cache");
-  mkdirSync7(dir, { recursive: true });
-  const file2 = join9(dir, `pr-${hash2(branch)}`);
+  const dir = join10(repo.dir, "cache");
+  mkdirSync8(dir, { recursive: true });
+  const file2 = join10(dir, `pr-${hash2(branch)}`);
   let fresh = false;
   try {
     fresh = Date.now() - statSync3(file2).mtimeMs < 5 * 6e4;
   } catch {
   }
   if (!fresh) {
-    writeFileSync6(file2, existsSync8(file2) ? readFileSync7(file2) : "");
+    writeFileSync7(file2, existsSync9(file2) ? readFileSync8(file2) : "");
     const tmp = `${file2}.${process.pid}`;
     spawn2("sh", ["-c", 'gh pr view --json number -q .number > "$T" 2>/dev/null; mv "$T" "$F"'], {
       cwd: repo.top,
@@ -2443,12 +2525,12 @@ function pullRequest(repo) {
       stdio: "ignore"
     }).unref();
   }
-  const n = readFileSync7(file2, "utf8").trim();
+  const n = readFileSync8(file2, "utf8").trim();
   return /^\d{1,7}$/.test(n) ? `#${n}` : "";
 }
 function braidPart(repo, session, remote) {
   const conv = convOf(repo, session);
-  const statePath = join9(repo.dir, "sessions", `${session}.json`);
+  const statePath = join10(repo.dir, "sessions", `${session}.json`);
   const key = hash2(
     [
       session,
@@ -2457,14 +2539,14 @@ function braidPart(repo, session, remote) {
       ...forEachRef([`${SESSION_REFS}/${conv ?? "-"}/`], { gitDir: repo.store }).map((r) => r.sha + r.ref),
       ...forEachRef([`${remoteRefs(remote)}/${conv ?? "-"}/`], { cwd: repo.top }).map((r) => r.sha + r.ref),
       gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim(),
-      existsSync8(statePath) ? statSync3(statePath).mtimeMs : 0
+      existsSync9(statePath) ? statSync3(statePath).mtimeMs : 0
     ].join("\n")
   );
-  const file2 = join9(repo.dir, "cache", `status-${key}`);
-  if (existsSync8(file2)) return readFileSync7(file2, "utf8");
+  const file2 = join10(repo.dir, "cache", `status-${key}`);
+  if (existsSync9(file2)) return readFileSync8(file2, "utf8");
   const text = render(computeStatus(repo, session, remote));
-  mkdirSync7(join9(repo.dir, "cache"), { recursive: true });
-  writeFileSync6(file2, text);
+  mkdirSync8(join10(repo.dir, "cache"), { recursive: true });
+  writeFileSync7(file2, text);
   return text;
 }
 function statusline(stdin) {
@@ -2520,15 +2602,15 @@ Other
 `;
 function readStdin() {
   try {
-    return readFileSync8(0, "utf8");
+    return readFileSync9(0, "utf8");
   } catch {
     return "";
   }
 }
 function logError(err) {
   try {
-    mkdirSync8(configDir(), { recursive: true });
-    appendFileSync2(join10(configDir(), "errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${err instanceof Error ? err.stack : String(err)}
+    mkdirSync9(configDir(), { recursive: true });
+    appendFileSync2(join11(configDir(), "errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${err instanceof Error ? err.stack : String(err)}
 `);
   } catch {
   }
@@ -2605,6 +2687,7 @@ function main(argv) {
         const [hook, ...hookArgs] = args;
         if (hook === "prepare-commit-msg" && hookArgs[0]) prepareCommitMsg(repo, hookArgs[0]);
         if (hook === "post-commit") postCommit(repo);
+        if (hook === "post-rewrite") postRewrite(repo, readStdin());
         if (hook === "pre-push") {
           const { refuse, results } = prePush(repo, hookArgs[0] ?? "origin", readStdin());
           if (refuse) {

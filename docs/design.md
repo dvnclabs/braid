@@ -81,7 +81,7 @@ Braid-Session: 5b0e2c1a-7f3d-4c2e-9a61-0d8e4b2f6c13
 |---|---|
 | `prepare-commit-msg` | adds the trailer, with `git interpret-trailers --if-exists addIfDifferent` |
 | `post-commit` | notes the code commit; the next save commits the conversation with it, so the commit points to the state of the conversation behind it |
-| `post-rewrite` | *planned*: carries those links over after `git commit --amend` and `git rebase` |
+| `post-rewrite` | links the sessions behind the old commits to the new ones after `git commit --amend` and `git rebase` |
 | `pre-push` | publishes the sessions behind the commits being pushed |
 
 How the hook knows which session made a commit:
@@ -94,7 +94,9 @@ Parallel agents usually run in separate worktrees, which keeps the second case u
 
 The git hooks are on by default. `git-hooks = false` in `.braid/config.toml`, or `braid init --no-git-hooks`, turns them off: braid then leaves git alone, and `/braid:commit` and `/braid:push` do by hand what the hooks did. Without trailers, `pr:N` cannot find the sessions behind a pull request. braid keeps an existing hook as `<name>.local` and runs it first. When a hook manager such as husky or lefthook sets `core.hooksPath`, `braid init` prints the lines to add to it instead.
 
-GitHub's default squash message lists the original commit messages, so the trailers survive as text unless the repository uses the pull request title as the squash message or the person merging edits it. braid also reads the trailers of the pull request's own commits.
+Some teams forbid trailers in commit messages, and a trailer puts the session id into history even when the session is never published. With `link = "store"` in `.braid/config.toml`, commits carry no trailer. Each save already writes a commit label into the session for every code commit made during it, with the commit's SHA, and the label travels with the published session. braid reads both sources wherever it needs the sessions behind commits: `git push`, the index at session start, and `pr:N`. Without trailers braid cannot tell which conversations are behind a branch before fetching them, so it fetches every published session.
+
+GitHub's default squash message lists the original commit messages, so the trailers survive as text unless the repository uses the pull request title as the squash message or the person merging edits it. `pr:N` reads the pull request's own commits, as they were pushed, so it finds their sessions after a squash merge in either mode.
 
 ### Fetching
 

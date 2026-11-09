@@ -4,25 +4,22 @@ import { spawn } from "node:child_process";
 import { mkdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { forEachRef, git, gitMaybe } from "./git.ts";
-import { PUBLISHED_REFS, remoteRefs, SESSION_REFS, type Repo } from "./repo.ts";
+import { trailerSessions } from "./links.ts";
+import { PUBLISHED_REFS, readConfig, remoteRefs, SESSION_REFS, type Repo } from "./repo.ts";
 import { withLock } from "./state.ts";
-
-/** Session ids named by Braid-Session trailers in the last commits of HEAD. */
-export function trailerSessions(repo: Repo, limit = 500): Set<string> {
-  const log = gitMaybe(["log", "-n", String(limit), "--format=%(trailers:key=Braid-Session,valueonly)", "HEAD"], { cwd: repo.top }) ?? "";
-  return new Set(log.split("\n").map((s) => s.trim()).filter(Boolean));
-}
 
 export function fetchSessions(repo: Repo, remote: string, opts: { all?: boolean } = {}): number {
   return withLock(repo, "fetch", () => {
     const wanted = new Set<string>();
     for (const { ref } of forEachRef([SESSION_REFS], { gitDir: repo.store })) wanted.add(ref.split("/")[2]!);
-    const sessions = trailerSessions(repo);
+    // Without trailers, which sessions are behind HEAD is only known once they are fetched: fetch them all.
+    const all = opts.all || readConfig(repo).link === "store";
+    const sessions = trailerSessions(repo, ["-n", "500", "HEAD"]);
     const listing = gitMaybe(["ls-remote", "--quiet", remote, `${PUBLISHED_REFS}/*`], { cwd: repo.top }) ?? "";
     for (const line of listing.split("\n").filter(Boolean)) {
       const parts = line.split("\t")[1]?.split("/") ?? [];
       const [conv, session] = [parts[3], parts[4]];
-      if (conv && session && (opts.all || sessions.has(session) || wanted.has(conv))) wanted.add(conv);
+      if (conv && session && (all || sessions.has(session) || wanted.has(conv))) wanted.add(conv);
     }
     if (wanted.size === 0) return 0;
     const specs = [...wanted].map((c) => `+${PUBLISHED_REFS}/${c}/*:${remoteRefs(remote)}/${c}/*`);

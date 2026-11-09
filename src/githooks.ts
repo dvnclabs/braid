@@ -3,18 +3,19 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, wri
 import { isAbsolute, join } from "node:path";
 import { config, git, gitMaybe } from "./git.ts";
 import { publish, type PublishResult } from "./publish.ts";
+import { commitIndex, commitsOf, sessionsFor, trailerSessions } from "./links.ts";
 import { readEntry, recordSession } from "./registry.ts";
 import { register, save } from "./save.ts";
 import { isEnabled, readConfig, type Repo } from "./repo.ts";
 import { loadState, saveState, withLock } from "./state.ts";
 
 const MARK = "# braid hook";
-export const HOOKS = ["prepare-commit-msg", "post-commit", "pre-push"] as const;
+export const HOOKS = ["prepare-commit-msg", "post-commit", "post-rewrite", "pre-push"] as const;
 
-// pre-push is the only hook git feeds on stdin; reading stdin in the others
+// git feeds pre-push and post-rewrite on stdin; reading stdin in the others
 // would block on a terminal.
 function script(hook: string): string {
-  const stdin = hook === "pre-push";
+  const stdin = hook === "pre-push" || hook === "post-rewrite";
   return `#!/bin/sh
 ${MARK}: runs the hook it replaced (kept as ${hook}.local), then braid.
 ${stdin ? "input=$(cat)\n" : ""}if [ -x "$0.local" ]; then
@@ -47,7 +48,7 @@ export function installHooks(repo: Repo): string[] {
     return [
       `core.hooksPath is set to ${dir}, so braid did not install its hooks there.`,
       `Add these lines to your hook manager's ${HOOKS.join(", ")} hooks:`,
-      ...HOOKS.map((h) => `  ${h}: braid git-hook ${h} "$@"${h === "pre-push" ? "   (pass stdin through)" : ""}`),
+      ...HOOKS.map((h) => `  ${h}: braid git-hook ${h} "$@"${h === "pre-push" || h === "post-rewrite" ? "   (pass stdin through)" : ""}`),
     ];
   }
   mkdirSync(dir, { recursive: true });
@@ -103,10 +104,31 @@ function agentSession(repo: Repo): string | undefined {
 /** prepare-commit-msg: adds the Braid-Session trailer for the agent session that runs git. */
 export function prepareCommitMsg(repo: Repo, file: string): void {
   const session = agentSession(repo);
-  if (!session) return;
+  if (!session || readConfig(repo).link === "store") return;
   git(["interpret-trailers", "--in-place", "--if-exists", "addIfDifferent", "--trailer", `Braid-Session: ${session}`, file], {
     cwd: repo.top,
   });
+}
+
+/**
+ * post-rewrite: after an amend or a rebase, the sessions behind the old
+ * commits are linked to the new ones too, so links that live in the sessions
+ * (link = "store") survive. Trailers survive by themselves.
+ */
+export function postRewrite(repo: Repo, stdin: string): void {
+  if (!active(repo)) return;
+  const index = commitIndex(repo, readConfig(repo).remote);
+  for (const line of stdin.split("\n").filter(Boolean)) {
+    const [oldSha = "", newSha = ""] = line.split(" ");
+    for (const session of index.get(oldSha) ?? []) {
+      withLock(repo, `save-${session}`, () => {
+        const state = loadState(repo, session);
+        if (!state || state.commits?.includes(newSha)) return;
+        state.commits = [...(state.commits ?? []), newSha];
+        saveState(repo, state);
+      });
+    }
+  }
 }
 
 /** post-commit: remembers the commit, so the next save commits the conversation with it. */
@@ -129,7 +151,8 @@ const ZERO = /^0+$/;
  * pushed. Refuses pushes that would delete published sessions.
  */
 export function prePush(repo: Repo, remote: string, stdin: string): { refuse?: string; results: PublishResult[] } {
-  const sessions = new Set<string>();
+  const trailers = new Set<string>();
+  const shas: string[] = [];
   for (const line of stdin.split("\n").filter(Boolean)) {
     const [, localSha = "", remoteRef = "", remoteSha = ""] = line.split(" ");
     if (remoteRef.startsWith("refs/braid/")) {
@@ -139,9 +162,10 @@ export function prePush(repo: Repo, remote: string, stdin: string): { refuse?: s
     if (ZERO.test(localSha)) continue;
     const known = !ZERO.test(remoteSha) && gitMaybe(["cat-file", "-e", remoteSha], { cwd: repo.top }) !== undefined;
     const range = known ? [`${remoteSha}..${localSha}`] : [localSha, "--not", `--remotes=${remote}`];
-    const log = gitMaybe(["log", "--format=%(trailers:key=Braid-Session,valueonly)", ...range], { cwd: repo.top }) ?? "";
-    for (const id of log.split("\n").map((s) => s.trim()).filter(Boolean)) sessions.add(id);
+    for (const id of trailerSessions(repo, range)) trailers.add(id);
+    shas.push(...commitsOf(repo, range));
   }
+  const sessions = new Set([...trailers, ...sessionsFor(repo, remote, shas)]);
   if (!active(repo) || readConfig(repo).publish === "off") return { results: [] };
   // Save first, so the published copy holds the session up to this push.
   const results = [...sessions].filter((s) => loadState(repo, s)).map((s) => (save(repo, s), publish(repo, s, { remote })));
