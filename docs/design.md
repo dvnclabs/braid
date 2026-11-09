@@ -87,6 +87,7 @@ Braid-Session: 5b0e2c1a-7f3d-4c2e-9a61-0d8e4b2f6c13
 How the hook knows which session made a commit:
 
 - **The agent ran `git commit`.** At session start, braid puts `BRAID_SESSION=<id>` into the environment of the agent's shell commands. Claude Code's `SessionStart` hook does this through `CLAUDE_ENV_FILE`. The hook links that session.
+- **The agent committed in another repository.** Agents often start in one repository and commit in another: a nested repository, or a worktree. braid keeps a list of the sessions running on the machine, with their transcripts, in `~/.local/share/braid/sessions/`. The first time a session commits in another repository where braid is set up, the hooks there register it, and from then on each turn is saved there too, and that repository's `git push` publishes it. Each repository's `.braid/config.toml` still decides whether it publishes.
 - **You ran `git commit` yourself.** *Planned*; in v0.1 these commits get no trailer. The hook will link each session in this worktree whose edits since the previous commit touch the committed files. Sessions that did not edit those files stay unlinked.
 
 Parallel agents usually run in separate worktrees, which keeps the second case unambiguous.

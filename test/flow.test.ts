@@ -283,3 +283,58 @@ test("subagents are saved, published and briefed with their session", () => {
   // A briefing carries the subagent's answer.
   assert.match(braid(s.env, repo, ["show", "5b0e2c1a"]).stdout, /subagent a36fc266 · assistant\] Also: retries\./);
 });
+
+test("a session publishes to each repository it commits in", () => {
+  const s = sandbox();
+  const bare = (name: string) => must(s.env, s.root, "git", ["init", "--quiet", "--bare", "--initial-branch=main", `${name}.git`]);
+  const setUp = (dir: string, remote: string) => {
+    must(s.env, s.root, "git", ["clone", "--quiet", join(s.root, `${remote}.git`), dir]);
+    must(s.env, dir, "git", ["config", "user.email", "gus@example.com"]);
+    must(s.env, dir, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+    braid(s.env, dir, ["init"]);
+    writeFileSync(join(dir, ".braid", "config.toml"), 'publish = "on-push"\n');
+    must(s.env, dir, "git", ["add", ".braid"]);
+    must(s.env, dir, "git", ["commit", "--quiet", "-m", "Set up braid"]);
+    must(s.env, dir, "git", ["push", "--quiet", "origin", "HEAD:main"]);
+  };
+  bare("b");
+  bare("c");
+  const a = clone(s, "a", "gus@example.com");
+  must(s.env, a, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, a, ["init"]);
+  writeFileSync(join(a, ".braid", "config.toml"), 'publish = "on-push"\n');
+  const b = join(a, "services", "api"); // a repository nested in A
+  setUp(b, "b");
+  const c = join(s.root, "c");
+  setUp(c, "c");
+  const cWork = join(s.root, "c-feature");
+  must(s.env, c, "git", ["worktree", "add", "--quiet", "-b", "feature", cWork]);
+
+  // The session starts in A, then commits in B and in C's worktree.
+  const t = new Transcript(s.root, ALICE);
+  const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: a });
+  braid(s.env, a, ["hook", "session-start"], hookIn);
+  t.user("Add the endpoint in the API and the client.");
+  t.assistant("Done in both.");
+  const agent = { ...s.env, BRAID_SESSION: ALICE };
+  for (const dir of [b, cWork]) {
+    writeFileSync(join(dir, "change.ts"), "export {};\n");
+    must(agent, dir, "git", ["add", "change.ts"]);
+    must(agent, dir, "git", ["commit", "--quiet", "-m", "Add endpoint"]);
+    assert.match(must(s.env, dir, "git", ["log", "-1", "--format=%B"]), new RegExp(`Braid-Session: ${ALICE}`));
+  }
+
+  // Pushing B and C publishes the session to each; the Stop hook kept their copies current.
+  braid(s.env, a, ["hook", "stop"], hookIn);
+  must(s.env, b, "git", ["push", "--quiet", "origin", "HEAD:main"]);
+  must(s.env, cWork, "git", ["push", "--quiet", "origin", "feature"]);
+  const published = (remote: string) =>
+    must(s.env, s.root, "git", ["--git-dir", join(s.root, `${remote}.git`), "for-each-ref", "--format=%(refname)", "refs/braid/"]).trim();
+  assert.equal(published("b"), `refs/braid/sessions/${ALICE}/${ALICE}`);
+  assert.equal(published("c"), `refs/braid/sessions/${ALICE}/${ALICE}`);
+  assert.match(must(s.env, s.root, "git", ["--git-dir", join(s.root, "b.git"), "show", `refs/braid/sessions/${ALICE}/${ALICE}:records/000001.jsonl`]), /Done in both/);
+
+  // A has no commit from the session, so pushing A publishes nothing.
+  must(s.env, a, "git", ["push", "--quiet", "origin", "HEAD:main"]);
+  assert.equal(published("remote"), "");
+});

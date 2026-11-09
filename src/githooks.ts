@@ -3,6 +3,8 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, wri
 import { isAbsolute, join } from "node:path";
 import { config, git, gitMaybe } from "./git.ts";
 import { publish, type PublishResult } from "./publish.ts";
+import { readEntry, recordSession } from "./registry.ts";
+import { register, save } from "./save.ts";
 import { isEnabled, readConfig, type Repo } from "./repo.ts";
 import { loadState, saveState, withLock } from "./state.ts";
 
@@ -82,10 +84,26 @@ export function uninstallHooks(repo: Repo): string[] {
 /** The git hooks act only where braid is set up and git-hooks is on. */
 const active = (repo: Repo) => isEnabled(repo) && readConfig(repo).gitHooks;
 
+/**
+ * The agent session running git here, registered in this repository. A
+ * session that started in another repository is adopted the first time it
+ * commits here, so it is saved and published here too.
+ */
+function agentSession(repo: Repo): string | undefined {
+  const session = process.env.BRAID_SESSION;
+  if (!session || !active(repo)) return undefined;
+  if (loadState(repo, session)) return session;
+  const transcript = readEntry(session)?.transcript;
+  if (!transcript) return undefined;
+  register(repo, session, transcript);
+  recordSession(session, { repo: repo.top });
+  return session;
+}
+
 /** prepare-commit-msg: adds the Braid-Session trailer for the agent session that runs git. */
 export function prepareCommitMsg(repo: Repo, file: string): void {
-  const session = process.env.BRAID_SESSION;
-  if (!session || !active(repo) || !loadState(repo, session)) return;
+  const session = agentSession(repo);
+  if (!session) return;
   git(["interpret-trailers", "--in-place", "--if-exists", "addIfDifferent", "--trailer", `Braid-Session: ${session}`, file], {
     cwd: repo.top,
   });
@@ -93,8 +111,8 @@ export function prepareCommitMsg(repo: Repo, file: string): void {
 
 /** post-commit: remembers the commit, so the next save commits the conversation with it. */
 export function postCommit(repo: Repo): void {
-  const session = process.env.BRAID_SESSION;
-  if (!session || !active(repo)) return;
+  const session = agentSession(repo);
+  if (!session) return;
   withLock(repo, `save-${session}`, () => {
     const state = loadState(repo, session);
     if (!state) return;
@@ -125,6 +143,7 @@ export function prePush(repo: Repo, remote: string, stdin: string): { refuse?: s
     for (const id of log.split("\n").map((s) => s.trim()).filter(Boolean)) sessions.add(id);
   }
   if (!active(repo) || readConfig(repo).publish === "off") return { results: [] };
-  const results = [...sessions].filter((s) => loadState(repo, s)).map((s) => publish(repo, s, { remote }));
+  // Save first, so the published copy holds the session up to this push.
+  const results = [...sessions].filter((s) => loadState(repo, s)).map((s) => (save(repo, s), publish(repo, s, { remote })));
   return { results };
 }

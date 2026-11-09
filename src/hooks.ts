@@ -1,5 +1,5 @@
 // Claude Code hooks: SessionStart registers the session, Stop saves each turn.
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fetchInBackground, trailerSessions } from "./fetch.ts";
 import { hooksInstalled, installHooks } from "./githooks.ts";
@@ -8,6 +8,7 @@ import { readRecords } from "./chunks.ts";
 import { braidOf, isTurn } from "./records.ts";
 import { findRepo, isEnabled, readConfig, type Repo } from "./repo.ts";
 import { publish } from "./publish.ts";
+import { readEntry, recordSession } from "./registry.ts";
 import { register, save } from "./save.ts";
 import { cliPath, writePointer } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
@@ -41,10 +42,24 @@ function index(repo: Repo, current: string, remote: string): string {
   ].join("\n");
 }
 
+/** Other repositories this session committed in, where braid is set up. */
+function otherRepos(session: string, current: Repo | undefined): Repo[] {
+  const seen = new Set(current ? [current.common] : []);
+  const out: Repo[] = [];
+  for (const top of readEntry(session)?.repos ?? []) {
+    const repo = existsSync(top) ? findRepo(top) : undefined;
+    if (!repo || seen.has(repo.common) || !isEnabled(repo)) continue;
+    seen.add(repo.common);
+    out.push(repo);
+  }
+  return out;
+}
+
 export function sessionStart(input: HookInput): string {
   const session = input.session_id;
   if (!session) return "";
   writePointer();
+  recordSession(session, { transcript: input.transcript_path });
   const envFile = process.env.CLAUDE_ENV_FILE;
   if (envFile) {
     const bin = join(dirname(dirname(cliPath())), "bin");
@@ -55,6 +70,7 @@ export function sessionStart(input: HookInput): string {
   const config = readConfig(repo);
   if (config.gitHooks && !hooksInstalled(repo)) installHooks(repo);
   register(repo, session, input.transcript_path);
+  recordSession(session, { repo: repo.top });
   const remote = config.remote;
   fetchInBackground(repo, remote, 0);
   const context = index(repo, session, remote);
@@ -65,6 +81,7 @@ export function stop(input: HookInput): string {
   const session = input.session_id;
   if (!session) return "";
   const repo = findRepo(input.cwd ?? process.cwd());
+  for (const other of otherRepos(session, repo)) save(other, session, input.transcript_path);
   if (!repo || !isEnabled(repo)) return "";
   save(repo, session, input.transcript_path);
   const remote = readConfig(repo).remote;
@@ -84,9 +101,10 @@ export function stop(input: HookInput): string {
 export function sessionEnd(input: HookInput): string {
   const session = input.session_id;
   if (!session) return "";
-  const repo = findRepo(input.cwd ?? process.cwd());
-  if (!repo || !isEnabled(repo)) return "";
-  const { state } = save(repo, session, input.transcript_path);
-  if (state.chunks > 0 && state.review) publish(repo, session);
+  const current = findRepo(input.cwd ?? process.cwd());
+  for (const repo of [...(current && isEnabled(current) ? [current] : []), ...otherRepos(session, current)]) {
+    const { state } = save(repo, session, input.transcript_path);
+    if (state.chunks > 0 && state.review) publish(repo, session);
+  }
   return "";
 }
