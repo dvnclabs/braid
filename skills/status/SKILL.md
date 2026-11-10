@@ -7,8 +7,9 @@ description: Show where this agent session stands in braid, what is published, a
 
 Run `braid status` and explain the result briefly:
 
-- `local`: saved on this machine, never committed. `/braid:commit` commits it, and so does any git commit made in this session when git-hooks is on.
-- `↑N`: N records of this session are not published yet. They go out with the next `git push` of a commit made in this session, or with `/braid:push`.
+- `local`: saved on this machine, nothing committed or published. `/braid:review`, then `/braid:commit`, prepares it to be shared.
+- `↑N`: N committed records are not published yet. They go out with the next `git push` of a commit made in this session (with autopush), or with `/braid:push`.
+- `*N`: N records since the last commit. Publishing stops at the last commit; `/braid:review` and `/braid:commit` take them in.
 - `↓ name +N`: a session built on this one, such as a review or a branch, has N records that are not merged. `/braid:merge` merges them.
 - `private`: the user withheld the whole session.
 - `✓`: everything is published and nothing is waiting.

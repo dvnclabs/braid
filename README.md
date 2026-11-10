@@ -1,6 +1,6 @@
 # braid
 
-Version control for agent conversations. braid saves every Claude Code session into your git repository, ties it to the commits it produced, and publishes it when you `git push`. Reviewers can question the session behind a pull request, and you can merge their review sessions back into yours.
+Version control for agent conversations. braid saves every Claude Code session into your git repository and ties it to the commits it produced. You review a session, commit it, and `git push` publishes it up to that commit. Reviewers can question the session behind a pull request, and you can merge their review sessions back into yours.
 
 > **v0.1, for Claude Code.** Codex support is next. See [Status of v0.1](docs/design.md#status-of-v01) for what is built and what is planned.
 
@@ -23,15 +23,23 @@ braid init
 git add .braid .braidignore && git commit -m "Set up braid"
 ```
 
-`braid init` turns publishing on for private repositories and leaves it off for public ones, and installs git hooks so that git does the work: each commit the agent makes commits its conversation, and `git push` publishes it. `braid init --no-git-hooks` leaves git alone; you then use `/braid:commit` and `/braid:push`. Teammates who have the plugin need nothing more: braid sets up their clone the first time their agent opens it.
+`braid init` installs git hooks that keep any you have, and writes two settings to `.braid/config.toml`:
+
+| Setting | Default | |
+|---|---|---|
+| `autocommit` | `false` | each commit the agent makes commits its conversation too; off, you commit it with `/braid:commit` after `/braid:review` |
+| `autopush` | `true` in private repositories, `false` in public ones | `git push` publishes the committed part of the sessions behind the pushed commits; off, `/braid:push` publishes |
+
+Change them with `braid init --autocommit`, `braid init --no-autopush` and so on, or set them for yourself in every repository in `~/.config/braid/config.toml`, which wins over the repository's. `braid init --no-git-hooks` leaves git alone. Teammates who have the plugin need nothing more: braid sets up their clone the first time their agent opens it.
 
 ## Use
 
-Work with Claude Code and use git as usual:
+Work with Claude Code and use git as usual. braid saves each turn on your machine. When you want to share the conversation, review it, commit it, and push:
 
-```sh
-git commit -m "Retry webhook deliveries on 5xx"   # made by the agent: commits its conversation too
-git push                                          # publishes that conversation, redacted
+```
+> /braid:review                        # the session as it would be published; remove or rewrite parts
+> /braid:commit Retry webhook deliveries
+$ git push                             # publishes the conversation up to that commit, redacted
 ```
 
 The status line shows where your session stands:
@@ -44,12 +52,38 @@ The status line shows where your session stands:
 |---|---|
 | `5b0e2c1a` | this session |
 | `#128` | the pull request of this branch |
-| `↑4` | 4 records not published yet |
+| `↑4` | 4 committed records not published yet |
+| `*3` | 3 records since the last commit, which are not published |
 | `↓ review/bob +5` | a session built on yours, such as a review or a branch, has 5 records you have not merged |
-| `local` | saved here only, never committed |
+| `local` | saved here only, nothing committed |
 | `✓` | everything published, nothing waiting |
 
-**Review a pull request.** Check it out and start Claude Code. It knows which sessions are behind the branch, and `/braid:review-pr 128` reviews the change together with them. Your review session is published when it ends.
+**Review your session before sharing it.** `braid review`, in a terminal or through `/braid:review`, lists the session as it would be published, one numbered line per record, after redaction:
+
+```
+$ braid review
+braid review 5b0e2c1a (5b0e2c1a): 9 records, nothing committed yet, 0 withheld, 1 redacted
+git push publishes up to the last commit. ↑ committed, not published yet · ✗ withheld · ✎ edited
+
+ 1   you     Why is the Acme import failing? My key is [REDACTED:aws-access-key].
+ 2   agent   → Read customers/acme.csv
+ 3   tool    name,revenue Acme,1200000
+ 4   agent   The CSV has no header row for region.
+```
+
+Then remove or rewrite what should stay private:
+
+```sh
+braid review 2-3                 # withhold records; a tool call takes its result along
+braid review --edit 4            # rewrite a record in your editor; empty it to withhold it
+braid review --text "Acme"       # hide a word in every record
+braid review --all               # keep the whole session back
+braid review --undo 2            # put any of it back
+```
+
+Records that were already published are replaced by the next push.
+
+**Review a pull request.** Check it out and start Claude Code. It knows which sessions are behind the branch, and `/braid:review-pr 128` reviews the change together with them. Commit the review, and it is published when the session ends.
 
 **Merge a review.** When `↓` appears, tell Claude what to keep:
 
@@ -59,22 +93,22 @@ The status line shows where your session stands:
 
 `/braid:merge skip review/bob` marks a review as seen without adopting it.
 
-**Branch.** Claude Code's `/branch` branches the conversation, and braid records the branch by itself. Back in the original session, the branch waits in `↓` until you merge it or skip it.
+**Fork.** `/braid:fork` gives you the command to branch this conversation into a new terminal window, and `/braid:fork review/bob` or `/braid:fork pr:128` the command to continue someone else's session there, with its whole history. Claude Code's `/branch` branches in the same window. braid records each branch by itself, and back in the original session it waits in `↓` until you merge it or skip it.
 
 | Command | |
 |---|---|
-| `/braid:commit [message]` | commit the conversation; git commits do this when the git hooks are on |
-| `/braid:fork [id \| name \| pr:N]` | continue a new session from another one, such as a teammate's |
+| `/braid:review` | the session as it would be published; remove, rewrite or hide parts of it |
+| `/braid:commit [message]` | commit the conversation; publishing goes up to the last commit |
+| `/braid:fork [id \| name \| pr:N]` | the command to continue this session, or another one, in a new window |
 | `/braid:merge [id \| name] [instruction]` | merge the session waiting in `↓`, or any session, or `skip` it |
 | `/braid:review-pr <n>` | review a pull request with the sessions behind it |
 | `/braid:status` | everything the status line abbreviates |
-| `/braid:push` | publish this session; `git push` does this when the git hooks are on |
-| `/braid:withhold` | keep part of this session, or all of it, from being published |
+| `/braid:push` | publish the committed part of this session now; `git push` does this with autopush |
 | `/braid:setup` | set up the status line and the `braid` command |
 
 Asking in plain language works too: "pull in Bob's review but keep my jitter".
 
-**Privacy.** Published copies hold the conversation's messages and tool calls only. Reasoning, images and the harness's raw files stay on your machine, and common credentials are redacted before anything leaves it. Tool calls on the paths in `.braidignore` (same syntax as `.gitignore`; `braid init` starts it with `.env` files and keys) are never published. Teams add terms and patterns to redact in `.braid/redact.toml`, `/braid:push` with a dry run shows what would go, and `publish = "off"` in `~/.config/braid/config.toml` keeps all of your sessions local. Anyone who can read the repository can read its published sessions. See [Publishing](docs/design.md#publishing) and [Trust](docs/design.md#trust).
+**Privacy.** Published copies hold the conversation's messages and tool calls only. Reasoning, images and the harness's raw files stay on your machine, and common credentials are redacted before anything leaves it. Tool calls on the paths in `.braidignore` (same syntax as `.gitignore`; `braid init` starts it with `.env` files and keys) are never published. Teams add terms and patterns to redact in `.braid/redact.toml`. Nothing is published until you commit it, and `braid review` shows exactly what would go. Anyone who can read the repository can read its published sessions. See [Publishing](docs/design.md#publishing) and [Trust](docs/design.md#trust).
 
 ## How it works
 

@@ -1,7 +1,13 @@
 # braid: https://github.com/gbarbalinardo/braid
-# git-hooks = true: each commit the agent makes commits its conversation too, and git push
-# publishes it. false: braid leaves git alone; use /braid:commit and /braid:push.
-# publish = "on-push" lets sessions be published; "off" keeps every session on this machine.
+# git-hooks: commits name the agent session that made them (a Braid-Session trailer), so
+#   autocommit and autopush can follow them. false: braid leaves git alone.
+# autocommit: each commit the agent makes commits its conversation too. false: you commit
+#   it with /braid:commit, after /braid:review.
+# autopush: git push publishes the committed part of the sessions behind the pushed
+#   commits. false: publish with /braid:push.
+# Your own ~/.config/braid/config.toml can set autocommit and autopush over these.
+# link = "store" names sessions inside the sessions only, without a Braid-Session trailer.
 git-hooks = true
-publish = "on-push"
+autocommit = false
+autopush = true
 remote = "origin"

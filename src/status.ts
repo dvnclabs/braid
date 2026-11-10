@@ -1,8 +1,9 @@
-// What the status line shows: unpublished records (↑) and sessions built on
-// this one that wait to be merged (↓).
+// What the status line shows: committed records not published yet (↑), turns
+// since the last commit (*), and sessions built on this one that wait to be
+// merged (↓).
 import { readRecords } from "./chunks.ts";
-import { forEachRef, gitMaybe } from "./git.ts";
-import { braidOf, isTurn, type Rec } from "./records.ts";
+import { forEachRef } from "./git.ts";
+import { braidOf, committedLength, isTurn, type Rec } from "./records.ts";
 import { isEnabled, remoteRefs, SESSION_REFS, storeRef, type Repo } from "./repo.ts";
 import { loadState } from "./state.ts";
 
@@ -21,9 +22,12 @@ export interface Status {
   saved: boolean;
   conv?: string;
   private: boolean;
-  /** Saved, never published, and never committed. */
+  /** Saved, never committed, never published. */
   local: boolean;
+  /** Committed turns not published yet. */
   ahead: number;
+  /** Turns since the last commit. */
+  uncommitted: number;
   waiting: Waiting[];
 }
 
@@ -33,8 +37,14 @@ export function cleanName(name: string): string {
 }
 
 export function sessionName(records: Rec[], session: string): string {
-  const label = records.find((r) => r.type === "label" && typeof r.label === "string" && !braidOf(r).commit);
+  const label = records.find((r) => r.type === "label" && typeof r.label === "string" && !braidOf(r).commit && !braidOf(r).code);
   return (label && cleanName(String(label.label))) || session.slice(0, 8);
+}
+
+/** "5b0e2c1a", or "5b0e2c1a (review/bob)" when the session has a name. */
+export function sessionTitle(records: Rec[], session: string): string {
+  const name = sessionName(records, session);
+  return name === session.slice(0, 8) ? name : `${session.slice(0, 8)} (${name})`;
 }
 
 /** The conversation a session of the store belongs to. */
@@ -43,11 +53,6 @@ export function convOf(repo: Repo, session: string): string | undefined {
   if (state && state.chunks > 0) return state.conv;
   const ref = forEachRef([`${SESSION_REFS}/*/${session}`], { gitDir: repo.store })[0];
   return ref?.ref.split("/")[2];
-}
-
-function linkedByCommit(repo: Repo, session: string): boolean {
-  const log = gitMaybe(["log", "-n", "200", "--format=%(trailers:key=Braid-Session,valueonly)", "HEAD"], { cwd: repo.top }) ?? "";
-  return log.split("\n").some((line) => line.trim() === session);
 }
 
 /** Records of `others` that no merge in `mine` covers. A merge covers its heads and everything before them. */
@@ -66,7 +71,7 @@ export function uncovered(mine: Rec[], others: Rec[], extraHeads: string[] = [])
 }
 
 export function computeStatus(repo: Repo, session: string, remote = "origin"): Status {
-  const status: Status = { session, enabled: isEnabled(repo), saved: false, private: false, local: false, ahead: 0, waiting: [] };
+  const status: Status = { session, enabled: isEnabled(repo), saved: false, private: false, local: false, ahead: 0, uncommitted: 0, waiting: [] };
   const conv = convOf(repo, session);
   if (!conv) return status;
   const state = loadState(repo, session);
@@ -77,9 +82,11 @@ export function computeStatus(repo: Repo, session: string, remote = "origin"): S
   const tracking = remoteRefs(remote);
   const published = new Set(readRecords(`${tracking}/${conv}/${session}`, { cwd: repo.top }).map((r) => r.id));
   const withheld = new Set(state?.withheld ?? []);
-  status.ahead = mine.filter((r) => isTurn(r) && !published.has(r.id) && !withheld.has(r.id)).length;
-  const committed = mine.some((r) => r.type === "label" && braidOf(r).commit);
-  status.local = published.size === 0 && !committed && !(state?.commits ?? []).length && !linkedByCommit(repo, session);
+  const committed = committedLength(mine);
+  const counts = (recs: Rec[]) => recs.filter((r) => isTurn(r) && !published.has(r.id) && !withheld.has(r.id)).length;
+  status.ahead = counts(mine.slice(0, committed));
+  status.uncommitted = counts(mine.slice(committed));
+  status.local = published.size === 0 && committed === 0;
 
   const myIds = new Set(mine.map((r) => r.id));
   const pending = state?.pendingMerge ? [state.pendingMerge.fromHead] : [];
@@ -110,7 +117,10 @@ export function render(s: Status): string {
   const parts: string[] = [];
   if (s.private) parts.push("private");
   else if (s.local) parts.push("local");
-  else if (s.ahead > 0) parts.push(`↑${s.ahead}`);
+  else {
+    if (s.ahead > 0) parts.push(`↑${s.ahead}`);
+    if (s.uncommitted > 0) parts.push(`*${s.uncommitted}`);
+  }
   if (s.waiting.length === 1) {
     const w = s.waiting[0]!;
     parts.push(`↓ ${w.name} +${w.count} → /braid:merge`);

@@ -28,11 +28,11 @@ test("save, publish, review, merge", () => {
   must(s.env, alice, "git", ["commit", "--quiet", "-m", "initial"]);
   must(s.env, alice, "git", ["push", "--quiet", "origin", "HEAD:main"]);
 
-  // braid init: config, store, hooks. No gh here, so publishing starts off; turn it on.
+  // braid init: config, store, hooks. No gh here, so git push does not publish; turn it on.
   const init = braid(s.env, alice, ["init"]);
   assert.equal(init.status, 0, init.stderr);
-  assert.match(init.stdout, /publish = "off"/);
-  writeFileSync(join(alice, ".braid", "config.toml"), 'publish = "on-push"\nremote = "origin"\n');
+  assert.match(init.stdout, /autocommit = false, autopush = false: visibility unknown/);
+  writeFileSync(join(alice, ".braid", "config.toml"), 'autopush = true\nremote = "origin"\n');
   must(s.env, alice, "git", ["add", ".braid"]);
   must(s.env, alice, "git", ["commit", "--quiet", "-m", "Set up braid"]);
   must(s.env, alice, "git", ["push", "--quiet", "origin", "HEAD:main"]);
@@ -52,17 +52,26 @@ test("save, publish, review, merge", () => {
   const status = () => braid(s.env, alice, ["status", "--session", ALICE]).stdout.split("\n")[0];
   assert.match(status()!, /: local$/);
 
-  // The agent commits: the trailer links the commit, and the session shows ↑.
+  // The agent commits: the trailer links the commit. The conversation is not committed with it.
   writeFileSync(join(alice, "send.ts"), "export const retries = 3;\n");
   must(s.env, alice, "git", ["add", "."]);
   must({ ...s.env, BRAID_SESSION: ALICE }, alice, "git", ["commit", "--quiet", "-m", "Retry webhooks"]);
   assert.match(must(s.env, alice, "git", ["log", "-1", "--format=%B"]), new RegExp(`Braid-Session: ${ALICE}`));
+  assert.match(status()!, /: local$/);
+
+  // Alice reviews what would go out, then commits the conversation: the session shows ↑.
+  const review = braid(s.env, alice, ["review", "--session", ALICE]);
+  assert.equal(review.status, 0, review.stderr);
+  assert.match(review.stdout, /3 records, nothing committed yet, 0 withheld, 1 redacted/);
+  assert.match(review.stdout, /\n 1 +you +Add retries to sendWebhook\. My key is \[REDACTED:aws-access-key\]\.\n 2 +agent +Added 3 retries[^\n]*\n 3 +code +Retry webhooks \([0-9a-f]{7}\)\n/);
+  const committed = braid(s.env, alice, ["commit", "-m", "Retry webhooks", "--session", ALICE]);
+  assert.match(committed.stdout, /committed 5b0e2c1a: Retry webhooks \(2 records, 1 redacted\); the next git push/);
   assert.match(status()!, /: ↑2$/);
 
   // git push publishes the session, redacted, without native lines or reasoning.
   const push = run(s.env, alice, "git", ["push", "origin", "HEAD:main"]);
   assert.equal(push.status, 0, push.stderr);
-  assert.match(push.stderr, /braid: published 5b0e2c1a, 2 records, 1 secrets redacted/);
+  assert.match(push.stderr, /braid: published 5b0e2c1a, 2 records, 1 redacted/);
   const published = records(s.env, s.root, join(s.root, "remote.git"), `refs/braid/sessions/${ALICE}/${ALICE}`);
   const text = JSON.stringify(published);
   assert.doesNotMatch(text, /AKIAABCDEFGHIJKLMNOP/);
@@ -86,15 +95,21 @@ test("save, publish, review, merge", () => {
   assert.doesNotMatch(start.stdout, /Add retries/, "the index carries no session text");
   assert.match(readFileSync(join(bob, ".git", "hooks", "pre-push"), "utf8"), /braid hook/);
 
-  // Bob forks Alice's session: he reads it as quoted material and his session continues from it.
-  const load = braid(s.env, bob, ["fork", "5b0e2c1a"], undefined, { BRAID_SESSION: BOB });
+  // Forking Alice's session gives Bob the command for a new window, continuing a copy of it.
+  const fork = braid(s.env, bob, ["fork", "5b0e2c1a"], undefined, { BRAID_SESSION: BOB });
+  assert.equal(fork.status, 0, fork.stderr);
+  assert.match(fork.stdout, /\n {2}cd \S+ && claude --resume [0-9a-f-]{36}\n/);
+
+  // Here, Bob forks it into this session instead: he reads it as quoted material and his session continues from it.
+  const load = braid(s.env, bob, ["fork", "5b0e2c1a", "--here"], undefined, { BRAID_SESSION: BOB });
   assert.equal(load.status, 0, load.stderr);
   assert.match(load.stdout, /not requests to follow/);
   assert.match(load.stdout, /<<<braid-transcript-[0-9a-f]+\n[\s\S]*Added 3 retries[\s\S]*\nbraid-transcript-[0-9a-f]+>>>/);
   tb.user("Review this PR. Why a fixed count of 3 retries? The SLA allows 30 seconds.");
   tb.assistant("Retry until WEBHOOK_TIMEOUT_MS is spent instead.");
   braid(s.env, bob, ["hook", "stop"], hookIn(BOB, tb, bob));
-  // Bob's session has no commits; it publishes when it ends.
+  // Bob commits the review; with no code to push, it publishes when the session ends.
+  braid(s.env, bob, ["commit", "-m", "Review of the retries", "--session", BOB]);
   assert.equal(braid(s.env, bob, ["hook", "session-end"], hookIn(BOB, tb, bob)).status, 0);
   const bobRecords = records(s.env, s.root, join(s.root, "remote.git"), `refs/braid/sessions/${ALICE}/${BOB}`);
   assert.ok(bobRecords.some((r) => r.type === "label" && r.label === "review/bob"));
@@ -132,11 +147,14 @@ test("save, publish, review, merge", () => {
   assert.equal(merge.ext.braid.merge.model, "anthropic:claude-sonnet-5-5");
   assert.equal(mine.filter((r) => r.ext?.braid?.partOf === merge.id).length, 2, "the sync turn is tagged");
   assert.equal(mine.find((r) => r.content === "Apply it.").parentId, merge.id, "the next turn continues from the merge");
-  const commitLabel = mine.find((r) => r.type === "label" && r.ext?.braid?.commit);
-  assert.equal(commitLabel?.label, "Retry webhooks", "the agent's git commit committed the conversation too");
-  assert.match(status()!, /: ↑6$/);
+  const codeLabel = mine.find((r) => r.type === "label" && r.ext?.braid?.code);
+  assert.equal(codeLabel?.label, "Retry webhooks", "the agent's git commit is noted in the conversation");
+  assert.match(status()!, /: \*6$/, "the turns since the commit are not committed");
+  assert.match(braid(s.env, alice, ["push", "--session", ALICE]).stdout, /up to date/);
 
-  // Publishing clears ↑. Deleting published sessions through git is refused.
+  // Committing and publishing clears it. Deleting published sessions through git is refused.
+  braid(s.env, alice, ["commit", "-m", "Adopt the deadline", "--session", ALICE]);
+  assert.match(status()!, /: ↑6$/);
   braid(s.env, alice, ["push", "--session", ALICE]);
   assert.match(status()!, /: ✓$/);
   const del = run(s.env, alice, "git", ["push", "origin", `:refs/braid/sessions/${ALICE}/${ALICE}`]);
@@ -144,25 +162,64 @@ test("save, publish, review, merge", () => {
   assert.match(del.stderr, /refusing to delete/);
 });
 
-test("withheld records and private sessions stay local", () => {
+test("braid review withholds and hides parts of a session, also after they are published", () => {
   const s = sandbox();
   const repo = clone(s, "carol", "carol@example.com");
   must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
-  braid(s.env, repo, ["init"]);
-  writeFileSync(join(repo, ".braid", "config.toml"), 'publish = "on-push"\n');
+  braid(s.env, repo, ["init", "--autopush"]);
   const t = new Transcript(s.root, ALICE);
   const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo });
   braid(s.env, repo, ["hook", "session-start"], hookIn);
-  t.user("first");
-  t.assistant("one");
+  t.user("Fix the Acme Corp import.");
+  t.toolCall("Read", { file_path: "notes.txt" }, "toolu_n1", "login: carol / hunter2");
+  t.assistant("Fixed the import.");
   braid(s.env, repo, ["hook", "stop"], hookIn);
 
-  const w = braid(s.env, repo, ["withhold", "--all", "--session", ALICE]);
+  const list = braid(s.env, repo, ["review", "--session", ALICE]).stdout;
+  assert.match(list, /\n 1 +you +Fix the Acme Corp import\.\n 2 +agent +→ Read notes\.txt\n 3 +tool +login: carol \/ hunter2\n 4 +agent +Fixed the import\.\n/);
+  braid(s.env, repo, ["commit", "-m", "Import fix", "--session", ALICE]);
+  assert.match(braid(s.env, repo, ["push", "--session", ALICE]).stdout, /published 5b0e2c1a, 4 records/);
+  const remote = join(s.root, "remote.git");
+  const ref = `refs/braid/sessions/${ALICE}/${ALICE}`;
+  assert.match(JSON.stringify(records(s.env, s.root, remote, ref)), /hunter2/);
+
+  // Edits name the session: outside an agent session, braid review only reads.
+  assert.match(braid(s.env, repo, ["review", "2"]).stderr, /name the session to edit/);
+
+  // Withholding the call takes its result along; the text is hidden everywhere. Both were published.
+  const w = braid(s.env, repo, ["review", "2", "--session", ALICE]);
   assert.equal(w.status, 0, w.stderr);
-  assert.match(w.stdout, /this session will not be published/);
-  const p = braid(s.env, repo, ["push", "--session", ALICE]);
-  assert.match(p.stdout, /not published: private/);
-  assert.equal(must(s.env, s.root, "git", ["--git-dir", join(s.root, "remote.git"), "for-each-ref", "refs/braid/"]).trim(), "");
+  assert.match(w.stdout, /2 records withheld:\n +2 agent +→ Read notes\.txt\n +3 tool +login/);
+  assert.match(w.stdout, /2 of them are already published: the next push replaces the published copy/);
+  assert.match(braid(s.env, repo, ["review", "--text", "acme corp", "--session", ALICE]).stdout, /"acme corp" hidden in 1 records/);
+  const after = braid(s.env, repo, ["review", "--session", ALICE]).stdout;
+  assert.match(after, /Hidden text: "acme corp"/);
+  assert.match(after, /\n 2 ✗ agent +→ Read notes\.txt {2}\[withheld\]\n/);
+  assert.match(after, /\n 1 +you +Fix the \[REDACTED:term\] import\.\n/);
+
+  // A record's text can be rewritten: from stdin here, in an editor on a terminal. A tool call has no text to rewrite.
+  const edited = braid(s.env, repo, ["review", "--edit", "4", "--session", ALICE], "Fixed the import for the client.\n");
+  assert.match(edited.stdout, /4 edited; it is already published/, edited.stderr);
+  assert.match(braid(s.env, repo, ["review", "--edit", "2", "--session", ALICE], "x").stderr, /2 is a tool call/);
+  assert.match(braid(s.env, repo, ["review", "--session", ALICE]).stdout, /\n 4 ✎ agent +Fixed the import for the client\.\n/);
+
+  // The next push replaces the published copy, without the history that held the old one.
+  const push = braid(s.env, repo, ["push", "--session", ALICE]).stdout;
+  assert.match(push, /replaced 4 records published before/);
+  const text = JSON.stringify(records(s.env, s.root, remote, ref));
+  assert.doesNotMatch(text, /hunter2|Acme Corp|notes\.txt/);
+  assert.match(text, /Fixed the import for the client\./);
+  assert.equal(must(s.env, s.root, "git", ["--git-dir", remote, "rev-list", "--count", ref]).trim(), "1");
+
+  // Putting back the result puts back its call too.
+  assert.match(braid(s.env, repo, ["review", "--undo", "3", "--session", ALICE]).stdout, /2 records put back/);
+  assert.doesNotMatch(braid(s.env, repo, ["review", "--session", ALICE]).stdout, /\n *\d+ ✗/);
+
+  // --all keeps the whole session back.
+  assert.match(braid(s.env, repo, ["review", "--all", "--session", ALICE]).stdout, /will not be published/);
+  assert.match(braid(s.env, repo, ["push", "--session", ALICE]).stdout, /not published: private/);
+  braid(s.env, repo, ["review", "--undo", "--all", "--session", ALICE]);
+  assert.match(braid(s.env, repo, ["push", "--session", ALICE]).stdout, /published 5b0e2c1a/);
 });
 
 test("commit, branch, and merge the branch back", () => {
@@ -196,6 +253,10 @@ test("commit, branch, and merge the branch back", () => {
   assert.deepEqual(branch.map((r) => r.id).at(-1), ttl);
   assert.equal(branch.length, 2, "the copied records are not saved twice");
   assert.equal(branch[0].parentId, lru, "the branch continues from where it was made");
+
+  // braid fork prints how to branch in a new window; your own session forks with Claude Code itself.
+  assert.match(braid(s.env, repo, ["fork", "--session", ALICE]).stdout, new RegExp(`\\n  cd /work && claude --resume ${ALICE} --fork-session\\n`));
+  assert.match(braid(s.env, repo, ["fork", "7c1d2e3f", "--session", ALICE]).stdout, new RegExp(`\\n  cd /work && claude --resume ${BRANCH} --fork-session`));
 
   // Back in the first session, the branch waits in ↓ and merges like a review.
   assert.match(status(ALICE)!, /↓ 7c1d2e3f \+2 → \/braid:merge$/);
@@ -237,8 +298,7 @@ test("subagents are saved, published and briefed with their session", () => {
   const s = sandbox();
   const repo = clone(s, "fay", "fay@example.com");
   must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
-  braid(s.env, repo, ["init"]);
-  writeFileSync(join(repo, ".braid", "config.toml"), 'publish = "on-push"\n');
+  braid(s.env, repo, ["init", "--autopush"]);
   const t = new Transcript(s.root, ALICE);
   const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo });
   braid(s.env, repo, ["hook", "session-start"], hookIn);
@@ -271,8 +331,10 @@ test("subagents are saved, published and briefed with their session", () => {
   assert.equal(agentFiles.length, 2);
   assert.equal(records(s.env, repo, store, ref).filter((r) => r.type === "agent_link").length, 1, "linked once");
 
-  // Published with the session, redacted.
+  // Listed under the call that spawned it, and published with the session, redacted.
+  assert.match(braid(s.env, repo, ["review", "--session", ALICE]).stdout, /\n +4 +spawn +→ subagent a36fc26663a698234 \(Explore\): Find webhook callers\n4\.1 +prompt +List callers\n/);
   must(s.env, repo, "git", ["push", "--quiet", "origin", "HEAD:main"]);
+  braid(s.env, repo, ["commit", "-m", "Audit", "--session", ALICE]);
   assert.match(braid(s.env, repo, ["push", "--session", ALICE]).stdout, /published 5b0e2c1a/);
   const remote = join(s.root, "remote.git");
   const published = `refs/braid/sessions/${ALICE}/${ALICE}`;
@@ -292,7 +354,7 @@ test("a session publishes to each repository it commits in", () => {
     must(s.env, dir, "git", ["config", "user.email", "gus@example.com"]);
     must(s.env, dir, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
     braid(s.env, dir, ["init"]);
-    writeFileSync(join(dir, ".braid", "config.toml"), 'publish = "on-push"\n');
+    writeFileSync(join(dir, ".braid", "config.toml"), "autopush = true\nautocommit = true\n");
     must(s.env, dir, "git", ["add", ".braid"]);
     must(s.env, dir, "git", ["commit", "--quiet", "-m", "Set up braid"]);
     must(s.env, dir, "git", ["push", "--quiet", "origin", "HEAD:main"]);
@@ -302,7 +364,7 @@ test("a session publishes to each repository it commits in", () => {
   const a = clone(s, "a", "gus@example.com");
   must(s.env, a, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
   braid(s.env, a, ["init"]);
-  writeFileSync(join(a, ".braid", "config.toml"), 'publish = "on-push"\n');
+  writeFileSync(join(a, ".braid", "config.toml"), "autopush = true\nautocommit = true\n");
   const b = join(a, "services", "api"); // a repository nested in A
   setUp(b, "b");
   const c = join(s.root, "c");
@@ -324,7 +386,7 @@ test("a session publishes to each repository it commits in", () => {
     assert.match(must(s.env, dir, "git", ["log", "-1", "--format=%B"]), new RegExp(`Braid-Session: ${ALICE}`));
   }
 
-  // Pushing B and C publishes the session to each; the Stop hook kept their copies current.
+  // With autocommit, each commit commits the conversation; pushing B and C publishes it to each.
   braid(s.env, a, ["hook", "stop"], hookIn);
   must(s.env, b, "git", ["push", "--quiet", "origin", "HEAD:main"]);
   must(s.env, cWork, "git", ["push", "--quiet", "origin", "feature"]);
@@ -344,7 +406,7 @@ test("with link = store, commits carry no trailer and still lead to their sessio
   const alice = clone(s, "alice", "alice@example.com");
   must(s.env, alice, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
   braid(s.env, alice, ["init"]);
-  writeFileSync(join(alice, ".braid", "config.toml"), 'publish = "on-push"\nlink = "store"\n');
+  writeFileSync(join(alice, ".braid", "config.toml"), 'autopush = true\nlink = "store"\n');
   must(s.env, alice, "git", ["add", ".braid"]);
   must(s.env, alice, "git", ["commit", "--quiet", "-m", "Set up braid"]);
   must(s.env, alice, "git", ["push", "--quiet", "origin", "HEAD:main"]);
@@ -368,12 +430,13 @@ test("with link = store, commits carry no trailer and still lead to their sessio
   const commit = must(s.env, alice, "git", ["rev-parse", "HEAD"]).trim();
   assert.notEqual(commit, before);
 
-  // git push publishes the session, found through the commit, not a trailer.
+  // git push publishes the committed session, found through the commit, not a trailer.
+  braid(s.env, alice, ["commit", "-m", "Retries", "--session", ALICE]);
   const push = run(s.env, alice, "git", ["push", "origin", "retries"]);
   assert.match(push.stderr, /braid: published 5b0e2c1a/);
   const published = records(s.env, s.root, join(s.root, "remote.git"), `refs/braid/sessions/${ALICE}/${ALICE}`);
   assert.deepEqual(
-    published.filter((r) => r.type === "label").map((r) => r.ext.braid.commit.sha).sort(),
+    published.filter((r) => r.ext?.braid?.code).map((r) => r.ext.braid.code.sha).sort(),
     [before, commit].sort(),
   );
 
@@ -400,7 +463,7 @@ test("team rules withhold paths and redact terms, and a dry run shows it first",
   const s = sandbox();
   const repo = clone(s, "hal", "hal@example.com");
   must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
-  braid(s.env, repo, ["init", "--publish", "on-push"]);
+  braid(s.env, repo, ["init", "--autopush"]);
   writeFileSync(join(repo, ".braid", "redact.toml"), 'terms = ["Acme Corp"]\n');
   appendFileSync(join(repo, ".braidignore"), "customers/\n");
   must(s.env, repo, "git", ["add", ".braid", ".braidignore"]);
@@ -422,7 +485,9 @@ test("team rules withhold paths and redact terms, and a dry run shows it first",
   t.toolCall("Read", { file_path: join(repo, "customers", "x.md") }, "toolu_read1", "Contract terms: pays 1M a year.");
   t.assistant("Acme Corp pays 1M a year.");
   braid(s.env, repo, ["hook", "stop"], hookIn);
+  assert.match(braid(s.env, repo, ["push", "--dry-run", "--session", ALICE]).stdout, /would not publish: nothing committed yet/);
 
+  braid(s.env, repo, ["commit", "-m", "Contract summary", "--session", ALICE]);
   const dry = braid(s.env, repo, ["push", "--dry-run", "--session", ALICE]);
   assert.match(dry.stdout, /would publish 2 records/);
   assert.match(dry.stdout, /redacted: term 2/);
@@ -436,12 +501,16 @@ test("team rules withhold paths and redact terms, and a dry run shows it first",
   assert.doesNotMatch(text, /Contract terms|Acme Corp|customers\/x\.md/);
   assert.match(text, /\[REDACTED:term\] pays 1M a year/);
 
-  // Your own default wins: publish = "off" in ~/.config/braid/config.toml.
+  // Your own settings win: with autopush = false in ~/.config/braid/config.toml, git push publishes nothing.
   mkdirSync(join(s.env.XDG_CONFIG_HOME!, "braid"), { recursive: true });
-  writeFileSync(join(s.env.XDG_CONFIG_HOME!, "braid", "config.toml"), 'publish = "off"\n');
+  writeFileSync(join(s.env.XDG_CONFIG_HOME!, "braid", "config.toml"), "autopush = false\n");
   t.user("more");
-  braid(s.env, repo, ["hook", "stop"], hookIn);
-  assert.match(braid(s.env, repo, ["push", "--session", ALICE]).stdout, /not published: publishing is off in ~\/\.config\/braid\/config\.toml/);
+  must({ ...s.env, BRAID_SESSION: ALICE }, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "More"]);
+  braid(s.env, repo, ["commit", "-m", "More", "--session", ALICE]);
+  const gitPush = run(s.env, repo, "git", ["push", "origin", "feature"]);
+  assert.equal(gitPush.status, 0, gitPush.stderr);
+  assert.doesNotMatch(gitPush.stderr, /braid: published/);
+  assert.match(braid(s.env, repo, ["push", "--session", ALICE]).stdout, /published 5b0e2c1a/, "braid push still publishes");
 });
 
 test("a session moves to another machine, and two machines publish one session", () => {
@@ -450,7 +519,7 @@ test("a session moves to another machine, and two machines publish one session",
   mkdirSync(join(s.root, "home-b"));
   const a = clone(s, "laptop", "alice@example.com");
   must(s.env, a, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
-  braid(s.env, a, ["init", "--publish", "on-push"]);
+  braid(s.env, a, ["init", "--autopush"]);
   must(s.env, a, "git", ["add", ".braid"]);
   must(s.env, a, "git", ["commit", "--quiet", "-m", "Set up braid"]);
   must(s.env, a, "git", ["push", "--quiet", "origin", "HEAD:main"]);
@@ -463,20 +532,21 @@ test("a session moves to another machine, and two machines publish one session",
   t.toolCall("Read", { file_path: "/work/src/parser.ts" }, "toolu_p1", "export function parse() {}");
   const head = t.assistant("Fixed /work/src/parser.ts.");
   braid(s.env, a, ["hook", "stop"], hookIn(ALICE, t.path, a));
+  braid(s.env, a, ["commit", "-m", "Parser fix", "--session", ALICE]);
   assert.match(braid(s.env, a, ["push", "--session", ALICE]).stdout, /published 5b0e2c1a/);
 
-  // On the server, in a checkout at another path: replay it as a new session.
+  // On the server, in a checkout at another path: fork it as a new session.
   const b = join(s.root, "server");
   const envB = machineB();
   must(envB, s.root, "git", ["clone", "--quiet", join(s.root, "remote.git"), b]);
   must(envB, b, "git", ["config", "user.email", "alice@example.com"]);
   braid(envB, b, ["fetch", "--all"]);
-  const r = braid(envB, b, ["replay", "5b0e2c1a", "--cwd", b]);
+  const r = braid(envB, b, ["fork", "5b0e2c1a", "--cwd", b]);
   assert.equal(r.status, 0, r.stderr);
-  const newId = /wrote session (\S+)/.exec(r.stdout)![1]!;
-  const file = /to (\S+\.jsonl)/.exec(r.stdout)![1]!;
   const real = realpathSync(b);
-  assert.ok(file.startsWith(join(s.root, "home-b", ".claude", "projects", real.replace(/[^A-Za-z0-9]/g, "-"))), "where claude --resume looks");
+  const newId = new RegExp(`\\n  cd ${real.replace(/[/.-]/g, "\\$&")} && claude --resume (\\S+)\\n`).exec(r.stdout)![1]!;
+  const file = join(s.root, "home-b", ".claude", "projects", real.replace(/[^A-Za-z0-9]/g, "-"), `${newId}.jsonl`);
+  assert.ok(existsSync(file), "where claude --resume looks");
   const native = readFileSync(file, "utf8");
   assert.match(native, new RegExp(`${real.replace(/[/.-]/g, "\\$&")}/src/parser\\.ts`));
   assert.doesNotMatch(native, /\/work\/src/);
@@ -489,7 +559,8 @@ test("a session moves to another machine, and two machines publish one session",
   const store = join(b, ".git", "braid", "store");
   const saved = records(envB, b, store, `refs/sessions/${ALICE}/${newId}`).filter((x) => x.type === "message");
   assert.deepEqual(saved.map((x) => x.content), ["Now add tests."], "the copied records are not saved again");
-  assert.equal(saved[0].parentId, head, "the replay continues from the source head");
+  assert.equal(saved[0].parentId, head, "the fork continues from the source head");
+  braid(envB, b, ["commit", "-m", "Tests", "--session", newId]);
   assert.match(braid(envB, b, ["push", "--session", newId]).stdout, /published/);
 
   // The same session id saved on both machines (a transcript copied by hand): both publish, and the remote keeps both sides.
@@ -500,6 +571,8 @@ test("a session moves to another machine, and two machines publish one session",
   braid(envB, b, ["hook", "stop"], hookIn(ALICE, copy, b));
   t.user("From the laptop.");
   braid(s.env, a, ["hook", "stop"], hookIn(ALICE, t.path, a));
+  braid(envB, b, ["commit", "-m", "Server", "--session", ALICE]);
+  braid(s.env, a, ["commit", "-m", "Laptop", "--session", ALICE]);
   const pushB = braid(envB, b, ["push", "--session", ALICE]);
   assert.match(pushB.stdout, /published 5b0e2c1a/, pushB.stderr);
   const pushA = braid(s.env, a, ["push", "--session", ALICE]);
@@ -551,6 +624,9 @@ test("OpenClaw sessions import from SQLite, incrementally", async () => {
   assert.match(again.stdout, /77aa0000 Research: up to date/);
   db.close();
 
+  // An imported session commits like any other.
+  assert.match(braid(s.env, repo, ["commit", "-m", "Build check", "--session", MAIN]).stdout, /committed 6f0a5d05: Build check/);
+
   const shown = braid(s.env, repo, ["show", "6f0a5d05"]);
   assert.match(shown.stdout, /via openclaw · assistant\] → read ci\/build\.log/);
   assert.match(shown.stdout, /The build passes\./);
@@ -566,7 +642,7 @@ test(".braidignore withholds tool calls on the paths it names", () => {
   writeFileSync(join(repo, "src", "app.ts"), "export {};\n");
   must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
   // braid init writes a .braidignore that covers .env files; this team adds its data.
-  braid(s.env, repo, ["init", "--publish", "on-push"]);
+  braid(s.env, repo, ["init", "--autopush"]);
   assert.match(readFileSync(join(repo, ".braidignore"), "utf8"), /^\.env$/m);
   appendFileSync(join(repo, ".braidignore"), "data/\n");
 
@@ -579,6 +655,8 @@ test(".braidignore withholds tool calls on the paths it names", () => {
   t.toolCall("Read", { file_path: join(repo, "src", "app.ts") }, "toolu_app", "export {};");
   t.assistant("The CSV has no header row for region.");
   braid(s.env, repo, ["hook", "stop"], hookIn);
+  braid(s.env, repo, ["commit", "-m", "Import check", "--session", ALICE]);
+  assert.match(braid(s.env, repo, ["review", "--session", ALICE]).stdout, /✗ agent +→ Read \S*\/\.env {2}\[\.braidignore \.env\]/);
 
   const dry = braid(s.env, repo, ["push", "--dry-run", "--session", ALICE]).stdout;
   assert.match(dry, /withheld: \.env 1, data\/ 1/);

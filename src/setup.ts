@@ -25,18 +25,25 @@ function visibility(repo: Repo): string | undefined {
   return r.status === 0 ? r.stdout.trim() : undefined;
 }
 
-const TEMPLATE = (publish: string, gitHooks: boolean) =>
+const TEMPLATE = (s: Settings) =>
   [
     "# braid: https://github.com/gbarbalinardo/braid",
-    "# git-hooks = true: each commit the agent makes commits its conversation too, and git push",
-    "# publishes it. false: braid leaves git alone; use /braid:commit and /braid:push.",
-    '# publish = "on-push" lets sessions be published; "off" keeps every session on this machine.',
+    "# git-hooks: commits name the agent session that made them (a Braid-Session trailer), so",
+    "#   autocommit and autopush can follow them. false: braid leaves git alone.",
+    "# autocommit: each commit the agent makes commits its conversation too. false: you commit",
+    "#   it with /braid:commit, after /braid:review.",
+    "# autopush: git push publishes the committed part of the sessions behind the pushed",
+    "#   commits. false: publish with /braid:push.",
+    "# Your own ~/.config/braid/config.toml can set autocommit and autopush over these.",
     '# link = "store" names sessions inside the sessions only, without a Braid-Session trailer.',
-    `git-hooks = ${gitHooks}`,
-    `publish = "${publish}"`,
+    `git-hooks = ${s["git-hooks"]}`,
+    `autocommit = ${s.autocommit}`,
+    `autopush = ${s.autopush}`,
     'remote = "origin"',
     "",
   ].join("\n");
+
+type Settings = { "git-hooks": boolean; autocommit: boolean; autopush: boolean };
 
 const IGNORE_TEMPLATE = [
   "# braid: tool calls on these paths, and their results, are never published.",
@@ -49,24 +56,31 @@ const IGNORE_TEMPLATE = [
   "",
 ].join("\n");
 
-/** Once per repository: `.braid/config.toml`, the store, and the git hooks when git-hooks is on. */
-export function init(repo: Repo, opts: { gitHooks?: boolean; publish?: "on-push" | "off" } = {}): string[] {
+/** Once per repository: `.braid/config.toml`, `.braidignore`, the store, and the git hooks when git-hooks is on. */
+export function init(repo: Repo, opts: Partial<Settings> = {}): string[] {
   const notes: string[] = [];
   const file = join(repo.top, ".braid", "config.toml");
   if (!existsSync(file)) {
-    const chosen = opts.publish ?? userConfig().publish;
-    const vis = chosen ? undefined : visibility(repo);
-    const publish = chosen ?? (vis === "PRIVATE" || vis === "INTERNAL" ? "on-push" : "off");
+    // Public repositories do not publish on push unless asked to.
+    const own = userConfig().autopush;
+    const chosen = opts.autopush ?? own;
+    const vis = chosen === undefined ? visibility(repo) : undefined;
+    const autopush = chosen ?? (vis === "PRIVATE" || vis === "INTERNAL");
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, TEMPLATE(publish, opts.gitHooks ?? true));
-    const why = opts.publish ? "as asked" : chosen ? "your default in ~/.config/braid/config.toml" : vis ? `repository is ${vis.toLowerCase()}` : "visibility unknown";
-    notes.push(`wrote .braid/config.toml (publish = "${publish}", ${why})`);
+    writeFileSync(file, TEMPLATE({ "git-hooks": opts["git-hooks"] ?? true, autocommit: opts.autocommit ?? false, autopush }));
+    const why = opts.autopush !== undefined ? "as asked" : own !== undefined ? "your default in ~/.config/braid/config.toml" : vis ? `repository is ${vis.toLowerCase()}` : "visibility unknown";
+    notes.push(`wrote .braid/config.toml (autocommit = ${opts.autocommit ?? false}, autopush = ${autopush}: ${why})`);
     notes.push("commit it so teammates get braid too: git add .braid .braidignore && git commit -m 'Set up braid'");
-  } else if (opts.gitHooks !== undefined) {
-    const text = readFileSync(file, "utf8");
-    const line = `git-hooks = ${opts.gitHooks}`;
-    writeFileSync(file, /^git-hooks\s*=.*$/m.test(text) ? text.replace(/^git-hooks\s*=.*$/m, line) : `${line}\n${text}`);
-    notes.push(`set ${line} in .braid/config.toml`);
+  } else {
+    let text = readFileSync(file, "utf8");
+    const changes = Object.entries(opts).filter(([, value]) => value !== undefined);
+    for (const [key, value] of changes) {
+      const line = `${key} = ${value}`;
+      const re = new RegExp(`^${key}\\s*=.*$`, "m");
+      text = re.test(text) ? text.replace(re, line) : `${text.trimEnd()}\n${line}\n`;
+      notes.push(`set ${line} in .braid/config.toml`);
+    }
+    if (changes.length) writeFileSync(file, text);
   }
   const ignore = join(repo.top, ".braidignore");
   if (!existsSync(ignore)) {

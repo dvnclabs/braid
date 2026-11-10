@@ -53,11 +53,13 @@ test("↓ counts records that no merge covers", () => {
 });
 
 test("the status line text", () => {
-  const base: Status = { session: "s", enabled: true, saved: true, private: false, local: false, ahead: 0, waiting: [] };
+  const base: Status = { session: "s", enabled: true, saved: true, private: false, local: false, ahead: 0, uncommitted: 0, waiting: [] };
   assert.equal(render(base), "✓");
   assert.equal(render({ ...base, saved: false }), "not saved");
   assert.equal(render({ ...base, local: true, ahead: 3 }), "local");
   assert.equal(render({ ...base, ahead: 4 }), "↑4");
+  assert.equal(render({ ...base, ahead: 4, uncommitted: 2 }), "↑4 · *2");
+  assert.equal(render({ ...base, uncommitted: 2 }), "*2");
   const w = { session: "01a1bc3e", name: "review/bob", count: 5, head: "r5", base: "e8" };
   assert.equal(render({ ...base, ahead: 4, waiting: [w] }), "↑4 · ↓ review/bob +5 → /braid:merge");
   assert.equal(render({ ...base, waiting: [w, { ...w, count: 2 }] }), "↓ 2 sessions +7 → /braid:merge");

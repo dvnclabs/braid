@@ -51,7 +51,7 @@ export function commitIndex(repo: Repo, remote: string): Map<string, Set<string>
       continue;
     }
     const commits = readRecords(r.ref, r.opts)
-      .map((rec) => (rec.type === "label" ? braidOf(rec).commit?.sha : undefined))
+      .map((rec) => (rec.type === "label" ? (braidOf(rec).commit?.sha ?? braidOf(rec).code?.sha) : undefined))
       .filter((sha): sha is string => !!sha);
     next[r.key] = { sha: r.sha, session: r.ref.slice(r.ref.lastIndexOf("/") + 1), commits };
   }

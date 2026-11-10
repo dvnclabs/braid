@@ -90,10 +90,18 @@ export function appendChunk(ref: string, records: Rec[], meta: object, opts: Git
 
 /**
  * Writes a whole set of chunks, and the subagents' chunks, as one commit on top
- * of `parent`, for published copies. Unchanged chunks hash to the same blobs,
- * so republishing is cheap. Returns undefined when the tree is the parent's.
+ * of `parent`, for published copies; with `orphan`, as a commit without history.
+ * Unchanged chunks hash to the same blobs, so republishing is cheap. Returns
+ * undefined when the tree is the parent's.
  */
-export function writeChunks(chunks: Rec[][], parent: string | undefined, message: string, opts: GitOptions, agents = new Map<string, Rec[][]>()): string | undefined {
+export function writeChunks(
+  chunks: Rec[][],
+  parent: string | undefined,
+  message: string,
+  opts: GitOptions,
+  agents = new Map<string, Rec[][]>(),
+  orphan = false,
+): string | undefined {
   const recs: TreeEntry[] = chunks.map((c, i) => ({
     mode: "100644",
     type: "blob",
@@ -103,5 +111,5 @@ export function writeChunks(chunks: Rec[][], parent: string | undefined, message
   const agentEntry = agentsTree([], agents, opts);
   const tree = mktree([{ mode: "040000", type: "tree", sha: mktree(recs, opts), name: "records" }, ...(agentEntry ? [agentEntry] : [])], opts);
   if (parent && gitMaybe(["rev-parse", `${parent}^{tree}`], opts)?.trim() === tree) return undefined;
-  return commitTree(tree, parent ? [parent] : [], message, opts);
+  return commitTree(tree, parent && !orphan ? [parent] : [], message, opts);
 }

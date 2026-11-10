@@ -83,8 +83,12 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
     if (transcript) state.transcript = transcript;
     const path = state.transcript;
     if (!path || !existsSync(path)) {
-      if (opts.commit !== undefined) throw new Error("this session is not saved yet: braid saves sessions that start after it is set up");
-      return { added: 0, state };
+      if (opts.commit === undefined) return { added: 0, state };
+      // An imported session, or one whose transcript is gone: commit what the store has.
+      if (state.chunks === 0) throw new Error("this session is not saved yet: braid saves sessions that start after it is set up");
+      const added = writeChunk(repo, state, [], undefined, true, opts, new Map());
+      saveState(repo, state);
+      return { added, state };
     }
 
     // A rewritten file, or a session saved before braid kept cursors, is read again from the start, keeping only unsaved records.
@@ -225,14 +229,17 @@ function writeChunk(
     const commits = codeCommits.map((sha) => ({ sha, message: gitMaybe(["log", "-1", "--format=%s", sha], { cwd: repo.top })?.trim() ?? "" }));
     if (opts.commit !== undefined) commits.push({ sha: "", message: opts.commit });
     if (opts.commit !== undefined && !target) throw new Error("nothing to commit: this session has no saved turns yet");
+    // A code commit commits the conversation too only with autocommit on; otherwise it is noted, for links.
+    const autocommit = codeCommits.length > 0 && readConfig(repo).autocommit;
     for (const c of target ? commits : []) {
+      const kind = !c.sha ? { commit: {} } : autocommit ? { commit: { sha: c.sha } } : { code: { sha: c.sha } };
       out.push({
         type: "label",
         id: `braid-commit-${randomUUID()}`,
         time: now,
         targetId: target,
         label: c.message || "commit",
-        ext: { braid: { actor, session, commit: c.sha ? { sha: c.sha } : {} } },
+        ext: { braid: { actor, session, ...kind } },
       });
     }
   }

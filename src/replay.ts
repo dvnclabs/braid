@@ -1,9 +1,9 @@
-// Replay: write a saved session back out as a Claude Code transcript under a
-// new session id, so it can be resumed here, on another machine, or as a
-// second direction from the same point. Paths from the source checkout are
-// rewritten to this one.
+// Forking into a new window: write a saved session back out as a Claude Code
+// transcript under a new session id, so `claude --resume` continues it here,
+// on another machine, or as a second direction from the same point. Paths from
+// the source checkout are rewritten to this one.
 import { randomUUID } from "node:crypto";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { claudeCode, uuidFor } from "@leostera/atxf/claude-code";
@@ -12,6 +12,27 @@ import { conversation, type Found } from "./load.ts";
 import { ancestry, braidOf, lastTurn, type Rec } from "./records.ts";
 import { userConfig, type Repo } from "./repo.ts";
 import { loadState, newState, saveState } from "./state.ts";
+
+/** The directory a Claude Code session started in, from its transcript: where `claude --resume` finds it. */
+export function launchDir(transcript: string | undefined): string | undefined {
+  if (!transcript || !existsSync(transcript)) return undefined;
+  const buf = Buffer.alloc(256 * 1024);
+  const fd = openSync(transcript, "r");
+  const n = readSync(fd, buf, 0, buf.length, 0);
+  closeSync(fd);
+  for (const line of buf.subarray(0, n).toString("utf8").split("\n")) {
+    try {
+      const cwd = (JSON.parse(line) as { cwd?: unknown }).cwd;
+      if (typeof cwd === "string") return cwd;
+    } catch {
+      // a partial last line
+    }
+  }
+  return undefined;
+}
+
+/** A word for sh: as is when safe, else single-quoted. */
+export const shellWord = (s: string): string => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
 /** Where Claude Code keeps the sessions of a working directory. */
 function projectDir(cwd: string): string {

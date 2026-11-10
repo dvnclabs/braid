@@ -43,7 +43,14 @@ export interface SessionState {
   reparent?: { from: string; to: string };
   /** Code commits made since the last save; the next save commits the conversation with each. */
   commits?: string[];
+  /** Records withheld with braid review; each takes its tool results and subagents along. */
   withheld?: string[];
+  /** Text hidden with braid review --text, in every record of this session. */
+  terms?: string[];
+  /** Records rewritten with braid review --edit: the text published in their place, by record id. */
+  edits?: Record<string, string>;
+  /** The published copy this machine pushed last, to tell its own edits from another machine's. */
+  published?: string;
   /** Forked from someone else's session: published when it ends, since a review has no commits to push. */
   review?: boolean;
   private?: boolean;

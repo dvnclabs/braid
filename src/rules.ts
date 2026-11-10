@@ -141,15 +141,15 @@ function forms(p: string, top: string): string[] {
 }
 
 /**
- * Records to withhold under .braidignore: each assistant record with a tool
- * call on an ignored path, and the tool results of those calls. Counts are
- * per ignore pattern.
+ * Records to withhold under .braidignore, each with the pattern that withholds
+ * it: each assistant record with a tool call on an ignored path, and the tool
+ * results of those calls. Counts are per pattern, of the calls.
  */
-export function pathWithheld(records: Rec[], rules: Rules, top: string): { ids: Set<string>; counts: Map<string, number> } {
-  const ids = new Set<string>();
+export function pathWithheld(records: Rec[], rules: Rules, top: string): { ids: Map<string, string>; counts: Map<string, number> } {
+  const ids = new Map<string, string>();
   const counts = new Map<string, number>();
   if (rules.ignores.length === 0) return { ids, counts };
-  const calls = new Set<string>();
+  const calls = new Map<string, string>();
   for (const r of records) {
     if (!Array.isArray(r.content)) continue;
     for (const block of r.content as { type?: string; id?: string; arguments?: unknown }[]) {
@@ -161,11 +161,14 @@ export function pathWithheld(records: Rec[], rules: Rules, top: string): { ids: 
       }
       if (!cause) continue;
       if (!ids.has(r.id)) counts.set(cause, (counts.get(cause) ?? 0) + 1);
-      ids.add(r.id);
-      if (block.id) calls.add(block.id);
+      ids.set(r.id, ids.get(r.id) ?? cause);
+      if (block.id) calls.set(block.id, cause);
     }
   }
   // The results of those calls go too; they are counted with their call.
-  for (const r of records) if (r.role === "tool" && typeof r.toolCallId === "string" && calls.has(r.toolCallId)) ids.add(r.id);
+  for (const r of records) {
+    const cause = r.role === "tool" && typeof r.toolCallId === "string" ? calls.get(r.toolCallId) : undefined;
+    if (cause && !ids.has(r.id)) ids.set(r.id, cause);
+  }
   return { ids, counts };
 }

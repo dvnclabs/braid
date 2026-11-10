@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 import { pi } from "@leostera/atxf/pi";
 import { appendChunk } from "./chunks.ts";
-import { withBraid, type Actor, type Rec } from "./records.ts";
+import { isTurn, withBraid, type Actor, type Rec } from "./records.ts";
 import { ensureStore, storeRef, type Repo } from "./repo.ts";
 import { actorId } from "./save.ts";
 import { loadState, newState, saveState, withLock } from "./state.ts";
@@ -139,6 +139,7 @@ export function importOpenclaw(repo: Repo, dbPath: string, only?: string): Impor
           appendChunk(storeRef(state.conv, id), chunk, { time: new Date().toISOString(), source: `openclaw:${dbPath}`, seq: last }, { gitDir: repo.store });
           state.chunks += 1;
           state.importedSeq = last;
+          state.head = [...records].reverse().find(isTurn)?.id ?? state.head;
           total += records.length;
           if (rows.length < BATCH_EVENTS && bytes <= BATCH_BYTES) break;
         }

@@ -98,14 +98,14 @@ export function stop(input: HookInput): string {
   return JSON.stringify({ systemMessage: `braid: ${what} waiting to be merged into this session. /braid:merge to merge.` });
 }
 
-/** SessionEnd: saves, and publishes a review, which has no commits to push. Your own branches wait for a push. */
+/** SessionEnd: saves, and with autopush publishes the committed part of a review, which has no code to push. */
 export function sessionEnd(input: HookInput): string {
   const session = input.session_id;
   if (!session) return "";
   const current = findRepo(input.cwd ?? process.cwd());
   for (const repo of [...(current && isEnabled(current) ? [current] : []), ...otherRepos(session, current)]) {
     const { state } = save(repo, session, input.transcript_path);
-    if (state.chunks > 0 && state.review) publish(repo, session);
+    if (state.chunks > 0 && state.review && readConfig(repo).autopush) publish(repo, session);
   }
   return "";
 }

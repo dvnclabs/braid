@@ -1,4 +1,4 @@
-// Git hooks: link commits to sessions, and publish sessions on push.
+// Git hooks: link commits to sessions, commit conversations with them (autocommit), and publish on push (autopush).
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { config, git, gitMaybe } from "./git.ts";
@@ -131,7 +131,7 @@ export function postRewrite(repo: Repo, stdin: string): void {
   }
 }
 
-/** post-commit: remembers the commit, so the next save commits the conversation with it. */
+/** post-commit: remembers the commit, so the next save notes it in the conversation, and commits the conversation with autocommit. */
 export function postCommit(repo: Repo): void {
   const session = agentSession(repo);
   if (!session) return;
@@ -147,8 +147,8 @@ export function postCommit(repo: Repo): void {
 const ZERO = /^0+$/;
 
 /**
- * pre-push: publishes the sessions named by trailers in the commits being
- * pushed. Refuses pushes that would delete published sessions.
+ * pre-push: with autopush, publishes the committed part of the sessions behind
+ * the commits being pushed. Refuses pushes that would delete published sessions.
  */
 export function prePush(repo: Repo, remote: string, stdin: string): { refuse?: string; results: PublishResult[] } {
   const trailers = new Set<string>();
@@ -166,8 +166,8 @@ export function prePush(repo: Repo, remote: string, stdin: string): { refuse?: s
     shas.push(...commitsOf(repo, range));
   }
   const sessions = new Set([...trailers, ...sessionsFor(repo, remote, shas)]);
-  if (!active(repo) || readConfig(repo).publish === "off") return { results: [] };
-  // Save first, so the published copy holds the session up to this push.
+  if (!active(repo) || !readConfig(repo).autopush) return { results: [] };
+  // Save first: with autocommit, the commits being pushed commit the conversation at the next save.
   const results = [...sessions].filter((s) => loadState(repo, s)).map((s) => (save(repo, s), publish(repo, s, { remote })));
   return { results };
 }

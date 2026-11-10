@@ -25,6 +25,8 @@ export interface BraidExt {
   pr?: number;
   /** On a label: the conversation was committed here, with this code commit when there is one. */
   commit?: { sha?: string };
+  /** On a label: a code commit made here, which did not commit the conversation (autocommit off). */
+  code?: { sha: string };
   redactions?: { rule: string; count: number }[];
 }
 
@@ -43,6 +45,15 @@ export const braidOf = (r: Rec): BraidExt => r.ext?.braid ?? {};
 
 /** Messages and merges: what the ↑ and ↓ counts count. */
 export const isTurn = (r: Rec): boolean => r.type === "message" || r.type === "branch_summary";
+
+/** A commit of the conversation: what is published ends at the last one. */
+export const isCommit = (r: Rec): boolean => r.type === "label" && !!braidOf(r).commit;
+
+/** How many records, from the start, are committed: up to and including the last commit. */
+export function committedLength(records: Rec[]): number {
+  for (let i = records.length - 1; i >= 0; i--) if (isCommit(records[i]!)) return i + 1;
+  return 0;
+}
 
 export function parseJsonl(text: string): Rec[] {
   return text
@@ -82,7 +93,7 @@ function blockText(block: unknown, max: number): string {
 export function describe(r: Rec, max = 400): string {
   if (r.type === "branch_summary") return clip(String(r.summary ?? ""), max * 4);
   if (r.type === "compaction") return clip(String(r.summary ?? ""), max);
-  if (r.type === "label") return braidOf(r).commit ? `commit: ${String(r.label)}` : `named ${String(r.label)}`;
+  if (r.type === "label") return braidOf(r).commit ? `commit: ${String(r.label)}` : braidOf(r).code ? `code commit: ${String(r.label)}` : `named ${String(r.label)}`;
   if (r.type === "agent_link") {
     const agent = r.agent as { name?: string; role?: string } | undefined;
     return clip(`→ subagent ${String(r.transcriptId)}${agent ? ` (${agent.name ?? "subagent"}): ${agent.role ?? ""}` : ""}`, max);
