@@ -8,7 +8,10 @@ import { trailerSessions } from "./links.ts";
 import { PUBLISHED_REFS, readConfig, remoteRefs, SESSION_REFS, type Repo } from "./repo.ts";
 import { withLock } from "./state.ts";
 
+export const AUTOPILOT = "autopilot is on: braid keeps conversations on this machine and asks no remote or GitHub anything; braid init --no-autopilot lets it push and fetch them";
+
 export function fetchSessions(repo: Repo, remote: string, opts: { all?: boolean } = {}): number {
+  if (readConfig(repo).autopilot) throw new Error(AUTOPILOT);
   return withLock(repo, "fetch", () => {
     const wanted = new Set<string>();
     for (const { ref } of forEachRef([SESSION_REFS], { gitDir: repo.store })) wanted.add(ref.split("/")[2]!);
@@ -30,6 +33,9 @@ export function fetchSessions(repo: Repo, remote: string, opts: { all?: boolean 
 
 /** Starts a background fetch when the last one is older than `minutes`. */
 export function fetchInBackground(repo: Repo, remote: string, minutes = 3): void {
+  if (readConfig(repo).autopilot) return;
+  // A separate repository often has no remote: nothing to fetch.
+  if (repo.separate && !gitMaybe(["remote", "get-url", remote], { cwd: repo.top })) return;
   const stamp = join(repo.dir, "cache", "fetch");
   try {
     if (Date.now() - statSync(stamp).mtimeMs < minutes * 60_000) return;

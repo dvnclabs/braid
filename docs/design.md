@@ -1,6 +1,6 @@
 # Design
 
-This document describes braid's design. Version 0.1 implements its core for Claude Code; [Status of v0.1](#status-of-v01) lists what is built and what comes next, and parts that are not built yet are marked *planned*. The [README](../README.md) covers installation and use.
+braid is an efficient session manager: it saves every coding-agent session as it happens, in git, and lets you go back, fork, edit, merge and share it. This document describes its design. Version 0.1 implements its core for Claude Code; [Status of v0.1](#status-of-v01) lists what is built and what comes next, and parts that are not built yet are marked *planned*. The [README](../README.md) covers installation and use.
 
 - [Model](#model)
 - [Storage](#storage)
@@ -47,7 +47,10 @@ A **projection** renders a branch for one reader in one harness:
 | `.git/braid/store`, a separate bare repository, ref `refs/sessions/<conversation>/<session>` | your sessions as written, unredacted |
 | `refs/braid/sessions/<conversation>/<session>` on the remote | published sessions: redacted, with withheld records removed |
 | `refs/braid/remotes/origin/sessions/<conversation>/<session>` in your clone | the last fetched copy of each published session |
-| `.git/braid/sessions/<session>.json` | the session's state: where the last save stopped, what `braid review` withheld, rewrote or hid, a merge waiting to be written |
+| `.git/braid/sessions/<session>.json` | the session's state: where the last save stopped, what `braid edit` withheld, rewrote or hid, a merge waiting to be written, the last `braid verify` |
+| `refs/tags/points/<session>/<n>` in the store | fork points: with autofork, the session as it stood before a turn that changed a lot |
+
+On autopilot, the default, braid keeps conversations in the repository the session runs in, inside its `.git`, even where braid was never set up there, and in `~/.braid` outside any repository. It writes no files into the working tree and installs no hooks unless `braid init` ran in that repository, and it never pushes, fetches or calls `gh`. The `repo` setting can name a separate git repository instead, such as `~/convos`: braid then keeps the conversations of that repository there, with no store, hooks, autocommit or autopush in the code repository, and `/braid:push` pushes to the separate repository's `origin`. The code repository's `.braidignore` and `redact.toml` still apply to its sessions.
 
 The unredacted store sits outside the repository's refs, so no git command can push it by accident, `git push --mirror` included. The repository itself only ever holds copies that were already published.
 
@@ -92,14 +95,17 @@ How the hook knows which session made a commit:
 
 Parallel agents usually run in separate worktrees, which keeps the second case unambiguous.
 
-Two settings in `.braid/config.toml` decide what the hooks do, and your own `~/.config/braid/config.toml` can set either over the repository's:
+These settings in `.braid/config.toml` decide what braid does by itself, and your own `~/.config/braid/config.toml` can set any of them over the repository's:
 
 | Setting | Default | |
 |---|---|---|
-| `autocommit` | `false` | each code commit the agent makes commits its conversation too; off, you commit it with `/braid:commit` after `/braid:review` |
-| `autopush` | `true`; `braid init` writes `false` in public repositories | `git push` publishes the committed part of the sessions behind the pushed commits; off, `/braid:push` publishes |
+| `autopilot` | `true` | braid works on this machine only: no pushing, fetching or `gh`, so no autopush, and no trailers (as with `link = "store"`). Off, the settings below decide how sessions are shared. |
+| `autofork` | `true` | before a turn that edits 5 files or makes 30 tool calls, braid tags the session as it stood, a fork point that `braid fork @N` continues from in a new window |
+| `repo` | `auto` | `auto` keeps conversations in the repository; a path keeps them in that separate git repository, with autocommit and autopush off |
+| `autocommit` | `false` | each code commit the agent makes commits its conversation too; off, you commit it with `/braid:commit` after `/braid:edit` |
+| `autopush` | `true`; `braid init` writes `false` in public repositories, and on autopilot | off autopilot, `git push` publishes the committed part of the sessions behind the pushed commits; off, `/braid:push` publishes |
 
-`braid init --autocommit`, `--no-autopush` and the like change them. The git hooks themselves are on by default. `git-hooks = false`, or `braid init --no-git-hooks`, turns them off: braid then leaves git alone, and `/braid:commit` and `/braid:push` do the work. Without trailers, `pr:N` cannot find the sessions behind a pull request. braid keeps an existing hook as `<name>.local` and runs it first. When a hook manager such as husky or lefthook sets `core.hooksPath`, `braid init` prints the lines to add to it instead.
+`braid init --autocommit`, `--no-autopilot` and the like change them; outside a repository they go to your own config. The git hooks themselves are on by default. `git-hooks = false`, or `braid init --no-git-hooks`, turns them off: braid then leaves git alone, and `/braid:commit` and `/braid:push` do the work. Without trailers, `pr:N` cannot find the sessions behind a pull request. braid keeps an existing hook as `<name>.local` and runs it first. When a hook manager such as husky or lefthook sets `core.hooksPath`, `braid init` prints the lines to add to it instead.
 
 Some teams forbid trailers in commit messages, and a trailer puts the session id into history even when the session is never published. With `link = "store"` in `.braid/config.toml`, commits carry no trailer. Each save already writes a label into the session for every code commit made during it, with the commit's SHA, and the label travels with the published session once it is committed. braid reads both sources wherever it needs the sessions behind commits: `git push`, the index at session start, and `pr:N`. Without trailers braid cannot tell which conversations are behind a branch before fetching them, so it fetches every published session.
 
@@ -147,19 +153,19 @@ withhold-session = false                  # true: a call on an ignored path with
 
 `braid push --dry-run` shows the totals: the records, the redactions per rule, the records withheld per cause, where the rules came from, and how many newer records are not committed. Running [gitleaks](https://github.com/gitleaks/gitleaks) is *planned*.
 
-**Review.** `braid review` lists the session as it would be published, one numbered line per record after redaction, with subagent records numbered under the line that spawned them (`4.1`). It then edits what goes out:
+**Edit.** `braid edit` lists the session as it would be published, one numbered line per record after redaction, with subagent records numbered under the line that spawned them (`4.1`). It then edits what goes out:
 
 | Command | Effect |
 |---|---|
-| `braid review 4 7-9 12.3` | withholds records; a tool call takes its results along, and a subagent all its records |
-| `braid review --edit 5` | publishes new text in place of a record's own: in `$VISUAL` or `$EDITOR` on a terminal, from stdin otherwise; emptying it withholds the record |
-| `braid review --text "Acme"` | hides a word or phrase in every record of the session, as `[REDACTED:term]` |
-| `braid review --last 1h`, `--all` | withholds recent records, or keeps the whole session private |
+| `braid edit 4 7-9 12.3` | withholds records; a tool call takes its results along, and a subagent all its records |
+| `braid edit --rewrite 5` | publishes new text in place of a record's own: in `$VISUAL` or `$EDITOR` on a terminal, from stdin otherwise; emptying it withholds the record |
+| `braid edit --hide "Acme"` | hides a word or phrase in every record of the session, as `[REDACTED:term]` |
+| `braid edit --last 1h`, `--all` | withholds recent records, or keeps the whole session private |
 | `--undo` with any of these | puts it back |
 
-The edits live in the session's state and apply to every later publish; the store keeps the records as written. Withheld records' children attach to their nearest published ancestor, so the published tree stays connected, and withheld records do not count in `↑`. Saying "don't publish the last hour" to the agent runs the same commands through `/braid:review`.
+The edits live in the session's state and apply to every later publish; the store keeps the records as written. Withheld records' children attach to their nearest published ancestor, so the published tree stays connected, and withheld records do not count in `↑`. Saying "don't publish the last hour" to the agent runs the same commands through `/braid:edit`.
 
-**Replacing what was published.** When `braid review` changes records that were already published, the next push replaces the published copy with one that has no history, so the old content is no longer reachable from the ref. Copies fetched before keep it, and the host may serve the old objects by their hash until it collects them; GitHub also shares objects across a fork network. Rotate any secret that was published, as with any secret pushed to git.
+**Replacing what was published.** When `braid edit` changes records that were already published, the next push replaces the published copy with one that has no history, so the old content is no longer reachable from the ref. Copies fetched before keep it, and the host may serve the old objects by their hash until it collects them; GitHub also shares objects across a fork network. Rotate any secret that was published, as with any secret pushed to git.
 
 **Model providers.** `/braid:merge` uses the session's own model. Digests, and merges run from a terminal, use the provider in your configuration, and only ever see redacted text.
 
@@ -208,7 +214,7 @@ The line is cached until a ref of the conversation moves, and it redraws every 3
 
 ### Commit
 
-Each turn is saved when it ends, as a working copy is, and stays on your machine. A commit marks the point up to which the conversation may be published: you review the session with `/braid:review`, remove or rewrite what should stay private, and commit with `/braid:commit <message>`. With `autopush`, the next `git push` of the session's code commits publishes it. With `autocommit`, every code commit the agent makes commits the conversation as well, so a team that does not review sessions needs no commands of its own. A committed session leaves `local` in the status line, and turns after the last commit show as `*`.
+Each turn is saved when it ends, as a working copy is, and stays on your machine. A commit marks the point up to which the conversation may be published: you go through the session with `/braid:edit`, remove or rewrite what should stay private, and commit with `/braid:commit <message>`. With `autopush`, the next `git push` of the session's code commits publishes it. With `autocommit`, every code commit the agent makes commits the conversation as well, so a team that does not review sessions needs no commands of its own. A committed session leaves `local` in the status line, and turns after the last commit show as `*`.
 
 ### Fork
 
@@ -216,7 +222,7 @@ A session cannot open a terminal window, so `/braid:fork` prints the command tha
 
 - **This conversation.** `braid fork` prints `claude --resume <id> --fork-session`; Claude Code's `/branch` does the same in the current window. Both copy the transcript under a new session id, keeping each record's id. When a new session's first message belongs to a saved session, braid files it as a branch of that conversation and saves only the records it adds. The branch shows as `↓` in the original session until it is merged back or skipped. Forking another of your own sessions on this machine works the same way.
 - **Another session, such as a teammate's, or yours from another machine.** `braid fork <id|name|pr:N> [--cwd <path>]` writes the session's active context as a Claude Code transcript under a new session id, where `claude --resume <id>` finds it. It rewrites the source checkout's path to this one, and any prefixes under `[paths]` in `~/.config/braid/config.toml`, outside reasoning blocks, whose signatures cover them. The writer derives each native uuid from the record's id, so the new session's first save recognizes the copied records, keeps only what is added after them, and continues from the source's head. From a published copy there is no reasoning to give back; from your own store there is. For `pr:N` with several sessions, braid forks the newest and names the others.
-- **Into this session.** `braid fork <target> --here`, run before the session's first turn is saved, reads the other session as a quoted briefing and makes this session continue from its head, as `/braid:review-pr` does. When the other session is someone else's, this one is named `review/<you>`. A session that already has saved turns cannot fork this way; `/braid:merge` brings the other session in instead.
+- **Into this session.** `braid fork <target> --here`, run before the session's first turn is saved, reads the other session as a quoted briefing and makes this session continue from its head, as `/braid:review` does. When the other session is someone else's, this one is named `review/<you>`. A session that already has saved turns cannot fork this way; `/braid:merge` brings the other session in instead.
 
 `braid show <id>` reads a session as a briefing without forking. At session start, a hook gives the agent an index of the sessions behind the current branch: id, author, harness and size. The index holds no session text, so a hostile session cannot inject instructions through it.
 
@@ -232,7 +238,7 @@ braid uses the `review` strategy for review sessions and `default` otherwise, an
 
 When a branch with sessions has a pull request, braid posts a digest as a comment and updates it on later pushes: the request, quoted; decisions and their reasons; rejected approaches; assumptions nobody checked; commands and their results; files touched. A GitHub Action posts it using a provider key from the repository's secrets. Without the Action, the author's pre-push hook posts it in the background.
 
-Asking for a review ("review this PR", `/braid:review-pr 128` in Claude Code, `$braid:review-pr 128` in Codex) runs consistency checks before the reviewer's own questions:
+Asking for a review ("review this PR", `/braid:review 128` in Claude Code, `$braid:review 128` in Codex) runs consistency checks before the reviewer's own questions:
 
 - claims that the session's records do not back
 - files in the diff that no session touched
@@ -303,20 +309,21 @@ The skills and the hooks call the CLI. You rarely need it yourself.
 
 | Command | |
 |---|---|
-| `braid setup` | once per machine: a `braid` command in `~/.local/bin` and braid's part of the status line |
-| `braid init [--no-git-hooks] [--[no-]autocommit] [--[no-]autopush]` | once per repository: `.braid/config.toml`, `.braidignore`, the store, and git hooks unless turned off; later, change the settings |
+| `braid init [--[no-]autopilot] [--[no-]autofork] [--repo <path>\|auto] [--no-git-hooks] [--[no-]autocommit] [--[no-]autopush] [--undo]` | once per machine: a `braid` command in `~/.local/bin`, braid's part of the status line, and `~/.braid`; inside a repository, `.braid/config.toml`, `.braidignore`, the store, and git hooks unless turned off; later, change the settings. It saves the conversation it runs in. |
 | `braid status` | where this session stands, and the sessions of its conversation |
-| `braid review [<n>…] [--edit <n>] [--text <s>] [--last 30m] [--all] [--undo]` | the session as it would be published, and what to withhold, rewrite or hide |
+| `braid edit [<n>…] [--rewrite <n>] [--hide <s>] [--last 30m] [--all] [--undo]` | the session as it would be published, and what to withhold, rewrite or hide |
 | `braid commit -m "<message>"` | commit the conversation up to here |
 | `braid push [--dry-run]` | publish the committed part of this session now |
-| `braid fork [<id\|name\|pr:N>] [--cwd <path>] [--here]` | the command to continue a session in a new window; with no target, this one |
+| `braid fork [<id\|name\|pr:N\|@N>] [--cwd <path>] [--here]` | the command to continue a session, or a fork point (`@2`, `<id>@2`), in a new window; with no target, this one |
+| `braid review <N>` | continue from the sessions behind pull request N in this session, to review it |
+| `braid verify [<id>\|--all]` | check that a session was saved as it happened and loads back the same |
 | `braid merge [<id\|name\|pr:N>]` | show what another session has that this one lacks; `--record` and `--skip` write the merge |
 | `braid show <id\|name\|pr:N>` | read a session as a briefing |
 | `braid import openclaw` | import OpenClaw sessions |
 | `braid sessions`, `braid log <id>` | list sessions, and the turns and commits of one |
 | `braid fetch [--all]` | fetch published sessions now |
 
-*Planned:* merging from a terminal with a configured provider, `braid save <dir>`, `braid export --atif`, `braid check` for CI, `braid prune`, and `braid mcp`.
+*Planned:* merging from a terminal with a configured provider, `braid save <dir>`, `braid export --atif`, `braid check` for CI (built on `braid verify`), `braid prune`, and `braid mcp`.
 
 A session is addressed by its id or a unique prefix, by its name, or as `pr:128` for the sessions behind pull request 128. Inside an agent, commands act on the current session, which braid takes from `BRAID_SESSION`.
 
@@ -335,15 +342,15 @@ braid adds session ids as the handle, a status line with ahead and behind counts
 
 ## Distribution
 
-braid ships as a Claude Code plugin served from this repository. The plugin carries the hooks, the skills and the CLI, which is one bundled file (`dist/braid.mjs`, built from `src/` with esbuild) that needs only Node 22. Installing the plugin is the whole install, and `braid setup` adds the `braid` command and the status line. braid needs no server and no GitHub App: sessions travel in git refs, which GitHub stores like any other ref. Codex reads the same skills and Claude-style plugin manifests, so it is the next harness, and an npm package for CI follows.
+braid ships as a Claude Code plugin served from this repository. The plugin carries the hooks, the skills and the CLI, which is one bundled file (`dist/braid.mjs`, built from `src/` with esbuild) that needs only Node 22. Installing the plugin is the whole install, and `/braid:init` adds the `braid` command and the status line. braid needs no server and no GitHub App: sessions travel in git refs, which GitHub stores like any other ref. Codex reads the same skills and Claude-style plugin manifests, so it is the next harness, and an npm package for CI follows.
 
 ## Status of v0.1
 
 Built, for Claude Code:
-- **Saving:** each turn is saved into the store, read incrementally in bounded windows, and subagents are saved with their session.
+- **Saving:** each turn is saved into the store, read incrementally in bounded windows, and subagents are saved with their session. On autopilot, the default, every session on the machine is saved and nothing leaves it. `braid verify` checks that a session was saved as it happened and loads back the same, and runs when each session ends. Autofork marks fork points before big turns.
 - **Git:** `/braid:commit` commits the conversation, and publishing goes up to the last commit. The agent's code commits get trailers and labels in the conversation, or with `link = "store"` labels only; `autocommit` makes them commit the conversation too. `post-rewrite` carries those links across amends and rebases. The git hooks are on by default; `git-hooks = false` turns them off.
 - **Repositories:** a session is saved and published in every repository it commits in.
-- **Publishing:** `git push` publishes with `autopush`, with built-in and team redaction rules, `.braidignore`, and `--dry-run`. `braid review` withholds, rewrites and hides parts of a session, and the next push replaces what was already published. The status line and the after-turn line show where each session stands, and `braid fetch` gets teammates' sessions.
+- **Publishing:** `git push` publishes with `autopush`, with built-in and team redaction rules, `.braidignore`, and `--dry-run`. `braid edit` withholds, rewrites and hides parts of a session, and the next push replaces what was already published. The status line and the after-turn line show where each session stands, and `braid fetch` gets teammates' sessions.
 - **Forks and merges:** `/braid:fork` prints the command that continues this session, or another, in a new window, Claude Code's `/branch` is recorded as a branch, and `/braid:merge` merges or skips waiting or named sessions.
 - **Machines:** `braid fork` continues a session here or on another machine, and two machines can publish the same session.
 - **Imports and reviews:** `braid import openclaw` imports OpenClaw sessions, and committed review sessions publish when they end. All of it is reachable through the skills.
@@ -354,7 +361,7 @@ Next:
 
 1. Codex, through its hooks, skills and ATXF's converter.
 2. Commits you make yourself, and `braid prune`.
-3. Review: digests on pull requests, `braid check` for CI, and contributors on forks.
+3. Review: digests on pull requests, `braid check` for CI (built on `braid verify`), and contributors on forks.
 4. gitleaks, and the MCP server.
 
 Open questions:

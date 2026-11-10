@@ -38,16 +38,20 @@ export interface SessionState {
   first?: string;
   /** A session this one forks from, set by `braid fork` before the first save. */
   forkFrom?: { session: string; conv: string; head: string; actor?: string; replayed?: boolean };
+  /** The last braid verify, run when the session ended. */
+  verified?: { ok: boolean; at: string; problems?: string[] };
+  /** For a session kept in a separate repository: the code repository it ran in, whose .braidignore applies to it. */
+  code?: string;
   pendingMerge?: PendingMerge;
   /** Native records whose parent is `from` continue from the merge record `to`. */
   reparent?: { from: string; to: string };
   /** Code commits made since the last save; the next save commits the conversation with each. */
   commits?: string[];
-  /** Records withheld with braid review; each takes its tool results and subagents along. */
+  /** Records withheld with braid edit; each takes its tool results and subagents along. */
   withheld?: string[];
-  /** Text hidden with braid review --text, in every record of this session. */
+  /** Text hidden with braid edit --hide, in every record of this session. */
   terms?: string[];
-  /** Records rewritten with braid review --edit: the text published in their place, by record id. */
+  /** Records rewritten with braid edit --rewrite: the text published in their place, by record id. */
   edits?: Record<string, string>;
   /** The published copy this machine pushed last, to tell its own edits from another machine's. */
   published?: string;

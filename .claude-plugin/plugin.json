@@ -1,7 +1,7 @@
 {
   "name": "braid",
   "version": "0.1.0",
-  "description": "Version control for agent conversations: saves each session into git, publishes it with git push, and merges teammates' sessions into yours.",
+  "description": "braid: efficient session manager. Saves every coding-agent session in git as it happens, so you can go back, fork, edit, merge and share it.",
   "author": { "name": "Giuseppe Barbalinardo" },
   "repository": "https://github.com/gbarbalinardo/braid",
   "license": "MIT",

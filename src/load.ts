@@ -6,7 +6,8 @@ import { readAgents, readRecords } from "./chunks.ts";
 import { forEachRef, type GitOptions } from "./git.ts";
 import { ancestry, braidOf, describe, isTurn, type Rec } from "./records.ts";
 import { sessionsFor } from "./links.ts";
-import { remoteRefs, SESSION_REFS, type Repo } from "./repo.ts";
+import { AUTOPILOT } from "./fetch.ts";
+import { readConfig, remoteRefs, SESSION_REFS, type Repo } from "./repo.ts";
 import { loadState, newState, saveState } from "./state.ts";
 import { sessionName } from "./status.ts";
 
@@ -37,7 +38,7 @@ export function allSessions(repo: Repo, remote: string): Found[] {
  * after a squash merge rewrote them on the base branch.
  */
 function prSessions(repo: Repo, n: string, remote: string): Set<string> {
-  const r = spawnSync("gh", ["pr", "view", n, "--json", "commits"], { cwd: repo.top, encoding: "utf8" });
+  const r = spawnSync("gh", ["pr", "view", n, "--json", "commits"], { cwd: repo.code ?? repo.top, encoding: "utf8" });
   let commits: { oid?: string; messageBody?: string }[] = [];
   try {
     commits = (JSON.parse(r.stdout || "{}") as { commits?: typeof commits }).commits ?? [];
@@ -53,6 +54,7 @@ function prSessions(repo: Repo, n: string, remote: string): Set<string> {
 export function resolve(repo: Repo, target: string, remote: string): Found[] {
   const sessions = allSessions(repo, remote);
   const pr = /^(?:pr:|#)(\d+)$/.exec(target);
+  if (pr && readConfig(repo).autopilot) throw new Error(AUTOPILOT);
   if (pr) {
     const ids = prSessions(repo, pr[1]!, remote);
     const convs = new Set(sessions.filter((s) => ids.has(s.session)).map((s) => s.conv));

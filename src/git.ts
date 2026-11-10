@@ -33,7 +33,7 @@ const IDENTITY = {
   GIT_COMMITTER_EMAIL: "braid@localhost",
 };
 
-function run(args: string[], opts: GitOptions) {
+export function run(args: string[], opts: GitOptions) {
   const full = opts.gitDir ? ["--git-dir", opts.gitDir, ...args] : args;
   return spawnSync("git", full, {
     cwd: opts.cwd,

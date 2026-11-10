@@ -19,6 +19,8 @@ export interface Waiting {
 
 export interface Status {
   session: string;
+  /** The last braid verify, when the session ended, found problems. */
+  broken?: boolean;
   enabled: boolean;
   saved: boolean;
   conv?: string;
@@ -78,7 +80,7 @@ export function computeStatus(repo: Repo, session: string, remote = "origin"): S
   const state = loadState(repo, session);
   const mine = readRecords(storeRef(conv, session), { gitDir: repo.store });
   if (mine.length === 0) return status;
-  Object.assign(status, { saved: true, conv, private: state?.private ?? false });
+  Object.assign(status, { saved: true, conv, private: state?.private ?? false, broken: state?.verified?.ok === false });
 
   const tracking = remoteRefs(remote);
   const published = new Set(readRecords(`${tracking}/${conv}/${session}`, { cwd: repo.top }).map((r) => r.id));
@@ -117,6 +119,7 @@ export function render(s: Status): string {
   if (!s.enabled) return "";
   if (!s.saved) return "not saved";
   const parts: string[] = [];
+  if (s.broken) parts.push("⚠ braid verify");
   if (s.private) parts.push("private");
   else if (s.local) parts.push("local");
   else {

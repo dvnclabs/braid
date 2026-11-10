@@ -7,13 +7,14 @@ import { hooksInstalled, installHooks } from "./githooks.ts";
 import { allSessions } from "./load.ts";
 import { readRecords } from "./chunks.ts";
 import { braidOf, isTurn } from "./records.ts";
-import { findRepo, isEnabled, readConfig, type Repo } from "./repo.ts";
+import { findRepo, isEnabled, locate, readConfig, type Repo } from "./repo.ts";
 import { publish } from "./publish.ts";
 import { readEntry, recordSession } from "./registry.ts";
 import { register, save } from "./save.ts";
 import { cliPath, writePointer } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
 import { computeStatus, sessionName } from "./status.ts";
+import { verify } from "./verify.ts";
 
 export interface HookInput {
   session_id?: string;
@@ -66,24 +67,25 @@ export function sessionStart(input: HookInput): string {
     const bin = join(dirname(dirname(cliPath())), "bin");
     appendFileSync(envFile, `export BRAID_SESSION=${session}\nexport PATH="${bin}:$PATH"\n`);
   }
-  const repo = findRepo(input.cwd ?? process.cwd());
-  if (!repo || !isEnabled(repo)) return "";
+  const repo = locate(input.cwd ?? process.cwd());
+  if (!repo) return "";
   const config = readConfig(repo);
   if (config.gitHooks && !hooksInstalled(repo)) installHooks(repo);
   register(repo, session, input.transcript_path);
   recordSession(session, { repo: repo.top });
   const remote = config.remote;
   fetchInBackground(repo, remote, 0);
-  const context = index(repo, session, remote);
+  // A separate repository has no code, so no branch to list sessions behind.
+  const context = repo.separate ? "" : index(repo, session, remote);
   return context ? JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context } }) : "";
 }
 
 export function stop(input: HookInput): string {
   const session = input.session_id;
   if (!session) return "";
-  const repo = findRepo(input.cwd ?? process.cwd());
+  const repo = locate(input.cwd ?? process.cwd());
   for (const other of otherRepos(session, repo)) save(other, session, input.transcript_path);
-  if (!repo || !isEnabled(repo)) return "";
+  if (!repo) return "";
   save(repo, session, input.transcript_path);
   const remote = readConfig(repo).remote;
   fetchInBackground(repo, remote);
@@ -102,10 +104,20 @@ export function stop(input: HookInput): string {
 export function sessionEnd(input: HookInput): string {
   const session = input.session_id;
   if (!session) return "";
-  const current = findRepo(input.cwd ?? process.cwd());
-  for (const repo of [...(current && isEnabled(current) ? [current] : []), ...otherRepos(session, current)]) {
+  const current = locate(input.cwd ?? process.cwd());
+  const failed: string[] = [];
+  for (const repo of [...(current ? [current] : []), ...otherRepos(session, current)]) {
     const { state } = save(repo, session, input.transcript_path);
     if (state.chunks > 0 && state.review && readConfig(repo).autopush) publish(repo, session);
+    // Each session is checked when it ends: saved as it happened, and loads back the same.
+    if (state.chunks > 0) {
+      const v = verify(repo, session, readConfig(repo).remote);
+      const s = loadState(repo, session);
+      if (s) saveState(repo, { ...s, verified: { ok: v.problems.length === 0, at: new Date().toISOString(), ...(v.problems.length ? { problems: v.problems } : {}) } });
+      if (v.problems.length) failed.push(`braid verify ${session} in ${repo.top}: ${v.problems.join("; ")}`);
+    }
   }
+  // Logged by the hook runner; the status line shows ⚠ braid verify when the session is resumed.
+  if (failed.length) throw new Error(failed.join("\n"));
   return "";
 }

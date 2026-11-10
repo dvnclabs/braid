@@ -1,11 +1,13 @@
-// Setup: `braid init` once per repository, `braid setup` once per machine.
+// braid init: once per machine (the braid command, the status line, and the
+// separate repository for conversations outside repositories with braid), and
+// once per repository that keeps its conversations next to the code.
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installHooks, uninstallHooks } from "./githooks.ts";
-import { configDir, ensureStore, readConfig, userConfig, type Repo } from "./repo.ts";
+import { configDir, defaultSeparate, ensureStore, expandPath, findRepo, readConfig, separateRepo, userConfig, type Repo } from "./repo.ts";
 
 export { configDir };
 
@@ -27,15 +29,26 @@ function visibility(repo: Repo): string | undefined {
 
 const TEMPLATE = (s: Settings) =>
   [
-    "# braid: https://github.com/gbarbalinardo/braid",
+    "# braid: efficient session manager. https://github.com/gbarbalinardo/braid",
+    "# autopilot: braid works on this machine only. It keeps conversations in its own git",
+    "#   storage inside .git, and never pushes, fetches or asks GitHub anything. false: braid",
+    "#   can publish conversations to the remote, for teammates and pull request reviews.",
+    "# autofork: before a turn that changes a lot, braid marks a point to fork from",
+    "#   (braid fork @N). false: no points.",
+    '# repo: where conversations are kept. "auto": in this repository, next to the code. A path,',
+    '#   such as "~/.braid": in that separate git repository; autocommit and autopush are then',
+    "#   off, and /braid:push pushes to its origin.",
     "# git-hooks: commits name the agent session that made them (a Braid-Session trailer), so",
     "#   autocommit and autopush can follow them. false: braid leaves git alone.",
     "# autocommit: each commit the agent makes commits its conversation too. false: you commit",
-    "#   it with /braid:commit, after /braid:review.",
+    "#   it with /braid:commit, after /braid:edit.",
     "# autopush: git push publishes the committed part of the sessions behind the pushed",
     "#   commits. false: publish with /braid:push.",
-    "# Your own ~/.config/braid/config.toml can set autocommit and autopush over these.",
+    "# Your own ~/.config/braid/config.toml can set any of these over the repository's.",
     '# link = "store" names sessions inside the sessions only, without a Braid-Session trailer.',
+    `autopilot = ${s.autopilot}`,
+    `autofork = ${s.autofork}`,
+    `repo = "${s.repo}"`,
     `git-hooks = ${s["git-hooks"]}`,
     `autocommit = ${s.autocommit}`,
     `autopush = ${s.autopush}`,
@@ -43,7 +56,10 @@ const TEMPLATE = (s: Settings) =>
     "",
   ].join("\n");
 
-type Settings = { "git-hooks": boolean; autocommit: boolean; autopush: boolean };
+type Settings = { autopilot: boolean; autofork: boolean; repo: string; "git-hooks": boolean; autocommit: boolean; autopush: boolean };
+
+/** A setting's value as written in a config file: booleans bare, strings quoted. */
+const tomlValue = (value: string | boolean) => (typeof value === "boolean" ? String(value) : JSON.stringify(value));
 
 const IGNORE_TEMPLATE = [
   "# braid: tool calls on these paths, and their results, are never published.",
@@ -56,26 +72,77 @@ const IGNORE_TEMPLATE = [
   "",
 ].join("\n");
 
+/**
+ * `braid init`: the machine, then the repository `cwd` is in, if any. Outside
+ * a repository, `repo` sets where all conversations are kept, in the user's config.
+ */
+export function init(cwd: string, opts: Partial<Settings> = {}): string[] {
+  const notes = setup();
+  const home = defaultSeparate();
+  if (!separateRepo(home, undefined, false)) {
+    separateRepo(home, undefined, true);
+    notes.push(`created ${home}, a git repository for conversations outside repositories with braid; git -C ${home} remote add origin <url> lets /braid:push share them`);
+  }
+  const code = findRepo(cwd);
+  if (code && code.top !== separateRepo(home, undefined, false)?.top) return [...notes, ...initRepo(code, opts)];
+  // Outside a repository, settings go to the user's own config, for every repository.
+  for (const [key, value] of Object.entries(opts)) if (value !== undefined) notes.push(...setUserKey(key, value));
+  return notes;
+}
+
+/** Writes `key = value` into ~/.config/braid/config.toml. */
+function setUserKey(key: string, value: string | boolean): string[] {
+  const file = join(configDir(), "config.toml");
+  let text = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const line = `${key} = ${tomlValue(value)}`;
+  const re = new RegExp(`^${key}\\s*=.*$`, "m");
+  // Top-level keys go before the first [section].
+  if (re.test(text)) text = text.replace(re, line);
+  else {
+    const at = text.search(/^\s*\[/m);
+    text = at < 0 ? `${text.trimEnd()}${text.trim() ? "\n" : ""}${line}\n` : `${text.slice(0, at)}${line}\n${text.slice(at)}`;
+  }
+  mkdirSync(configDir(), { recursive: true });
+  writeFileSync(file, text);
+  const notes = [`set ${line} in ${file.replace(homedir(), "~")}`];
+  if (key === "repo" && typeof value === "string" && value !== "auto") notes.push(`conversations are kept in ${separateRepo(expandPath(value, homedir()), undefined, true)!.top}; autocommit and autopush are off there`);
+  return notes;
+}
+
 /** Once per repository: `.braid/config.toml`, `.braidignore`, the store, and the git hooks when git-hooks is on. */
-export function init(repo: Repo, opts: Partial<Settings> = {}): string[] {
+function initRepo(repo: Repo, opts: Partial<Settings>): string[] {
   const notes: string[] = [];
   const file = join(repo.top, ".braid", "config.toml");
-  if (!existsSync(file)) {
-    // Public repositories do not publish on push unless asked to.
+  const autopilot = opts.autopilot ?? (existsSync(file) ? readConfig(repo).autopilot : (userConfig().autopilot ?? true));
+  // Leaving autopilot, git push publishes in private repositories and not in public ones, unless asked; on autopilot, GitHub is not asked.
+  const pushDefault = (): [boolean, string] => {
+    if (opts.autopush !== undefined) return [opts.autopush, "as asked"];
     const own = userConfig().autopush;
-    const chosen = opts.autopush ?? own;
-    const vis = chosen === undefined ? visibility(repo) : undefined;
-    const autopush = chosen ?? (vis === "PRIVATE" || vis === "INTERNAL");
+    if (own !== undefined) return [own, "your default in ~/.config/braid/config.toml"];
+    if (autopilot) return [false, "autopilot"];
+    const vis = visibility(repo);
+    return [vis === "PRIVATE" || vis === "INTERNAL", vis ? `repository is ${vis.toLowerCase()}` : "visibility unknown"];
+  };
+  if (!existsSync(file)) {
+    const [autopush, why] = pushDefault();
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, TEMPLATE({ "git-hooks": opts["git-hooks"] ?? true, autocommit: opts.autocommit ?? false, autopush }));
-    const why = opts.autopush !== undefined ? "as asked" : own !== undefined ? "your default in ~/.config/braid/config.toml" : vis ? `repository is ${vis.toLowerCase()}` : "visibility unknown";
-    notes.push(`wrote .braid/config.toml (autocommit = ${opts.autocommit ?? false}, autopush = ${autopush}: ${why})`);
+    writeFileSync(
+      file,
+      TEMPLATE({ autopilot, autofork: opts.autofork ?? true, repo: opts.repo ?? "auto", "git-hooks": opts["git-hooks"] ?? true, autocommit: opts.autocommit ?? false, autopush }),
+    );
+    notes.push(
+      autopilot
+        ? "wrote .braid/config.toml (autopilot: conversations stay on this machine; braid init --no-autopilot lets git push publish them)"
+        : `wrote .braid/config.toml (autocommit = ${opts.autocommit ?? false}, autopush = ${autopush}: ${why})`,
+    );
     notes.push("commit it so teammates get braid too: git add .braid .braidignore && git commit -m 'Set up braid'");
   } else {
     let text = readFileSync(file, "utf8");
-    const changes = Object.entries(opts).filter(([, value]) => value !== undefined);
+    const leaving = opts.autopilot === false && readConfig(repo).autopilot && opts.autopush === undefined;
+    const given = { ...opts, ...(leaving ? { autopush: pushDefault()[0] } : {}) };
+    const changes = Object.entries(given).filter(([, value]) => value !== undefined);
     for (const [key, value] of changes) {
-      const line = `${key} = ${value}`;
+      const line = `${key} = ${tomlValue(value!)}`;
       const re = new RegExp(`^${key}\\s*=.*$`, "m");
       text = re.test(text) ? text.replace(re, line) : `${text.trimEnd()}\n${line}\n`;
       notes.push(`set ${line} in .braid/config.toml`);
@@ -87,9 +154,14 @@ export function init(repo: Repo, opts: Partial<Settings> = {}): string[] {
     writeFileSync(ignore, IGNORE_TEMPLATE);
     notes.push("wrote .braidignore: tool calls on .env files and keys are never published; add your own paths");
   }
-  ensureStore(repo);
-  notes.push(...(readConfig(repo).gitHooks ? installHooks(repo) : uninstallHooks(repo)));
-  writePointer();
+  const config = readConfig(repo);
+  // With a separate repository, the code repository gets no store and no hooks.
+  if (!config.repo) ensureStore(repo);
+  notes.push(...(config.gitHooks ? installHooks(repo) : uninstallHooks(repo)));
+  if (config.repo) {
+    separateRepo(config.repo, repo.top, true);
+    notes.push(`conversations here are kept in ${config.repo}, apart from the code; autocommit and autopush are off, and /braid:push pushes to its origin`);
+  }
   return notes;
 }
 
@@ -100,11 +172,11 @@ function settingsPath(): string {
 const SHIM = `#!/bin/sh
 # braid: runs the braid CLI wherever the Claude Code plugin installed it.
 cli="\${XDG_CONFIG_HOME:-$HOME/.config}/braid/cli"
-[ -f "$cli" ] || { echo "braid: start a Claude Code session with the braid plugin once, or run braid setup" >&2; exit 1; }
+[ -f "$cli" ] || { echo "braid: start a Claude Code session with the braid plugin once, then run /braid:init" >&2; exit 1; }
 exec node "$(cat "$cli")" "$@"
 `;
 
-/** Per machine: a `braid` command on PATH, and braid's part in Claude Code's status line. */
+/** Per machine: a `braid` command on PATH, and braid's part in Claude Code's status line. `undo` restores the previous status line. */
 export function setup(opts: { undo?: boolean } = {}): string[] {
   const notes: string[] = [];
   const settingsFile = settingsPath();

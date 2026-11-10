@@ -12,47 +12,65 @@ import { allSessions, briefing, markFork, resolve } from "./load.ts";
 import { context, pick, record } from "./merge.ts";
 import { launchDir, replay, shellWord } from "./replay.ts";
 import { readEntry } from "./registry.ts";
-import { editRecord, hide, lineText, pickLines, renderReview, reviewLines, setPrivate, withhold, withholdRecent } from "./review.ts";
+import { editRecord, hide, lineText, pickLines, renderEdit, editLines, setPrivate, withhold, withholdRecent } from "./edit.ts";
 import { importOpenclaw, openclawDatabases } from "./openclaw.ts";
+import { points } from "./points.ts";
 import { publish, view, type PublishResult } from "./publish.ts";
 import { braidOf, describe, isTurn, type Rec } from "./records.ts";
-import { findRepo, isEnabled, readConfig, type Repo } from "./repo.ts";
+import { findRepo, isEnabled, locate, readConfig, type Repo } from "./repo.ts";
 import { save } from "./save.ts";
 import { configDir, init, setup } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
 import { cleanName, computeStatus, render, sessionName, sessionTitle } from "./status.ts";
 import { statusline } from "./statusline.ts";
+import { verify } from "./verify.ts";
 import { VERSION } from "./version.ts";
 
-const HELP = `braid ${VERSION}: version control for agent conversations
+const HELP = `braid ${VERSION}: efficient session manager
 
-Setup
-  braid setup                 once per machine: the braid command and the status line
-  braid init                  once per repository: .braid/config.toml, .braidignore and git hooks
-    [--no-git-hooks] [--autocommit|--no-autocommit] [--autopush|--no-autopush]   change the settings
+Save, edit, commit, push, fork and merge coding-agent sessions with git. Each command
+works on the session it runs in ($BRAID_SESSION), or the one named with --session <id>.
 
-Everyday (inside an agent session; the session comes from $BRAID_SESSION)
+Set up
+  braid init                  this machine: the braid command, the status line, and ~/.braid for
+                              conversations outside repositories with braid. Inside a git
+                              repository, braid there too: .braid/config.toml, .braidignore, git hooks
+    --autopilot|--no-autopilot  braid works on this machine only: no push, fetch or GitHub (on by default)
+    --autofork|--no-autofork    mark a fork point before each big turn (on by default)
+    --repo <path>|auto        keep conversations in a separate git repository (autocommit and
+                              autopush off), or in the repository itself (auto, the default)
+    --autocommit|--no-autocommit  a code commit commits the conversation too (off by default)
+    --autopush|--no-autopush      git push publishes the committed conversation (on by default)
+    --no-git-hooks            leave git alone
+    --undo                    put back the status line braid replaced
+
+Everyday
   braid status                where this session stands, and the sessions around it
-  braid review                this session as git push would publish it, one numbered line per record
-  braid review 4 7-9 12.3     withhold records (a tool call takes its result, a subagent all its records)
-  braid review --edit 5        rewrite a record's text in your editor (or from stdin); empty it to withhold it
-  braid review --text "<s>"   hide text everywhere in this session
-  braid review --undo ...     put back records, text (--undo --text), a record's own text (--undo --edit 5) or the session (--undo --all)
-  braid review --last 30m | --all   withhold recent records, or the whole session
-  braid commit -m "<message>" commit the conversation: git push publishes up to the last commit
-  braid push [--dry-run]      publish the committed part now (git push does this with autopush); --dry-run shows what would go
-  braid fork [<id|name|pr:N>] the command to continue a session in a new window; with no target, this one
-  braid fork <target> --here  continue from another session in this one, before its first turn is saved
-  braid merge [<id|name|pr:N>]   show what another session has that this one lacks, for the agent to summarize
+  braid edit                  this session as it would be published, one numbered line per record
+  braid edit 4 7-9 12.3       withhold records (a tool call takes its result, a subagent all its records)
+  braid edit --rewrite 5      rewrite a record's text in your editor (or from stdin); empty it to withhold it
+  braid edit --hide "<s>"     hide text everywhere in this session
+  braid edit --last 30m | --all   withhold recent records, or the whole session
+  braid edit --undo ...       put back records, text (--undo --hide), a record's own text (--undo --rewrite 5) or the session (--undo --all)
+  braid commit -m "<message>" commit the conversation: publishing goes up to the last commit
+  braid push [--dry-run]      publish the committed part now (git push does this with autopush)
+  braid fork [<session>|@N]   the command to continue a session, or fork point N, in a new window; with none, this one
+  braid fork <session> --here continue from another session in this one, before its first turn is saved
+  braid merge [<session>]     show what another session has that this one lacks, for the agent to merge
   braid merge --record <id> --instruction "<text>"   record a merge; summary on stdin
   braid merge --skip <id>     mark a session seen without adopting anything
+  braid review <N>            continue from the sessions behind pull request N in this session, to review it
+
+  <session> is a session id or its first characters, a name such as review/bob, or pr:N for the
+  sessions behind pull request N. braid sessions lists them.
 
 Other
-  braid show <id|name|pr:N>   read a session as a briefing, without linking to it
-  braid sessions              every session braid can see in this repository
-  braid log [<id>]            the turns and commits of a session
+  braid show <session>        read a session as a briefing, without linking to it
+  braid sessions              every session braid can see here
+  braid log [<session>]       the turns and commits of a session
+  braid verify [<session>|--all]   check that a session was saved as it happened and loads back the same
   braid fetch [--all]         fetch published sessions
-  braid import openclaw [--session <key|id>] [--db <path>]   import OpenClaw sessions into this repository
+  braid import openclaw [--session <key|id>] [--db <path>]   import OpenClaw sessions
   braid save                  save the current session now (the Stop hook does this)
 `;
 
@@ -73,9 +91,10 @@ function logError(err: unknown): void {
   }
 }
 
+/** Where this directory's conversations are kept; a git repository without braid, for reading. */
 function needRepo(): Repo {
-  const repo = findRepo(process.cwd());
-  if (!repo) throw new Error("not inside a git repository");
+  const repo = locate(process.cwd()) ?? findRepo(process.cwd());
+  if (!repo) throw new Error("braid keeps no conversations here: run braid init");
   return repo;
 }
 
@@ -107,8 +126,8 @@ function agentLines(records: Rec[], agents: Map<string, Rec[]>): string[] {
   });
 }
 
-/** The session to review: named, the agent's own, or else the newest saved here (for reading only). */
-function reviewSession(repo: Repo, remote: string, flag: string | undefined): { id: string; explicit: boolean } {
+/** The session to edit: named, the agent's own, or else the newest saved here (for reading only). */
+function editSession(repo: Repo, remote: string, flag: string | undefined): { id: string; explicit: boolean } {
   const named = flag ?? process.env.BRAID_SESSION;
   if (named) {
     const own = resolve(repo, named, remote).filter((f) => f.opts.gitDir);
@@ -180,13 +199,18 @@ function main(argv: string[]): number {
       force: { type: "boolean" },
       undo: { type: "boolean" },
       "dry-run": { type: "boolean" },
-      text: { type: "string" },
-      edit: { type: "boolean" },
+      hide: { type: "string" },
+      rewrite: { type: "boolean" },
+      repo: { type: "string" },
       here: { type: "boolean" },
       autocommit: { type: "boolean" },
       "no-autocommit": { type: "boolean" },
       autopush: { type: "boolean" },
       "no-autopush": { type: "boolean" },
+      autopilot: { type: "boolean" },
+      "no-autopilot": { type: "boolean" },
+      autofork: { type: "boolean" },
+      "no-autofork": { type: "boolean" },
       cwd: { type: "string" },
       db: { type: "string" },
     },
@@ -235,14 +259,31 @@ function main(argv: string[]): number {
       }
       return 0;
     case "init": {
-      const repo = needRepo();
+      if (opts.undo === true) {
+        for (const note of setup({ undo: true })) out(`braid: ${note}`);
+        return 0;
+      }
       const toggle = (key: string) => (opts[`no-${key}`] === true ? false : opts[key] === true ? true : undefined);
-      for (const note of init(repo, { "git-hooks": toggle("git-hooks"), autocommit: toggle("autocommit"), autopush: toggle("autopush") })) out(`braid: ${note}`);
+      const settings = {
+        autopilot: toggle("autopilot"),
+        autofork: toggle("autofork"),
+        repo: str("repo"),
+        "git-hooks": toggle("git-hooks"),
+        autocommit: toggle("autocommit"),
+        autopush: toggle("autopush"),
+      };
+      for (const note of init(process.cwd(), settings)) out(`braid: ${note}`);
+      // The conversation braid init runs in is saved now, from its first turn.
+      const session = str("session") ?? process.env.BRAID_SESSION;
+      const transcript = str("transcript") ?? (session ? readEntry(session)?.transcript : undefined);
+      const repo = locate(process.cwd());
+      if (session && repo && transcript && existsSync(transcript)) {
+        const r = save(repo, session, transcript);
+        const where = repo.separate ? repo.top : join(repo.common, "braid");
+        out(`braid: saved this conversation (${session.slice(0, 8)}), ${r.added} records, in ${where}`);
+      }
       return 0;
     }
-    case "setup":
-      for (const note of setup({ undo: opts.undo === true })) out(`braid: ${note}`);
-      return 0;
     case "save": {
       const repo = needRepo();
       const r = save(repo, needSession(str("session")), str("transcript"));
@@ -292,7 +333,7 @@ function main(argv: string[]): number {
       const session = needSession(str("session"));
       const s = computeStatus(repo, session, remote);
       if (!isEnabled(repo)) {
-        out("braid is not set up in this repository: run braid init");
+        out("braid keeps no conversations here: run braid init");
         return 0;
       }
       out(`session ${session.slice(0, 8)}${s.conv ? ` (conversation ${s.conv.slice(0, 8)})` : ""}: ${render(s)}`);
@@ -325,6 +366,7 @@ function main(argv: string[]): number {
       const remote = str("remote") ?? readConfig(repo).remote;
       const found = resolve(repo, args[0] ?? needSession(str("session")), remote);
       if (found.length !== 1) throw new Error(found.length ? "more than one session matches" : "no such session");
+      for (const p of found[0]!.opts.gitDir ? points(repo, found[0]!.session) : []) out(`${`@${p.n}`.padEnd(12)}  ${"fork".padEnd(9)} ${p.what}`);
       for (const r of readRecords(found[0]!.ref, found[0]!.opts)) {
         const code = r.type === "label" ? braidOf(r).code : undefined;
         const commit = r.type === "label" ? (braidOf(r).commit ?? code) : undefined;
@@ -353,6 +395,19 @@ function main(argv: string[]): number {
         if (!current) throw new Error("no session to branch: run inside an agent session, or pass --session <id>");
         const dir = launchDir(loadState(repo, current)?.transcript ?? readEntry(current)?.transcript) ?? process.cwd();
         out(["braid: to branch this conversation into a new window, run in a terminal:", resume(dir, current, true), "or /branch to branch it in this window. braid files the branch in this conversation."].join("\n"));
+        return 0;
+      }
+      const at = /^(.*)@(\d+)$/.exec(args[0]);
+      if (at) {
+        // A fork point: the session as it stood before a big turn.
+        const name = at[1] || current;
+        if (!name) throw new Error("no session: name one, as in braid fork <id>@2, or run inside an agent session");
+        const own = resolve(repo, name, remote).filter((f) => f.opts.gitDir);
+        if (own.length !== 1) throw new Error(own.length ? `${name} matches ${own.length} sessions; name one` : `no session of yours matches ${name}`);
+        const point = points(repo, own[0]!.session).find((p) => p.n === Number(at[2]));
+        if (!point) throw new Error(`${own[0]!.session.slice(0, 8)} has no fork point @${at[2]}; braid log lists them`);
+        const r = replay(repo, { ...own[0]!, ref: point.commit }, remote, { cwd: str("cwd") });
+        out([`braid: wrote the conversation as it was ${point.what} as a new Claude Code session. To continue it in a new window, run in a terminal:`, resume(r.cwd, r.session, false)].join("\n"));
         return 0;
       }
       const found = resolve(repo, args[0], remote).filter((f) => f.session !== current);
@@ -423,19 +478,26 @@ function main(argv: string[]): number {
       return 0;
     }
     case "review": {
+      // A pull request, reviewed together with the sessions behind it.
+      const target = args[0];
+      if (!target) throw new Error("usage: braid review <pull request number>; to edit this session before a commit, braid edit");
+      const pass = ["session", "remote"].flatMap((k) => (str(k) ? [`--${k}`, str(k)!] : []));
+      return main(["fork", /^\d+$/.test(target) ? `pr:${target}` : target, "--here", ...pass]);
+    }
+    case "edit": {
       const repo = needRepo();
       const remote = str("remote") ?? readConfig(repo).remote;
-      const session = reviewSession(repo, remote, str("session"));
+      const session = editSession(repo, remote, str("session"));
       save(repo, session.id);
       const state = loadState(repo, session.id);
       if (!state || state.chunks === 0) throw new Error("this session is not saved yet");
       const v = view(repo, state, remote);
-      const lines = reviewLines(repo, v, remote);
+      const lines = editLines(repo, v, remote);
       const undo = opts.undo === true;
       const width = process.stdout.isTTY ? process.stdout.columns || 100 : 120;
-      const edit = opts.all === true || opts.edit === true || str("last") !== undefined || str("text") !== undefined || args.length > 0;
+      const edit = opts.all === true || opts.rewrite === true || str("last") !== undefined || str("hide") !== undefined || args.length > 0;
       if (!edit) {
-        const text = renderReview(v, lines, width).join("\n");
+        const text = renderEdit(v, lines, width).join("\n");
         const hint = session.explicit ? "" : `\n(newest session here; to edit it, add --session ${session.id.slice(0, 8)})`;
         page(`${text}${hint}\n`);
         return 0;
@@ -446,9 +508,9 @@ function main(argv: string[]): number {
         out(undo ? "braid: this session can be published again" : "braid: this session will not be published");
         return 0;
       }
-      if (opts.edit === true) {
+      if (opts.rewrite === true) {
         const picked = pickLines(lines, args);
-        if (picked.length !== 1) throw new Error("--edit takes one record number");
+        if (picked.length !== 1) throw new Error("--rewrite takes one record number");
         const l = picked[0]!;
         if (undo) {
           editRecord(repo, v, l, undefined);
@@ -456,11 +518,11 @@ function main(argv: string[]): number {
           return 0;
         }
         const current = lineText(l);
-        if (current === undefined) throw new Error(`${l.num} is a tool call, with no text to edit: withhold it (braid review ${l.num}), or hide text in it (--text)`);
+        if (current === undefined) throw new Error(`${l.num} is a tool call, with no text to rewrite: withhold it (braid edit ${l.num}), or hide text in it (--hide)`);
         const typed = process.stdin.isTTY ? editInEditor(current) : readStdin();
         const next = typed.replace(/\s+$/, "");
         if (!next.trim()) {
-          if (!process.stdin.isTTY) throw new Error("pipe the new text on stdin, or run braid review --edit in a terminal to edit it in your editor");
+          if (!process.stdin.isTTY) throw new Error("pipe the new text on stdin, or run braid edit --rewrite in a terminal to rewrite it in your editor");
           const w = withhold(repo, v, lines, [l], false);
           out(`braid: ${l.num} emptied, so withheld${w.changed.length > 1 ? ` with ${w.changed.length - 1} records that go with it` : ""}`);
           return 0;
@@ -470,10 +532,10 @@ function main(argv: string[]): number {
           return 0;
         }
         editRecord(repo, v, l, next);
-        out(`braid: ${l.num} edited${l.published ? "; it is already published: the next push replaces the published copy (braid push does it now)" : ""}`);
+        out(`braid: ${l.num} rewritten${l.published ? "; it is already published: the next push replaces the published copy (braid push does it now)" : ""}`);
         return 0;
       }
-      const text = str("text");
+      const text = str("hide");
       const result = text !== undefined ? hide(repo, v, lines, text, undo) : str("last") !== undefined ? withholdRecent(repo, v, lines, duration(str("last")!), undo) : withhold(repo, v, lines, pickLines(lines, args), undo);
       const verb = text !== undefined ? (undo ? `shown again` : `hidden`) : undo ? "put back" : "withheld";
       const what = text !== undefined ? `${JSON.stringify(text)} ${verb} in ${result.changed.length} records` : `${result.changed.length} records ${verb}`;
@@ -483,6 +545,23 @@ function main(argv: string[]): number {
       if (result.note) out(`braid: ${result.note}`);
       if (result.published) out(`braid: ${result.published} of them are already published: the next push replaces the published copy (braid push does it now). Anyone who fetched it keeps theirs.`);
       return 0;
+    }
+    case "verify": {
+      // Saved as it happened, and loads back as it was saved: this session, one named, or all of them.
+      const repo = needRepo();
+      const remote = str("remote") ?? readConfig(repo).remote;
+      const ids = opts.all === true ? allSessions(repo, remote).filter((f) => f.opts.gitDir).map((f) => f.session) : [editSession(repo, remote, args[0] ?? str("session")).id];
+      let bad = 0;
+      for (const id of ids) {
+        const v = verify(repo, id, remote);
+        bad += v.problems.length ? 1 : 0;
+        const st = loadState(repo, id);
+        if (st) saveState(repo, { ...st, verified: { ok: !v.problems.length, at: new Date().toISOString(), ...(v.problems.length ? { problems: v.problems } : {}) } });
+        out(`braid verify ${id.slice(0, 8)}: ${v.problems.length ? `${v.problems.length} problems` : "ok"}`);
+        for (const p of v.problems) out(`  ✗ ${p}`);
+        for (const c of v.checked) out(`  ✓ ${c}`);
+      }
+      return bad ? 1 : 0;
     }
     case "version":
     case "--version":

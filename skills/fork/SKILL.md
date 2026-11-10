@@ -1,11 +1,11 @@
 ---
 name: fork
-description: Fork an agent conversation saved by braid into a new window: this one, or another (a session id, a name such as review/bob, or pr:<number>). Use for /braid:fork, or when the user asks to branch this conversation or continue someone else's session.
+description: Fork an agent conversation saved by braid into a new window: this one, another (a session id, a name such as review/bob, or pr:<number>), or a fork point before a big turn (@<n>). Use for /braid:fork, or when the user asks to branch this conversation or continue someone else's session.
 ---
 
 # Fork a conversation
 
-1. Run `braid fork` to branch this conversation, or `braid fork <target>` for another session. If a target matches nothing, run `braid fetch --all` and try again; `braid sessions` lists what is available.
+1. Run `braid fork` to branch this conversation, or `braid fork <target>` for another session. To go back to how this conversation was before a big turn, run `braid log` to list the fork points autofork marked (`@1`, `@2`, …) and `braid fork @<n>`. If a target matches nothing, run `braid fetch --all` and try again; `braid sessions` lists what is available.
 2. braid prints a command, `cd <dir> && claude --resume <id>`. Give it to the user to run in a new terminal window, where the fork continues with the whole conversation. For another person's session, mention that the new window takes their messages as its own history.
 3. With no target, the user can also run `/branch` to branch in this window. braid files either branch in this conversation, and it shows as ↓ until it is merged back with `/braid:merge`.
 

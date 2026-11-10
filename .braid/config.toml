@@ -1,12 +1,23 @@
-# braid: https://github.com/gbarbalinardo/braid
+# braid: efficient session manager. https://github.com/gbarbalinardo/braid
+# autopilot: braid works on this machine only. It keeps conversations in its own git
+#   storage inside .git, and never pushes, fetches or asks GitHub anything. false: braid
+#   can publish conversations to the remote, for teammates and pull request reviews.
+# autofork: before a turn that changes a lot, braid marks a point to fork from
+#   (braid fork @N). false: no points.
+# repo: where conversations are kept. "auto": in this repository, next to the code. A path,
+#   such as "~/.braid": in that separate git repository; autocommit and autopush are then
+#   off, and /braid:push pushes to its origin.
 # git-hooks: commits name the agent session that made them (a Braid-Session trailer), so
 #   autocommit and autopush can follow them. false: braid leaves git alone.
 # autocommit: each commit the agent makes commits its conversation too. false: you commit
-#   it with /braid:commit, after /braid:review.
+#   it with /braid:commit, after /braid:edit.
 # autopush: git push publishes the committed part of the sessions behind the pushed
 #   commits. false: publish with /braid:push.
-# Your own ~/.config/braid/config.toml can set autocommit and autopush over these.
+# Your own ~/.config/braid/config.toml can set any of these over the repository's.
 # link = "store" names sessions inside the sessions only, without a Braid-Session trailer.
+autopilot = true
+autofork = true
+repo = "auto"
 git-hooks = true
 autocommit = false
 autopush = true

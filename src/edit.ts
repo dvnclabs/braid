@@ -1,4 +1,4 @@
-// braid review: a session as git push would publish it, one line per record,
+// braid edit: a session as it would be published, one line per record,
 // numbered, and the edits that keep parts of it back before a commit: withhold
 // records by number, hide text everywhere in the session, or keep it private.
 import { readAgents, readRecords } from "./chunks.ts";
@@ -44,7 +44,7 @@ function oneLine(r: Rec): string {
 }
 
 /** Every record that publishing could include, numbered, with what would be published of it. */
-export function reviewLines(repo: Repo, v: View, remote: string): Line[] {
+export function editLines(repo: Repo, v: View, remote: string): Line[] {
   const tracking = `${remoteRefs(remote)}/${v.state.conv}/${v.state.session}`;
   const published = new Set(
     [...readRecords(tracking, { cwd: repo.top }), ...[...readAgents(tracking, { cwd: repo.top }).values()].flat()].map((r) => r.id),
@@ -95,7 +95,7 @@ function clip(s: string, max: number): string {
 }
 
 /** The listing: a header, then one line per record. */
-export function renderReview(v: View, lines: Line[], width: number): string[] {
+export function renderEdit(v: View, lines: Line[], width: number): string[] {
   const s = v.state;
   const main = lines.filter((l) => !l.agent);
   const lastCommitted = main.filter((l) => l.committed).at(-1)?.num;
@@ -103,13 +103,13 @@ export function renderReview(v: View, lines: Line[], width: number): string[] {
   const edited = lines.filter((l) => l.edited && !l.withheld).length;
   const redactions = lines.filter((l) => !l.withheld).reduce((a, l) => a + l.redactions, 0);
   const head = [
-    `braid review ${sessionTitle(v.chunks.flat(), s.session)}: ${main.length} records, ` +
-      `${lastCommitted ? `committed up to ${lastCommitted}` : "nothing committed yet"}, ${withheld} withheld, ${edited ? `${edited} edited, ` : ""}${redactions} redacted`,
+    `braid edit ${sessionTitle(v.chunks.flat(), s.session)}: ${main.length} records, ` +
+      `${lastCommitted ? `committed up to ${lastCommitted}` : "nothing committed yet"}, ${withheld} withheld, ${edited ? `${edited} rewritten, ` : ""}${redactions} redacted`,
   ];
-  if (s.private) head.push("This session is private: none of it is published. braid review --undo --all makes it publishable again.");
+  if (s.private) head.push("This session is private: none of it is published. braid edit --undo --all makes it publishable again.");
   else if (v.rules.withholdSession && v.pathCounts.size > 0) head.push("None of this session is published: it touched a path in .braidignore, and redact.toml sets withhold-session.");
   if (s.terms?.length) head.push(`Hidden text: ${s.terms.map((t) => JSON.stringify(t)).join(", ")}`);
-  head.push("git push publishes up to the last commit. ↑ committed, not published yet · ✗ withheld · ✎ edited");
+  head.push("Publishing goes up to the last commit. ↑ committed, not published yet · ✗ withheld · ✎ rewritten");
   const w = Math.max(...lines.map((l) => l.num.length), 2);
   const body = lines.map((l) => {
     const mark = l.withheld ? "✗" : l.edited ? "✎" : l.committed && !l.published ? "↑" : " ";
@@ -126,7 +126,7 @@ export function pickLines(lines: Line[], tokens: string[]): Line[] {
   const picked = new Map<string, Line>();
   const need = (num: string) => {
     const l = byNum.get(num);
-    if (!l) throw new Error(`no record ${num} in this session (braid review lists them)`);
+    if (!l) throw new Error(`no record ${num} in this session (braid edit lists them)`);
     picked.set(num, l);
   };
   for (const token of tokens.flatMap((t) => t.split(",")).filter(Boolean)) {
@@ -203,7 +203,7 @@ export function withhold(repo: Repo, v: View, lines: Line[], picked: Line[], und
 
 /** Hides text everywhere in the session, or with `undo` shows it again. Returns the lines that contain it. */
 export function hide(repo: Repo, v: View, lines: Line[], text: string, undo: boolean): Edit {
-  if (!text.trim()) throw new Error("--text needs the text to hide");
+  if (!text.trim()) throw new Error("--hide needs the text to hide");
   update(repo, v.state.session, (state) => {
     const others = (state.terms ?? []).filter((t) => t.toLowerCase() !== text.toLowerCase());
     state.terms = undo ? others : [...others, text];
@@ -218,7 +218,7 @@ export function hide(repo: Repo, v: View, lines: Line[], text: string, undo: boo
   return { changed, published: changed.filter((l) => l.published && !l.withheld).length };
 }
 
-/** The text of a line that --edit starts from: as it would be published. */
+/** The text of a line that --rewrite starts from: as it would be published. */
 export const lineText = (l: Line): string | undefined => editableText(l.shown);
 
 /** Publishes `text` in place of a record's own text, or with undefined goes back to its own. */

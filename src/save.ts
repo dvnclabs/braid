@@ -9,6 +9,7 @@ import { lastTurn, withBraid, type Actor, type Rec } from "./records.ts";
 import { conversation } from "./load.ts";
 import { ensureStore, readConfig, SESSION_REFS, storeRef, type Repo } from "./repo.ts";
 import { replayedIds } from "./replay.ts";
+import { markIfBig } from "./points.ts";
 import { loadState, newState, saveState, withLock, type SessionState } from "./state.ts";
 import { intact, readWindow, START } from "./transcript.ts";
 import { VERSION } from "./version.ts";
@@ -80,6 +81,7 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
   ensureStore(repo);
   return withLock(repo, `save-${session}`, () => {
     const state = loadState(repo, session) ?? newState(session, transcript);
+    if (repo.code && !state.code) state.code = repo.code;
     if (transcript) state.transcript = transcript;
     const path = state.transcript;
     if (!path || !existsSync(path)) {
@@ -99,13 +101,15 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
     let source: ReturnType<typeof forkSource>;
     let added = 0;
 
+    // Records of an earlier window of this save, read again in the next window's overlap, are saved already.
+    const unsaved = (r: Rec) => state.chunks === 0 || !savedIds().has(r.id);
     const fresh = (native: Rec[]): Rec[] => {
       if (replayed) {
         return native
-          .filter((r) => !replayed.has(r.id))
+          .filter((r) => !replayed.has(r.id) && unsaved(r))
           .map((r) => (r.parentId && replayed.has(r.parentId) ? { ...r, parentId: replayed.get(r.parentId) } : r));
       }
-      if (source) return native.filter((r) => !source!.known.has(r.id));
+      if (source) return native.filter((r) => !source!.known.has(r.id) && unsaved(r));
       if (state.chunks === 0 && !state.last) return native;
       if (!rewritten && state.last) {
         const i = native.findIndex((r) => r.id === state.last);
@@ -263,6 +267,8 @@ function writeChunk(
   }
   if (out.length === 0 && agentRecords.size === 0) return 0;
 
+  // Before a turn that changes a lot, a point to fork from, at the session as it stood.
+  if (readConfig(repo).autofork) markIfBig(repo, state, [...out, ...[...agentRecords.values()].flat()]);
   const head = gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim();
   appendChunk(storeRef(state.conv, session), out, { time: now, head, commits: codeCommits }, { gitDir: repo.store }, agentRecords);
   state.last = fresh.at(-1)?.id ?? state.last;
@@ -338,6 +344,7 @@ export function register(repo: Repo, session: string, transcript?: string): Sess
   ensureStore(repo);
   const state = loadState(repo, session) ?? newState(session, transcript);
   if (transcript) state.transcript = transcript;
+  if (repo.code && !state.code) state.code = repo.code;
   saveState(repo, state);
   return state;
 }

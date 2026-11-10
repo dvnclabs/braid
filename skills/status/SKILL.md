@@ -7,9 +7,10 @@ description: Show where this agent session stands in braid, what is published, a
 
 Run `braid status` and explain the result briefly:
 
-- `local`: saved on this machine, nothing committed or published. `/braid:review`, then `/braid:commit`, prepares it to be shared.
+- `⚠ braid verify`: the check braid ran when this session last ended found a problem. Run `braid verify` and report what it says.
+- `local`: saved on this machine, nothing committed or published. On autopilot (the default) sessions stay local: nothing is pushed or fetched. `/braid:edit`, then `/braid:commit`, prepares it to be shared.
 - `↑N`: N committed records are not published yet. They go out with the next `git push` of a commit made in this session (with autopush), or with `/braid:push`.
-- `*N`: N records since the last commit. Publishing stops at the last commit; `/braid:review` and `/braid:commit` take them in.
+- `*N`: N records since the last commit. Publishing stops at the last commit; `/braid:edit` and `/braid:commit` take them in.
 - `↓ name +N`: a session built on this one, such as a review or a branch, has N records that are not merged. `/braid:merge` merges them.
 - `private`: the user withheld the whole session.
 - `✓`: everything is published and nothing is waiting.

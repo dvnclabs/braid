@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { join } from "node:path";
 import { fetchInBackground } from "./fetch.ts";
 import { forEachRef, gitMaybe } from "./git.ts";
-import { findRepo, isEnabled, readConfig, remoteRefs, SESSION_REFS, type Repo } from "./repo.ts";
+import { findRepo, isEnabled, locate, readConfig, remoteRefs, SESSION_REFS, type Repo } from "./repo.ts";
 import { computeStatus, convOf, render } from "./status.ts";
 import { configDir } from "./setup.ts";
 
@@ -89,16 +89,17 @@ export function statusline(stdin: string): string {
   const session = input.session_id;
   if (!session) return prev;
   const parts = [session.slice(0, 8)];
-  const repo = findRepo(input.workspace?.current_dir ?? input.cwd ?? process.cwd());
+  const dir = input.workspace?.current_dir ?? input.cwd ?? process.cwd();
+  const code = findRepo(dir);
+  // On autopilot braid asks GitHub nothing, not even the pull request of the branch.
+  const pr = code && !readConfig(code).autopilot ? pullRequest(code) : undefined;
+  if (pr) parts.push(pr);
+  const repo = locate(dir);
   if (repo) {
-    const pr = pullRequest(repo);
-    if (pr) parts.push(pr);
-    if (isEnabled(repo)) {
-      const remote = readConfig(repo).remote;
-      const part = braidPart(repo, session, remote);
-      if (part) parts.push(part);
-      fetchInBackground(repo, remote);
-    }
+    const remote = readConfig(repo).remote;
+    const part = braidPart(repo, session, remote);
+    if (part) parts.push(part);
+    fetchInBackground(repo, remote);
   }
   const ours = parts.join(" · ");
   if (!prev) return ours;

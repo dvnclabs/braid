@@ -25,8 +25,9 @@ export interface Window {
 }
 
 export const START: Cursor = { offset: 0, lines: 0, mark: "" };
-const OVERLAP = 2 * 1024 * 1024;
-const MAX_WINDOW = 16 * 1024 * 1024;
+// BRAID_WINDOW_BYTES makes windows small, for tests that need several of them.
+const MAX_WINDOW = Number(process.env.BRAID_WINDOW_BYTES) || 16 * 1024 * 1024;
+const OVERLAP = Math.min(2 * 1024 * 1024, Math.floor(MAX_WINDOW / 4));
 const NL = 10;
 
 function readAt(fd: number, start: number, length: number): Buffer {

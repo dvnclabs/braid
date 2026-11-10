@@ -1,10 +1,13 @@
 // Publishing: build a redacted copy of a session's committed records and push it.
+import { existsSync } from "node:fs";
 import { readAgentChunks, readAgents, readChunks, readRecords, writeChunks } from "./chunks.ts";
 import { git, gitMaybe, revParse, updateRef } from "./git.ts";
 import { redactValue, type Counts, type Rule } from "./redact.ts";
 import { loadRules, pathWithheld, type Rules } from "./rules.ts";
 import { braidOf, committedLength, isTurn, type Rec } from "./records.ts";
 import { PUBLISHED_REFS, readConfig, remoteRefs, storeRef, type Repo } from "./repo.ts";
+import { AUTOPILOT } from "./fetch.ts";
+import { shellWord } from "./replay.ts";
 import { loadState, saveState, withLock, type SessionState } from "./state.ts";
 
 const PUBLISHED_TYPES = new Set(["transcript", "message", "branch_summary", "label", "compaction", "agent_link"]);
@@ -30,7 +33,7 @@ export function clean(r: Rec): Rec | undefined {
   return out;
 }
 
-/** The text of a record that braid review --edit rewrites: its text blocks, or a summary. Undefined for a tool call. */
+/** The text of a record that braid edit --rewrite rewrites: its text blocks, or a summary. Undefined for a tool call. */
 export function editableText(r: Rec): string | undefined {
   if (r.type === "branch_summary" || r.type === "compaction") return typeof r.summary === "string" ? r.summary : undefined;
   if (r.type !== "message") return undefined;
@@ -90,7 +93,7 @@ export interface View {
   state: SessionState;
   chunks: Rec[][];
   agents: Map<string, Rec[][]>;
-  /** Withheld records: "you" (braid review) or ".braidignore <pattern>". */
+  /** Withheld records: "you" (braid edit) or ".braidignore <pattern>". */
   withheld: Map<string, string>;
   /** Redaction rules on top of the built-in ones: the team's, the user's, and this session's hidden text. */
   redact: Rule[];
@@ -109,8 +112,9 @@ export function view(repo: Repo, state: SessionState, remote: string): View {
   const agents = readAgentChunks(ref, { gitDir: repo.store });
   const main = chunks.flat();
   const flatAgents = new Map([...agents].map(([id, c]) => [id, c.flat()]));
-  const rules = loadRules(repo, remote);
-  const byPath = pathWithheld([...main, ...[...flatAgents.values()].flat()], rules, repo.top);
+  const code = state.code && existsSync(state.code) ? state.code : undefined;
+  const rules = loadRules(repo, remote, code);
+  const byPath = pathWithheld([...main, ...[...flatAgents.values()].flat()], rules, code ?? repo.top);
   const seeds = new Map<string, string>((state.withheld ?? []).map((id) => [id, "you"]));
   for (const [id, pattern] of byPath.ids) seeds.set(id, `.braidignore ${pattern}`);
   const committed = committedLength(main);
@@ -157,7 +161,7 @@ export interface PublishResult {
   reason?: string;
   /** Turns after the last commit, which are not published. */
   uncommitted?: number;
-  /** Records published before that this push removed or changed, after braid review. */
+  /** Records published before that this push removed or changed, after braid edit. */
   replaced?: number;
   /** Records the remote copy has with different content: this machine's version was published. */
   conflicts?: string[];
@@ -220,10 +224,10 @@ export function publish(repo: Repo, session: string, opts: { remote?: string; dr
     const v = view(repo, state, remote);
     const report = { counts: new Map() as Counts, withheld: new Map(v.pathCounts), sources: v.rules.sources, problems: v.rules.problems };
     const byYou = [...v.withheld.values()].filter((w) => w === "you").length;
-    if (byYou) report.withheld.set("braid review", byYou);
+    if (byYou) report.withheld.set("braid edit", byYou);
     const uncommitted = v.chunks.flat().slice(v.committed).filter((r) => isTurn(r) && !v.withheld.has(r.id)).length;
     if (v.rules.withholdSession && v.pathCounts.size > 0) return { ...result, uncommitted, reason: "withheld whole: it touched a path in .braidignore", report };
-    if (v.committed === 0) return { ...result, uncommitted, reason: "nothing committed yet (braid review, then braid commit)", report };
+    if (v.committed === 0) return { ...result, uncommitted, reason: "nothing committed yet (braid edit, then braid commit)", report };
 
     const part = committedPart(v);
     const withheld = new Set(v.withheld.keys());
@@ -238,6 +242,10 @@ export function publish(repo: Repo, session: string, opts: { remote?: string; dr
     const records = chunks.flat().filter(isTurn).length;
     const redactions = sum(counts);
     if (opts.dryRun) return { ...result, records, redactions, uncommitted, reason: "dry run", report };
+    if (readConfig(repo).autopilot) return { ...result, records, redactions, uncommitted, reason: AUTOPILOT, report };
+    if (!/[:/]/.test(remote) && !gitMaybe(["remote", "get-url", remote], { cwd: repo.top })) {
+      return { ...result, records, redactions, uncommitted, reason: `${repo.top} has no remote ${remote}: git -C ${shellWord(repo.top)} remote add ${remote} <url>`, report };
+    }
     const published = `${PUBLISHED_REFS}/${state.conv}/${session}`;
     const tracking = `${remoteRefs(remote)}/${state.conv}/${session}`;
     const localIds = new Set([...v.chunks.flat(), ...[...v.agents.values()].flat(2)].map((r) => r.id));

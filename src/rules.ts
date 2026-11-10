@@ -15,8 +15,7 @@ import { dirname, isAbsolute, join, normalize, relative } from "node:path";
 import { gitMaybe } from "./git.ts";
 import type { Rec } from "./records.ts";
 import type { Rule } from "./redact.ts";
-import type { Repo } from "./repo.ts";
-import { configDir } from "./repo.ts";
+import { configDir, findRepo, type Repo } from "./repo.ts";
 import { ignoredBy, parseIgnore, type IgnoreRule } from "./ignore.ts";
 
 export interface Rules {
@@ -65,13 +64,20 @@ function defaultBranch(repo: Repo, remote: string): string | undefined {
   return undefined;
 }
 
-export function loadRules(repo: Repo, remote: string): Rules {
+/**
+ * The rules for a session. `code` is the code repository a session kept in a
+ * separate repository ran in: its rules apply too, as they would next to the code.
+ */
+export function loadRules(repo: Repo, remote: string, code?: string): Rules {
   const rules: Rules = { redact: [], ignores: [], withholdSession: false, sources: [], problems: [] };
   const texts: [string, string][] = [];
   const own = join(configDir(), "redact.toml");
   if (existsSync(own)) texts.push([own.replace(process.env.HOME ?? "\0", "~"), readFileSync(own, "utf8")]);
-  const branch = defaultBranch(repo, remote);
-  const shared = branch ? gitMaybe(["show", `${branch}:.braid/redact.toml`], { cwd: repo.top }) : undefined;
+  // Shared rules come from the default branch of the code: the code repository's, else this one's.
+  const codeRepo = code && existsSync(code) ? findRepo(code) : undefined;
+  const ruled = codeRepo ?? repo;
+  const branch = defaultBranch(ruled, codeRepo ? "origin" : remote);
+  const shared = branch ? gitMaybe(["show", `${branch}:.braid/redact.toml`], { cwd: ruled.top }) : undefined;
   if (branch && shared !== undefined) texts.push([`.braid/redact.toml on ${branch.replace(/^refs\/(remotes|heads)\//, "")}`, shared]);
   for (const [source, text] of texts) {
     rules.sources.push(source);
@@ -89,10 +95,12 @@ export function loadRules(repo: Repo, remote: string): Rules {
     if (t["withhold-session"] === true) rules.withholdSession = true;
   }
 
+  const file = (path: string) => (existsSync(path) ? readFileSync(path, "utf8") : undefined);
   const ignores: [string, string | undefined][] = [
-    ["~/.config/braid/ignore", existsSync(join(configDir(), "ignore")) ? readFileSync(join(configDir(), "ignore"), "utf8") : undefined],
-    [`.braidignore on ${(branch ?? "").replace(/^refs\/(remotes|heads)\//, "")}`, branch ? gitMaybe(["show", `${branch}:.braidignore`], { cwd: repo.top }) : undefined],
-    [".braidignore", existsSync(join(repo.top, ".braidignore")) ? readFileSync(join(repo.top, ".braidignore"), "utf8") : undefined],
+    ["~/.config/braid/ignore", file(join(configDir(), "ignore"))],
+    [`.braidignore on ${(branch ?? "").replace(/^refs\/(remotes|heads)\//, "")}`, branch ? gitMaybe(["show", `${branch}:.braidignore`], { cwd: ruled.top }) : undefined],
+    [".braidignore", file(join(ruled.top, ".braidignore"))],
+    ...(codeRepo ? [[`.braidignore in ${repo.top}`, file(join(repo.top, ".braidignore"))] as [string, string | undefined]] : []),
   ];
   const seen = new Set<string>();
   for (const [source, text] of ignores) {
