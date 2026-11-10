@@ -107,16 +107,18 @@ Asking in plain language works too: "pull in Bob's review but keep my jitter".
 `braid verify` checks a session the way `git fsck` checks a repository, and braid runs it by itself when each session ends:
 
 - **saved**: every record of the transcript, and of each subagent's, is in the store with the same content and in the same order
-- **loads**: the session, written back as a Claude Code transcript the way a fork writes it and read again, gives the same messages
+- **loads**: a fork written from the store holds, line for line, what Claude Code reads to resume the transcript: the messages and tool calls, the results of parallel calls, notes and files attached to them, messages typed while the agent worked, what a compaction kept, and the session's settings
 - **store**: `git fsck` finds nothing wrong, and every record's parent is saved
 
 ```
 $ braid verify --all
 braid verify 9e36aa15: ok
   ✓ saved: 1211 records of the transcript
-  ✓ loads: 6 messages since the last compaction, the same after a fork
+  ✓ loads: 53 lines since the last compaction, the same in a fork as in the transcript
   ✓ store: 1 chunks, git fsck
 ```
+
+`npm run check:resume -- <transcript.jsonl>...` goes one step further: Claude Code resumes the session and a fork braid writes from its store, against a local server that records the request Claude Code would send to the model, and the two requests are compared byte for byte. No model is called and nothing leaves the machine.
 
 ## Privacy
 
@@ -130,7 +132,8 @@ Each session lives on its own git ref, in [ATXF](https://github.com/leostera/atx
 
 ```sh
 npm install
-npm run check    # typecheck, tests, and the bundle in dist/
+npm run check                                  # typecheck, tests, and the bundle in dist/
+npm run check:resume -- ~/.claude/projects/*/*.jsonl   # forks resume in Claude Code as the originals do
 ```
 
 `dist/braid.mjs` is committed, because the plugin runs it straight from the repository. `npm run check` rebuilds it, so commit it together with the change to `src/`.

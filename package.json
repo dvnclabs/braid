@@ -26,7 +26,8 @@
     "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/braid.mjs --banner:js=\"#!/usr/bin/env node\" --log-level=warning",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test && npm run build",
+    "check:resume": "node scripts/resume-check.mjs"
   },
   "dependencies": {
     "@leostera/atxf": "0.3.0"

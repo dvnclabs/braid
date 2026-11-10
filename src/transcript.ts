@@ -79,6 +79,10 @@ function renumber(records: Rec[], base: number, session: string): Rec[] {
     // A parent before the window is unknown to the converter: keep the native link.
     const parentUuid = (r.native as { records?: { parentUuid?: unknown }[] } | undefined)?.records?.[0]?.parentUuid;
     if (out.parentId === null && typeof parentUuid === "string" && base > 0) out.parentId = parentUuid;
+    // So is the message a last prompt points at, which the converter otherwise reads as a leaf only when it sees it.
+    const leafUuid = (r.native as { records?: { leafUuid?: unknown }[] } | undefined)?.records?.[0]?.leafUuid;
+    if (out.type === "custom" && out.name === "last-prompt" && typeof leafUuid === "string" && base > 0)
+      return { type: "leaf", id: out.id, time: out.time, targetId: leafUuid, reason: "navigate", native: out.native, ...(out.ext ? { ext: out.ext } : {}) };
     return out;
   });
 }

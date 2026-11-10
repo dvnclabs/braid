@@ -817,7 +817,7 @@ test("braid verify: sessions are saved as they happened and load back the same, 
   braid(s.env, repo, ["hook", "stop"], hookIn(ALICE, t), small);
   const ok = braid(s.env, repo, ["verify", "--session", ALICE], undefined, small);
   assert.equal(ok.status, 0, ok.stdout);
-  assert.match(ok.stdout, /braid verify 5b0e2c1a: ok\n {2}✓ saved: 24 records of the transcript\n {2}✓ loads: 24 messages, the same after a fork/);
+  assert.match(ok.stdout, /braid verify 5b0e2c1a: ok\n {2}✓ saved: 24 records of the transcript\n {2}✓ loads: 24 lines, the same in a fork as in the transcript/);
 
   // A /branch copy whose first save spans several windows saves each record once.
   const BRANCH = "7c1d2e3f-0000-4000-8000-0000000000bb";
@@ -839,5 +839,84 @@ test("braid verify: sessions are saved as they happened and load back the same, 
   assert.equal(behind.status, 1);
   assert.match(behind.stdout, /✗ saved: 2 records of the transcript are not saved, from: [^\n]*One more thing/);
   braid(s.env, repo, ["hook", "stop"], hookIn(ALICE, t));
-  assert.equal(braid(s.env, repo, ["verify", "--all"]).status, 0);
+  const all = braid(s.env, repo, ["verify", "--all"]);
+  assert.equal(all.status, 0, all.stdout);
+});
+
+test("a fork holds what Claude Code reads to resume: what a compaction kept, parallel calls beside the chain, notes, messages typed mid-turn, and the session's settings", () => {
+  const s = sandbox();
+  const repo = clone(s, "gus", "gus@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, repo, ["init"]);
+  const path = join(s.root, `${ALICE}.jsonl`);
+  let n = 0;
+  const uuid = () => `5b0e2c1a-0000-4000-8000-${String(++n).padStart(12, "0")}`;
+  const put = (fields: Record<string, unknown>) => {
+    const line = { isSidechain: false, timestamp: new Date(Date.UTC(2026, 10, 9, 10, 0, n)).toISOString(), cwd: repo, sessionId: ALICE, version: "2.1.316", ...fields };
+    appendFileSync(path, JSON.stringify(line) + "\n");
+    return fields.uuid as string;
+  };
+  const say = (parentUuid: string | null, role: "user" | "assistant", content: unknown, id?: string) =>
+    put({ parentUuid, type: role, uuid: uuid(), message: role === "user" ? { role, content } : { id: id ?? `msg_${n}`, type: "message", role, model: "claude-sonnet-5-5", content } });
+  const note = (parentUuid: string, attachment: object) => put({ parentUuid, type: "attachment", uuid: uuid(), attachment });
+
+  const start = say(null, "user", "Start.");
+  const kept = say(start, "assistant", [{ type: "text", text: "Earlier answer, kept by the compaction." }]);
+  const boundary = uuid();
+  const summary = uuid();
+  put({ parentUuid: null, logicalParentUuid: kept, type: "system", subtype: "compact_boundary", uuid: boundary, content: "Conversation compacted", compactMetadata: { trigger: "auto", preservedSegment: { headUuid: kept, anchorUuid: summary, tailUuid: kept }, preservedMessages: { anchorUuid: summary, uuids: [kept], allUuids: [kept] } } });
+  put({ parentUuid: boundary, type: "user", uuid: summary, isCompactSummary: true, message: { role: "user", content: "Summary: we started." } });
+  put({ type: "permission-mode", permissionMode: "auto" });
+  const ask = say(summary, "user", "Read the two files.");
+  // One response in two lines, two calls; each result hangs from its call, and the conversation goes on from the first.
+  const callA = say(ask, "assistant", [{ type: "tool_use", id: "toolu_a", name: "Read", input: { file_path: "a.ts" } }], "msg_par");
+  const callB = say(callA, "assistant", [{ type: "tool_use", id: "toolu_b", name: "Read", input: { file_path: "b.ts" } }], "msg_par");
+  const resultB = say(callB, "user", [{ type: "tool_result", tool_use_id: "toolu_b", content: "export const b = 2;" }]);
+  note(resultB, { type: "bash_output_audience_note", content: "A note on the second result." });
+  const resultA = say(callA, "user", [{ type: "tool_result", tool_use_id: "toolu_a", content: "export const a = 1;" }]);
+  const queued = note(resultA, { type: "queued_command", prompt: "Also check the README.", commandMode: "prompt", origin: { kind: "human" } });
+  const delta = note(queued, { type: "deferred_tools_delta", addedNames: ["Monitor"], removedNames: [] });
+  const record = note(delta, { type: "deferred_tools_record", entries: [], nameOnlyAnnouncements: [delta] });
+  put({ type: "bridge-session", bridgeSessionId: "cse_1", ownerAccountUuid: "3c5ee1cb-26a1-454b-a6f9-5625d9a0aecc" });
+  say(record, "assistant", [{ type: "text", text: "Both files read, and the README." }]);
+
+  const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: path, cwd: repo });
+  braid(s.env, repo, ["hook", "session-start"], hookIn);
+  braid(s.env, repo, ["hook", "stop"], hookIn);
+  const ok = braid(s.env, repo, ["verify", "--session", ALICE]);
+  assert.equal(ok.status, 0, ok.stdout);
+  assert.match(ok.stdout, /✓ loads: 15 lines since the last compaction, the same in a fork as in the transcript/);
+
+  // Without the transcript, braid writes the fork itself, from the store.
+  writeFileSync(`${path}.gone`, readFileSync(path));
+  writeFileSync(path, "");
+  const r = braid(s.env, repo, ["fork", "5b0e2c1a", "--cwd", repo]);
+  assert.equal(r.status, 0, r.stderr);
+  const id = /--resume (\S+)/.exec(r.stdout)![1]!;
+  const file = join(s.env.HOME!, ".claude", "projects", realpathSync(repo).replace(/[^A-Za-z0-9]/g, "-"), `${id}.jsonl`);
+  const lines = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const text = (l: { message?: { content?: unknown }; attachment?: unknown }) => JSON.stringify(l.message?.content ?? l.attachment ?? "");
+  const find = (what: string) => lines.find((l) => text(l).includes(what));
+  assert.ok(find("Earlier answer"), "what the compaction kept");
+  assert.ok(!find("Start."), "not what it summarized");
+  assert.ok(find("Also check the README."), "a message typed while the agent worked");
+  assert.ok(find("A note on the second result."), "a note on a result beside the chain");
+  assert.ok(lines.some((l) => l.type === "permission-mode"), "the session's settings");
+  const [a, b, rb] = [find("toolu_a\",\"name"), find("toolu_b\",\"name"), find("export const b")];
+  assert.equal(rb.parentUuid, b.uuid, "the second result hangs from its call");
+  assert.equal(b.parentUuid, a.uuid, "the response's second line from its first");
+  const boundaryLine = lines.find((l) => l.subtype === "compact_boundary");
+  assert.equal(boundaryLine.parentUuid, null, "the compaction starts the chain");
+  assert.deepEqual(boundaryLine.compactMetadata.preservedMessages.allUuids, [find("Earlier answer").uuid], "and names what it kept by its uuid in the fork");
+  assert.equal(find("nameOnlyAnnouncements").attachment.nameOnlyAnnouncements[0], find("addedNames").uuid, "a line named inside an attachment, too");
+  assert.equal(lines.find((l) => l.type === "bridge-session").ownerAccountUuid, "3c5ee1cb-26a1-454b-a6f9-5625d9a0aecc", "other ids stay as they are");
+  assert.ok(lines.every((l) => l.sessionId === id));
+
+  // Claude Code resumes the fork and adds a turn: the first save keeps only the new turn.
+  appendFileSync(file, JSON.stringify({ parentUuid: lines.at(-1).uuid, type: "user", message: { role: "user", content: "Next." }, uuid: "b0000000-0000-4000-8000-000000000001", timestamp: "2026-11-10T12:00:00.000Z", sessionId: id, cwd: repo }) + "\n");
+  const forkIn = JSON.stringify({ session_id: id, transcript_path: file, cwd: repo });
+  braid(s.env, repo, ["hook", "session-start"], forkIn);
+  braid(s.env, repo, ["hook", "stop"], forkIn);
+  const saved = records(s.env, repo, join(repo, ".git", "braid", "store"), `refs/sessions/${ALICE}/${id}`).filter((x) => x.type !== "transcript");
+  assert.deepEqual(saved.map((x) => x.content), ["Next."], "the copied lines are not saved again");
 });

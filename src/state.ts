@@ -37,7 +37,8 @@ export interface SessionState {
   /** Id of the first message, which a fork's transcript shares with the session it was forked from. */
   first?: string;
   /** A session this one forks from, set by `braid fork` before the first save. */
-  forkFrom?: { session: string; conv: string; head: string; actor?: string; replayed?: boolean };
+  /** `lines`: how many lines a replayed fork wrote, all copies of the source. */
+  forkFrom?: { session: string; conv: string; head: string; actor?: string; replayed?: boolean; lines?: number };
   /** The last braid verify, run when the session ended. */
   verified?: { ok: boolean; at: string; problems?: string[] };
   /** For a session kept in a separate repository: the code repository it ran in, whose .braidignore applies to it. */

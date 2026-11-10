@@ -4,17 +4,19 @@
 // - saved: every record of the transcript, and of each subagent's, is in the
 //   store with the same content, in the same order. Records a fork shares with
 //   the session it came from live there, and count as saved.
-// - loads: the session's path, written back as a Claude Code transcript as
-//   `braid fork` writes it, and read again, gives the same messages.
+// - loads: the lines Claude Code reads to resume the transcript are the lines
+//   `braid fork` writes from the store, and the fork reads back as the same
+//   messages.
 // - store: git fsck finds nothing wrong, and every record's parent is in the
 //   conversation.
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { claudeCode, uuidFor } from "@leostera/atxf/claude-code";
+import { claudeCode } from "@leostera/atxf/claude-code";
 import { readAgents, readRecords } from "./chunks.ts";
 import { run } from "./git.ts";
 import { conversation } from "./load.ts";
-import { ancestry, describe, lastTurn, type Rec } from "./records.ts";
+import { describe, lastTurn, type Rec } from "./records.ts";
+import { forkRecords, forkText, keptUuids, replayedIds, SOURCE_ONLY, type Line } from "./replay.ts";
 import { storeRef, type Repo } from "./repo.ts";
 import { loadState } from "./state.ts";
 import { readWindow, START, type Cursor } from "./transcript.ts";
@@ -32,8 +34,8 @@ function readAll(path: string, id: string): Rec[] {
   const out = new Map<string, Rec>();
   let cursor: Cursor = START;
   for (let w = readWindow(path, cursor, id); w; w = w.more ? readWindow(path, cursor, id) : undefined) {
-    // A record read again in the next window's overlap keeps its place in the file, and the read with more context.
-    for (const r of w.records) out.set(r.id, r);
+    // A record read again in the next window's overlap keeps its first read, which save keeps: the next window holds less of what came before it.
+    for (const r of w.records) if (!out.has(r.id)) out.set(r.id, r);
     cursor = w.cursor;
   }
   return [...out.values()];
@@ -55,6 +57,9 @@ function content(r: Rec): string {
   return stable(Object.keys(otherExt).length ? { ...rest, ext: otherExt } : rest);
 }
 
+/** A record as a problem names it: what it says, or its kind and id when it says nothing readable. */
+const which = (r: Rec): string => describe(r, 80) || `${r.type}${r.name ? ` ${String(r.name)}` : ""} ${r.id}`;
+
 function stable(value: unknown): string {
   return JSON.stringify(value, (_k, v) => (v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v));
 }
@@ -66,8 +71,8 @@ function compare(what: string, transcript: Rec[], stored: Rec[], elsewhere: (id:
   if (twice) problems.push(`${what}: ${twice} records are saved twice`);
   const missing = transcript.filter((r) => !byId.has(r.id) && !elsewhere(r.id));
   const changed = transcript.filter((r) => byId.has(r.id) && content(byId.get(r.id)!) !== content(r));
-  if (missing.length) problems.push(`${what}: ${missing.length} records of the transcript are not saved, from: ${describe(missing[0]!, 80)}`);
-  if (changed.length) problems.push(`${what}: ${changed.length} saved records differ from the transcript, from: ${describe(changed[0]!, 80)}`);
+  if (missing.length) problems.push(`${what}: ${missing.length} records of the transcript are not saved, from: ${which(missing[0]!)}`);
+  if (changed.length) problems.push(`${what}: ${changed.length} saved records differ from the transcript, from: ${which(changed[0]!)}`);
   // Saved records keep the transcript's order.
   const at = new Map(transcript.map((r, i) => [r.id, i]));
   const order = stored.map((r) => at.get(r.id)).filter((i): i is number => i !== undefined);
@@ -75,6 +80,126 @@ function compare(what: string, transcript: Rec[], stored: Rec[], elsewhere: (id:
   if (swaps) problems.push(`${what}: ${swaps} saved records are out of the transcript's order`);
   return transcript.length - missing.length;
 }
+
+function readLines(path: string): Line[] {
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .flatMap((l) => {
+      try {
+        const v = JSON.parse(l) as unknown;
+        return v && typeof v === "object" ? [v as Line] : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
+const blocksOf = (l: Line): Record<string, unknown>[] => {
+  const c = (l.message as { content?: unknown } | undefined)?.content;
+  return Array.isArray(c) ? (c as Record<string, unknown>[]) : [];
+};
+
+/**
+ * The lines a fork of a transcript at the line that holds `head` must hold
+ * for Claude Code to resume it as it resumes the transcript, read from the
+ * transcript alone so they can be held against what braid stored. Of the
+ * session's own lines (those braid saved for it), everything since the last
+ * compaction, and the messages that compaction kept; of lines copied from the
+ * session it continues, the chain to `head` and what parallel tool calls left
+ * beside it.
+ */
+export function resumeLines(lines: Line[], head: string, stored: Rec[], session: string): Line[] {
+  const byUuid = new Map(lines.flatMap((l) => (typeof l.uuid === "string" ? [[l.uuid, l] as const] : [])));
+  const leaf = byUuid.get(head) ?? lines.find((l) => typeof l.uuid === "string" && head.startsWith(`${l.uuid}:`));
+  const chain: Line[] = [];
+  const seen = new Set<unknown>();
+  for (let l = leaf; l && !seen.has(l.uuid); l = typeof l.parentUuid === "string" ? byUuid.get(l.parentUuid) : undefined) {
+    seen.add(l.uuid);
+    chain.push(l);
+  }
+  chain.reverse();
+  const results = (l: Line) => (l.type === "user" ? blocksOf(l).flatMap((b) => (b.type === "tool_result" ? [String(b.tool_use_id)] : [])) : []);
+  const calls = (l: Line) => (l.type === "assistant" ? blocksOf(l).flatMap((b) => (b.type === "tool_use" ? [String(b.id)] : [])) : []);
+  const response = (l: Line | undefined) => (l?.type === "assistant" ? (l.message as { id?: unknown } | undefined)?.id : undefined);
+  const holder = new Map<string, Line>();
+  const responses = new Map<unknown, Line[]>();
+  for (const l of lines) {
+    if (l.isSidechain) continue;
+    for (const id of results(l)) if (!holder.has(id)) holder.set(id, l);
+    if (typeof response(l) === "string" && !seen.has(l.uuid)) responses.set(response(l), [...(responses.get(response(l)) ?? []), l]);
+  }
+  const path: Line[] = [];
+  const taken = new Set<Line>(chain);
+  let waiting: Line[] = [];
+  const children = new Map<unknown, Line[]>();
+  for (const l of lines) if (typeof l.parentUuid === "string") children.set(l.parentUuid, [...(children.get(l.parentUuid) ?? []), l]);
+  const bring = (l: Line) => {
+    taken.add(l);
+    waiting.push(l);
+    for (const c of children.get(l.uuid) ?? []) if (c.type === "attachment" && !taken.has(c)) bring(c);
+  };
+  const linked = (l: Line) => !taken.has(l) && typeof l.parentUuid === "string" && taken.has(byUuid.get(l.parentUuid)!);
+  const answer = (l: Line) => {
+    for (const id of calls(l)) {
+      const r = holder.get(id);
+      if (r && linked(r)) bring(r);
+    }
+  };
+  const order = new Map(lines.map((l, i) => [l, i]));
+  chain.forEach((l, i) => {
+    if (l.type !== "assistant") {
+      path.push(...[...waiting, l].sort((a, b) => order.get(a)! - order.get(b)!));
+      waiting = [];
+      return;
+    }
+    path.push(l);
+    answer(l);
+    if (typeof response(l) !== "string" || response(chain[i + 1]) === response(l)) return;
+    for (const rest of responses.get(response(l)) ?? []) {
+      if (!linked(rest)) continue;
+      taken.add(rest);
+      path.push(rest);
+      answer(rest);
+    }
+  });
+  // Of the session's own lines, everything since the last compaction, up to the last line braid saved.
+  const kept = new Set(keptUuids(chain[0]));
+  const ids = new Set(stored.map((r) => r.id));
+  const tag = `@${session.slice(0, 8)}`;
+  const mine = (l: Line, i: number) => (typeof l.uuid === "string" ? ids.has(l.uuid) : ids.has(`claude-line-${i + 1}${tag}`));
+  const context = new Set(path);
+  const from = chain[0]?.subtype === "compact_boundary" ? lines.indexOf(chain[0]) : 0;
+  const last = lines.findLastIndex((l, i) => mine(l, i));
+  return lines.filter((l, i) => {
+    if (i > last) return false;
+    if (typeof l.uuid === "string" && kept.has(l.uuid)) return true;
+    if (!mine(l, i)) return context.has(l);
+    return i >= from && !SOURCE_ONLY.has(String(l.type));
+  });
+}
+
+/**
+ * Lines as Claude Code reads them, comparable across session files: each
+ * mention of another line, outside the message, becomes that line's place in
+ * the list, and the session id and working directory are left out.
+ */
+function canonical(lines: Line[]): string[] {
+  const at = new Map(lines.flatMap((l, i) => (typeof l.uuid === "string" ? [[l.uuid, i] as const] : [])));
+  // A parent outside the list ends the chain, whether named or not; any other id is compared as it is.
+  const parent = (v: unknown): unknown => (typeof v === "string" && at.has(v) ? `#${at.get(v)}` : "#elsewhere");
+  const deep = (v: unknown): unknown =>
+    typeof v === "string" ? (at.has(v) ? `#${at.get(v)}` : v) : Array.isArray(v) ? v.map(deep) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, deep(x)])) : v;
+  return lines.map((l) => {
+    const out: Line = {};
+    for (const [k, v] of Object.entries(l)) {
+      if (k === "sessionId" || k === "cwd" || k === "isSidechain") continue;
+      out[k] = k === "parentUuid" ? parent(v) : k === "message" ? v : deep(v);
+    }
+    return stable(out);
+  });
+}
+
+const isNative = (r: Rec) => (r.native as { source?: string } | undefined)?.source === "claude-code";
 
 /** What a message says, as a person reading it sees it: role, text, tool calls and results. */
 function said(r: Rec): string {
@@ -96,7 +221,7 @@ export function verify(repo: Repo, session: string, remote: string): Verified {
   const stored = readRecords(ref, { gitDir: repo.store });
   const agents = readAgents(ref, { gitDir: repo.store });
   const all = conversation(repo, state.conv, remote);
-  const replayed = new Set([...all.keys()].map((id) => uuidFor(id)));
+  const replayed = replayedIds(all.values());
   const elsewhere = (id: string) => all.has(id) || replayed.has(id);
 
   // Saved.
@@ -120,23 +245,27 @@ export function verify(repo: Repo, session: string, remote: string): Verified {
   // Loads.
   const head = lastTurn(stored) ?? stored.at(-1)?.id;
   if (head) {
-    const parents = new Map([...all.values()].map((r) => [r.id, r.parentId ?? null]));
-    const path = ancestry(head, parents)
-      .reverse()
-      .map((id) => all.get(id))
-      .filter((r): r is Rec => !!r && r.type !== "transcript");
-    const header = { type: "transcript", atxf: "0.1", id: session, time: path[0]?.time ?? "", source: { agent: "braid", sessionId: session } };
-    const text = claudeCode.fromAtxf({ header, records: path } as never, { carry: false, sessionId: session });
-    const back = (claudeCode.toAtxf(text, { integrity: false }).records as unknown as Rec[]).filter((r) => r.type === "message");
-    const before = path.filter((r) => r.type === "message");
-    const differ = before.findIndex((r, i) => !back[i] || said(r) !== said(back[i]!));
-    if (differ >= 0 || back.length !== before.length) {
-      const at = differ >= 0 ? differ : Math.min(before.length, back.length);
-      problems.push(`loads: ${before.length} messages, ${back.length} after loading; they differ from message ${at + 1}${before[at] ? `: ${describe(before[at]!, 80)}` : ""}`);
-    }
+    const fork = forkRecords(all, stored, head);
+    const text = forkText(fork, session, "/");
+    // Every message a fork writes reads back as it was saved.
+    const onPath = new Set(fork.path.map((r) => r.id));
+    const written = fork.records.filter((r) => r.type === "message" && (isNative(r) || onPath.has(r.id)));
+    const original = replayedIds(fork.records);
+    const back = new Map((claudeCode.toAtxf(text, { integrity: false }).records as unknown as Rec[]).map((r) => [original.get(r.id) ?? r.id, r]));
+    const lost = written.filter((r) => !back.has(r.id) || said(back.get(r.id)!) !== said(r));
+    if (lost.length) problems.push(`loads: ${lost.length} of the ${written.length} messages a fork writes read back otherwise, from: ${describe(lost[0]!, 80)}`);
     // Claude Code starts the chain again after a compaction: a fork resumes from its summary, as Claude Code does.
-    const since = path[0]?.type === "custom" && String(path[0].name ?? "").includes("compact") ? " since the last compaction" : "";
-    checked.push(`loads: ${before.length} messages${since}, the same after a fork`);
+    const since = fork.path[0]?.type === "custom" && String(fork.path[0].name ?? "").includes("compact") ? " since the last compaction" : "";
+    if (state.transcript && existsSync(state.transcript)) {
+      // What Claude Code reads to resume the transcript itself, against what it reads from a fork.
+      const resumed = canonical(resumeLines(readLines(state.transcript), head, stored, session));
+      const forked = canonical(text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as Line));
+      const at = resumed.findIndex((l, i) => l !== forked[i]);
+      if (at >= 0 || resumed.length !== forked.length) {
+        const i = at >= 0 ? at : Math.min(resumed.length, forked.length);
+        problems.push(`loads: Claude Code reads ${resumed.length} lines to resume the transcript and ${forked.length} from a fork; they differ from line ${i + 1}: ${(resumed[i] ?? forked[i] ?? "").slice(0, 120)}`);
+      } else checked.push(`loads: ${resumed.length} lines${since}, the same in a fork as in the transcript`);
+    } else checked.push(`loads: ${written.length} messages${since}, the same after a fork`);
   }
 
   // Store.

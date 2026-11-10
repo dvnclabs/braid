@@ -93,6 +93,9 @@ test("reading a transcript in windows gives the records of reading it whole", ()
     t.user(`step ${i} ${"x".repeat(i * 40)}`);
     appendFileSync(t.path, JSON.stringify({ type: "queue-operation", operation: "enqueue", sessionId: session }) + "\n");
     t.assistant(`done ${i}`);
+    // A last prompt pointing back further than the overlap reaches.
+    const first = JSON.parse(readFileSync(t.path, "utf8").split("\n")[0]!).uuid;
+    if (i === 9) appendFileSync(t.path, JSON.stringify({ type: "last-prompt", lastPrompt: "step 0", leafUuid: first, sessionId: session }) + "\n");
   }
   const whole = readWindow(t.path, START, session)!;
   assert.equal(whole.more, false);
@@ -105,9 +108,9 @@ test("reading a transcript in windows gives the records of reading it whole", ()
     pieces.push(...w.records.filter((r) => !seen.has(r.id)));
     cursor = w.cursor;
   }
-  const shape = (rs: Rec[]) => rs.map((r) => `${r.type}:${r.id}<${r.parentId ?? ""}`);
+  const shape = (rs: Rec[]) => rs.map((r) => `${r.type}:${r.id}<${r.parentId ?? ""}${r.targetId ? `>${String(r.targetId)}` : ""}`);
   assert.deepEqual(shape(pieces), shape(whole.records));
-  assert.ok(whole.records.some((r) => r.id === `claude-line-35@5b0e2c1a`), "line ids count lines of the whole file");
+  assert.ok(whole.records.some((r) => r.id === `claude-line-36@5b0e2c1a`), "line ids count lines of the whole file");
   assert.equal(cursor.offset, statSync(t.path).size);
   assert.equal(intact(t.path, cursor), true);
 

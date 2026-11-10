@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { readAgents, readRecords } from "./chunks.ts";
 import { forEachRef, type GitOptions } from "./git.ts";
-import { ancestry, braidOf, describe, isTurn, type Rec } from "./records.ts";
+import { braidOf, contextPath, describe, isTurn, type Rec } from "./records.ts";
 import { sessionsFor } from "./links.ts";
 import { AUTOPILOT } from "./fetch.ts";
 import { readConfig, remoteRefs, SESSION_REFS, type Repo } from "./repo.ts";
@@ -120,8 +120,7 @@ export function briefing(repo: Repo, found: Found, remote: string): Briefing {
   const records = conversation(repo, found.conv, remote);
   const own = readRecords(found.ref, found.opts);
   const head = [...own].reverse().find(isTurn)?.id ?? own.at(-1)?.id ?? "";
-  const parents = new Map([...records.values()].map((r) => [r.id, r.parentId ?? null]));
-  const path = ancestry(head, parents).reverse().map((id) => records.get(id)!);
+  const path = contextPath(head, records);
   const first = own.find((r) => braidOf(r).actor);
   const actor = first ? braidOf(first).actor : undefined;
   const title =

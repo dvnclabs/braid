@@ -106,7 +106,7 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
     const fresh = (native: Rec[]): Rec[] => {
       if (replayed) {
         return native
-          .filter((r) => !replayed.has(r.id) && unsaved(r))
+          .filter((r) => !replayed.has(r.id) && !copied(r) && unsaved(r))
           .map((r) => (r.parentId && replayed.has(r.parentId) ? { ...r, parentId: replayed.get(r.parentId) } : r));
       }
       if (source) return native.filter((r) => !source!.known.has(r.id) && unsaved(r));
@@ -119,9 +119,12 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
     };
 
     const agents = collectAgents(repo, state, path);
-    // A replayed session's file starts with copies of the source's records, under uuids derived from their ids.
+    // A replayed session's file starts with copies of the source's records, under uuids derived from their ids;
+    // the copied lines without a uuid (the session's settings) are named after their line, among the first it wrote.
     const replayed =
       state.chunks === 0 && state.forkFrom?.replayed ? replayedIds(conversation(repo, state.forkFrom.conv, readConfig(repo).remote).values()) : undefined;
+    const wrote = replayed ? (state.forkFrom?.lines ?? 0) : 0;
+    const copied = (r: Rec) => Number(/^claude-line-(\d+)@/.exec(r.id)?.[1] ?? Infinity) <= wrote;
     let window = readWindow(path, cursor, session);
     if (window && state.chunks === 0 && !state.forkFrom) {
       source = forkSource(repo, session, window.records);

@@ -2,7 +2,7 @@
 
 // src/cli.ts
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { appendFileSync as appendFileSync2, existsSync as existsSync15, mkdirSync as mkdirSync10, mkdtempSync, readdirSync as readdirSync5, readFileSync as readFileSync10, rmSync as rmSync3, statSync as statSync4, writeFileSync as writeFileSync9 } from "node:fs";
+import { appendFileSync as appendFileSync2, existsSync as existsSync15, mkdirSync as mkdirSync10, mkdtempSync, readdirSync as readdirSync5, readFileSync as readFileSync11, rmSync as rmSync3, statSync as statSync4, writeFileSync as writeFileSync9 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as join15 } from "node:path";
 import { parseArgs } from "node:util";
@@ -167,6 +167,56 @@ function ancestry(head, parents) {
     out.push(id);
     id = parents.get(id);
   }
+  return out;
+}
+var isAttachment = (r) => r.type === "custom" && String(r.name ?? "").startsWith("attachment");
+var callIds = (r) => r.type === "message" && r.role === "assistant" && Array.isArray(r.content) ? r.content.flatMap((b) => b?.type === "tool_call" && typeof b.id === "string" ? [b.id] : []) : [];
+function contextPath(head, all) {
+  const parents = new Map([...all.values()].map((r) => [r.id, r.parentId ?? null]));
+  const path2 = ancestry(head, parents).reverse().map((id) => all.get(id)).filter((r) => !!r && r.type !== "transcript");
+  const onPath = new Set(path2.map((r) => r.id));
+  const isReply = (r) => r?.type === "message" && r.role === "assistant";
+  const results = /* @__PURE__ */ new Map();
+  const responses = /* @__PURE__ */ new Map();
+  for (const r of all.values()) {
+    if (r.role === "tool" && typeof r.toolCallId === "string" && !results.has(r.toolCallId)) results.set(r.toolCallId, r);
+    if (isReply(r) && typeof r.responseId === "string" && !onPath.has(r.id)) responses.set(r.responseId, [...responses.get(r.responseId) ?? [], r]);
+  }
+  const children = /* @__PURE__ */ new Map();
+  for (const r of all.values()) if (r.parentId) children.set(r.parentId, [...children.get(r.parentId) ?? [], r]);
+  const out = [];
+  const taken = new Set(onPath);
+  let waiting = [];
+  const bring = (r) => {
+    taken.add(r.id);
+    waiting.push(r);
+    for (const c of children.get(r.id) ?? []) if (isAttachment(c) && !taken.has(c.id)) bring(c);
+  };
+  const linked = (r) => !taken.has(r.id) && !!r.parentId && taken.has(r.parentId);
+  const answer = (r) => {
+    for (const id of callIds(r)) {
+      const result = results.get(id);
+      if (result && linked(result)) bring(result);
+    }
+  };
+  const order = new Map([...all.keys()].map((id, i) => [id, i]));
+  path2.forEach((r, i) => {
+    if (!isReply(r)) {
+      out.push(...[...waiting, r].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0)));
+      waiting = [];
+      return;
+    }
+    out.push(r);
+    answer(r);
+    const next = path2[i + 1];
+    if (typeof r.responseId !== "string" || isReply(next) && next.responseId === r.responseId) return;
+    for (const rest of responses.get(r.responseId) ?? []) {
+      if (!linked(rest)) continue;
+      taken.add(rest.id);
+      out.push(rest);
+      answer(rest);
+    }
+  });
   return out;
 }
 
@@ -1144,9 +1194,9 @@ var jsonl = {
   },
   canonical: jsonlLine
 };
-function nativeOf(units, source, format, canonical = jsonlLine) {
+function nativeOf(units, source, format, canonical2 = jsonlLine) {
   const records = units.map((unit) => unit.value);
-  const exact = units.some((unit) => unit.raw !== canonical(unit.value));
+  const exact = units.some((unit) => unit.raw !== canonical2(unit.value));
   return {
     source,
     ...format ? { format } : {},
@@ -1157,8 +1207,8 @@ function nativeOf(units, source, format, canonical = jsonlLine) {
 function nativeOfShared(of, source, format) {
   return { source, ...format ? { format } : {}, records: [], of };
 }
-function unitsOfNative(native, canonical = jsonlLine) {
-  return native.records.map((value, index2) => ({ value, raw: native.raw?.[index2] ?? canonical(value) }));
+function unitsOfNative(native, canonical2 = jsonlLine) {
+  return native.records.map((value, index2) => ({ value, raw: native.raw?.[index2] ?? canonical2(value) }));
 }
 function isPureNative(transcript, agent) {
   const { header: header2, records } = transcript;
@@ -1168,12 +1218,12 @@ function isPureNative(transcript, agent) {
     return false;
   return records.every((record2) => record2.native?.source === agent);
 }
-function nativeUnits(transcript, canonical = jsonlLine) {
+function nativeUnits(transcript, canonical2 = jsonlLine) {
   const units = [];
   if (transcript.header.native)
-    units.push(...unitsOfNative(transcript.header.native, canonical));
+    units.push(...unitsOfNative(transcript.header.native, canonical2));
   for (const record2 of transcript.records)
-    units.push(...unitsOfNative(record2.native, canonical));
+    units.push(...unitsOfNative(record2.native, canonical2));
   return units;
 }
 
@@ -1901,8 +1951,7 @@ function briefing(repo, found, remote) {
   const records = conversation(repo, found.conv, remote);
   const own = readRecords(found.ref, found.opts);
   const head = [...own].reverse().find(isTurn)?.id ?? own.at(-1)?.id ?? "";
-  const parents = new Map([...records.values()].map((r) => [r.id, r.parentId ?? null]));
-  const path2 = ancestry(head, parents).reverse().map((id) => records.get(id));
+  const path2 = contextPath(head, records);
   const first = own.find((r) => braidOf(r).actor);
   const actor = first ? braidOf(first).actor : void 0;
   const title = `braid: session ${found.session.slice(0, 8)} (${sessionName(own, found.session)}) by ${actor?.actorId ?? "unknown"}, ${own.filter(isTurn).length} records of its own, ${path2.filter(isTurn).length} on its branch.`;
@@ -1955,10 +2004,71 @@ function rewrite(value, pairs) {
   if (Array.isArray(value)) return value.map((v) => rewrite(v, pairs));
   if (value && typeof value === "object") {
     const obj = value;
-    if (obj.type === "reasoning") return value;
+    if (KEEP.has(String(obj.type))) return value;
     return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, k === "native" || k === "replay" ? v : rewrite(v, pairs)]));
   }
   return value;
+}
+var KEEP = /* @__PURE__ */ new Set(["reasoning", "thinking", "redacted_thinking", "image", "base64"]);
+function ownLine(r) {
+  const n = r.native;
+  const line = n?.source === "claude-code" && n.records?.length === 1 ? n.records[0] : void 0;
+  return line && typeof line === "object" ? line : void 0;
+}
+var readWith = (r) => r.native?.of;
+var SOURCE_ONLY = /* @__PURE__ */ new Set(["api-request", "api-request-blob", "api-request-shape", "file-history-snapshot", "file-history-delta", "queue-operation", "last-prompt"]);
+function keptUuids(boundary) {
+  if (boundary?.subtype !== "compact_boundary") return [];
+  const kept = boundary.compactMetadata?.preservedMessages;
+  const list = kept?.allUuids ?? kept?.uuids;
+  return Array.isArray(list) ? list.filter((u) => typeof u === "string") : [];
+}
+function forkRecords(all, own, head) {
+  const path2 = contextPath(head, all);
+  const mine = new Set(own.map((r) => r.id));
+  const kept = new Set(path2[0] ? keptUuids(ownLine(path2[0])) : []);
+  const compacted = path2[0] && ownLine(path2[0])?.subtype === "compact_boundary" ? path2[0].id : void 0;
+  const from = Math.max(0, own.findIndex((r) => r.id === compacted));
+  const before = [...[...kept].flatMap((u) => mine.has(u) || !all.has(u) ? [] : [all.get(u)]), ...path2.filter((r) => !mine.has(r.id))];
+  const since = own.filter((r, i) => (i >= from || kept.has(r.id)) && !SOURCE_ONLY.has(String(ownLine(r)?.type)));
+  return { records: [...before, ...since], path: path2 };
+}
+function forkText(fork, session, cwd, pairs = []) {
+  const { records, path: path2 } = fork;
+  const header2 = { type: "transcript", atxf: "0.1", id: session, time: path2[0]?.time ?? (/* @__PURE__ */ new Date()).toISOString(), source: { agent: "braid", sessionId: session }, workspace: { cwd } };
+  const encoded = claudeCode.fromAtxf({ header: header2, records: rewrite(path2, pairs) }, { carry: false, sessionId: session }).split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const byUuid = new Map(encoded.map((l) => [l.uuid, l]));
+  const lines = [];
+  const lineOf = /* @__PURE__ */ new Map();
+  for (const r of records) {
+    const own = ownLine(r);
+    const of = readWith(r);
+    if (own) lines.push({ r, line: rewrite(own, pairs) });
+    else if (of && lineOf.has(of)) {
+      lineOf.set(r.id, lineOf.get(of));
+      continue;
+    } else {
+      const line = byUuid.get(uuidFor(r.id));
+      if (!line) continue;
+      lines.push({ r, line });
+    }
+    lineOf.set(r.id, uuidFor(r.id));
+  }
+  const renamed = new Map(lines.flatMap(({ r, line }) => typeof line.uuid === "string" ? [[line.uuid, uuidFor(r.id)]] : []));
+  const rename = (v) => typeof v === "string" ? renamed.get(v) ?? v : Array.isArray(v) ? v.map(rename) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, rename(x)])) : v;
+  let previous2 = null;
+  const out = lines.map(({ r, line }) => {
+    const next = { ...Object.fromEntries(Object.entries(line).map(([k, v]) => [k, k === "message" ? v : rename(v)])), sessionId: session };
+    if ("uuid" in next) {
+      const kept = typeof line.parentUuid === "string" && !renamed.has(line.parentUuid) ? line.parentUuid : previous2;
+      const parent = r.parentId == null ? null : lineOf.get(r.parentId) ?? lineOf.get(r.parentId.split(":")[0]) ?? kept;
+      Object.assign(next, { parentUuid: parent, uuid: uuidFor(r.id), isSidechain: false });
+      previous2 = next.uuid;
+    }
+    return JSON.stringify(next);
+  });
+  return out.length ? `${out.join("\n")}
+` : "";
 }
 function sourceCwd(records) {
   for (const r of records) {
@@ -1974,28 +2084,31 @@ function replay(repo, found, remote, opts = {}) {
   const own = readRecords(found.ref, found.opts);
   const head = lastTurn(own) ?? own.at(-1)?.id;
   if (!head) throw new Error(`session ${found.session.slice(0, 8)} has no records to replay`);
-  const parents = new Map([...all.values()].map((r) => [r.id, r.parentId ?? null]));
-  const path2 = ancestry(head, parents).reverse().map((id) => all.get(id)).filter((r) => r && r.type !== "transcript");
+  const fork = forkRecords(all, own, head);
   const cwd = realpathSync2(opts.cwd ?? process.cwd());
   const from = sourceCwd([...all.values()]);
-  const pairs = [...from ? [[from, cwd]] : [], ...userConfig().paths];
+  const within = !!from && (from === cwd || cwd.startsWith(`${from}/`) || from.startsWith(`${cwd}/`));
+  const pairs = [...from && !within ? [[from, cwd]] : [], ...userConfig().paths];
   const session = randomUUID();
-  const header2 = { type: "transcript", atxf: "0.1", id: session, time: path2[0]?.time ?? (/* @__PURE__ */ new Date()).toISOString(), source: { agent: "braid", sessionId: session }, workspace: { cwd } };
-  const text = claudeCode.fromAtxf({ header: header2, records: rewrite(path2, pairs) }, { carry: false, sessionId: session });
+  const text = forkText(fork, session, cwd, pairs);
   const dir = projectDir(cwd);
   mkdirSync5(dir, { recursive: true });
   const file2 = join6(dir, `${session}.jsonl`);
-  writeFileSync4(file2, text.endsWith("\n") ? text : `${text}
-`);
+  writeFileSync4(file2, text);
   const state = loadState(repo, session) ?? newState(session, file2);
   const first = own.find((r) => braidOf(r).actor);
-  state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : void 0, replayed: true };
+  const lines = text.split("\n").filter(Boolean).length;
+  state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : void 0, replayed: true, lines };
   saveState(repo, state);
-  return { session, file: file2, cwd, records: text.split("\n").filter(Boolean).length };
+  return { session, file: file2, cwd, records: lines };
 }
 function replayedIds(records) {
   const map = /* @__PURE__ */ new Map();
-  for (const r of records) map.set(uuidFor(r.id), r.id);
+  for (const r of records) {
+    map.set(uuidFor(r.id), r.id);
+    const of = readWith(r);
+    if (of && r.id.startsWith(`${of}:`)) map.set(`${uuidFor(of)}${r.id.slice(of.length)}`, r.id);
+  }
   return map;
 }
 
@@ -2330,6 +2443,9 @@ function renumber(records, base, session) {
     for (const key of ["parentId", "targetId", "fromId"]) if (key in r) out[key] = fix(r[key]);
     const parentUuid = r.native?.records?.[0]?.parentUuid;
     if (out.parentId === null && typeof parentUuid === "string" && base > 0) out.parentId = parentUuid;
+    const leafUuid = r.native?.records?.[0]?.leafUuid;
+    if (out.type === "custom" && out.name === "last-prompt" && typeof leafUuid === "string" && base > 0)
+      return { type: "leaf", id: out.id, time: out.time, targetId: leafUuid, reason: "navigate", native: out.native, ...out.ext ? { ext: out.ext } : {} };
     return out;
   });
 }
@@ -2445,7 +2561,7 @@ function save(repo, session, transcript, opts = {}) {
     const unsaved = (r) => state.chunks === 0 || !savedIds().has(r.id);
     const fresh = (native) => {
       if (replayed) {
-        return native.filter((r) => !replayed.has(r.id) && unsaved(r)).map((r) => r.parentId && replayed.has(r.parentId) ? { ...r, parentId: replayed.get(r.parentId) } : r);
+        return native.filter((r) => !replayed.has(r.id) && !copied(r) && unsaved(r)).map((r) => r.parentId && replayed.has(r.parentId) ? { ...r, parentId: replayed.get(r.parentId) } : r);
       }
       if (source) return native.filter((r) => !source.known.has(r.id) && unsaved(r));
       if (state.chunks === 0 && !state.last) return native;
@@ -2457,6 +2573,8 @@ function save(repo, session, transcript, opts = {}) {
     };
     const agents = collectAgents(repo, state, path2);
     const replayed = state.chunks === 0 && state.forkFrom?.replayed ? replayedIds(conversation(repo, state.forkFrom.conv, readConfig(repo).remote).values()) : void 0;
+    const wrote = replayed ? state.forkFrom?.lines ?? 0 : 0;
+    const copied = (r) => Number(/^claude-line-(\d+)@/.exec(r.id)?.[1] ?? Infinity) <= wrote;
     let window = readWindow(path2, cursor, session);
     if (window && state.chunks === 0 && !state.forkFrom) {
       source = forkSource(repo, session, window.records);
@@ -2959,13 +3077,13 @@ function setup(opts = {}) {
 }
 
 // src/verify.ts
-import { existsSync as existsSync11, readdirSync as readdirSync3 } from "node:fs";
+import { existsSync as existsSync11, readdirSync as readdirSync3, readFileSync as readFileSync9 } from "node:fs";
 import { join as join11 } from "node:path";
 function readAll(path2, id) {
   const out = /* @__PURE__ */ new Map();
   let cursor = START;
   for (let w = readWindow(path2, cursor, id); w; w = w.more ? readWindow(path2, cursor, id) : void 0) {
-    for (const r of w.records) out.set(r.id, r);
+    for (const r of w.records) if (!out.has(r.id)) out.set(r.id, r);
     cursor = w.cursor;
   }
   return [...out.values()];
@@ -2979,6 +3097,7 @@ function content(r) {
   const { braid: _b, ...otherExt } = ext ?? {};
   return stable2(Object.keys(otherExt).length ? { ...rest, ext: otherExt } : rest);
 }
+var which = (r) => describe(r, 80) || `${r.type}${r.name ? ` ${String(r.name)}` : ""} ${r.id}`;
 function stable2(value) {
   return JSON.stringify(value, (_k, v) => v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
 }
@@ -2988,14 +3107,110 @@ function compare(what, transcript, stored, elsewhere, problems) {
   if (twice) problems.push(`${what}: ${twice} records are saved twice`);
   const missing = transcript.filter((r) => !byId.has(r.id) && !elsewhere(r.id));
   const changed = transcript.filter((r) => byId.has(r.id) && content(byId.get(r.id)) !== content(r));
-  if (missing.length) problems.push(`${what}: ${missing.length} records of the transcript are not saved, from: ${describe(missing[0], 80)}`);
-  if (changed.length) problems.push(`${what}: ${changed.length} saved records differ from the transcript, from: ${describe(changed[0], 80)}`);
+  if (missing.length) problems.push(`${what}: ${missing.length} records of the transcript are not saved, from: ${which(missing[0])}`);
+  if (changed.length) problems.push(`${what}: ${changed.length} saved records differ from the transcript, from: ${which(changed[0])}`);
   const at = new Map(transcript.map((r, i) => [r.id, i]));
   const order = stored.map((r) => at.get(r.id)).filter((i) => i !== void 0);
   const swaps = order.filter((i, k) => k > 0 && i < order[k - 1]).length;
   if (swaps) problems.push(`${what}: ${swaps} saved records are out of the transcript's order`);
   return transcript.length - missing.length;
 }
+function readLines(path2) {
+  return readFileSync9(path2, "utf8").split("\n").flatMap((l) => {
+    try {
+      const v = JSON.parse(l);
+      return v && typeof v === "object" ? [v] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+var blocksOf = (l) => {
+  const c = l.message?.content;
+  return Array.isArray(c) ? c : [];
+};
+function resumeLines(lines, head, stored, session) {
+  const byUuid = new Map(lines.flatMap((l) => typeof l.uuid === "string" ? [[l.uuid, l]] : []));
+  const leaf = byUuid.get(head) ?? lines.find((l) => typeof l.uuid === "string" && head.startsWith(`${l.uuid}:`));
+  const chain = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (let l = leaf; l && !seen.has(l.uuid); l = typeof l.parentUuid === "string" ? byUuid.get(l.parentUuid) : void 0) {
+    seen.add(l.uuid);
+    chain.push(l);
+  }
+  chain.reverse();
+  const results = (l) => l.type === "user" ? blocksOf(l).flatMap((b) => b.type === "tool_result" ? [String(b.tool_use_id)] : []) : [];
+  const calls = (l) => l.type === "assistant" ? blocksOf(l).flatMap((b) => b.type === "tool_use" ? [String(b.id)] : []) : [];
+  const response = (l) => l?.type === "assistant" ? l.message?.id : void 0;
+  const holder = /* @__PURE__ */ new Map();
+  const responses = /* @__PURE__ */ new Map();
+  for (const l of lines) {
+    if (l.isSidechain) continue;
+    for (const id of results(l)) if (!holder.has(id)) holder.set(id, l);
+    if (typeof response(l) === "string" && !seen.has(l.uuid)) responses.set(response(l), [...responses.get(response(l)) ?? [], l]);
+  }
+  const path2 = [];
+  const taken = new Set(chain);
+  let waiting = [];
+  const children = /* @__PURE__ */ new Map();
+  for (const l of lines) if (typeof l.parentUuid === "string") children.set(l.parentUuid, [...children.get(l.parentUuid) ?? [], l]);
+  const bring = (l) => {
+    taken.add(l);
+    waiting.push(l);
+    for (const c of children.get(l.uuid) ?? []) if (c.type === "attachment" && !taken.has(c)) bring(c);
+  };
+  const linked = (l) => !taken.has(l) && typeof l.parentUuid === "string" && taken.has(byUuid.get(l.parentUuid));
+  const answer = (l) => {
+    for (const id of calls(l)) {
+      const r = holder.get(id);
+      if (r && linked(r)) bring(r);
+    }
+  };
+  const order = new Map(lines.map((l, i) => [l, i]));
+  chain.forEach((l, i) => {
+    if (l.type !== "assistant") {
+      path2.push(...[...waiting, l].sort((a, b) => order.get(a) - order.get(b)));
+      waiting = [];
+      return;
+    }
+    path2.push(l);
+    answer(l);
+    if (typeof response(l) !== "string" || response(chain[i + 1]) === response(l)) return;
+    for (const rest of responses.get(response(l)) ?? []) {
+      if (!linked(rest)) continue;
+      taken.add(rest);
+      path2.push(rest);
+      answer(rest);
+    }
+  });
+  const kept = new Set(keptUuids(chain[0]));
+  const ids = new Set(stored.map((r) => r.id));
+  const tag = `@${session.slice(0, 8)}`;
+  const mine = (l, i) => typeof l.uuid === "string" ? ids.has(l.uuid) : ids.has(`claude-line-${i + 1}${tag}`);
+  const context2 = new Set(path2);
+  const from = chain[0]?.subtype === "compact_boundary" ? lines.indexOf(chain[0]) : 0;
+  const last = lines.findLastIndex((l, i) => mine(l, i));
+  return lines.filter((l, i) => {
+    if (i > last) return false;
+    if (typeof l.uuid === "string" && kept.has(l.uuid)) return true;
+    if (!mine(l, i)) return context2.has(l);
+    return i >= from && !SOURCE_ONLY.has(String(l.type));
+  });
+}
+function canonical(lines) {
+  const at = new Map(lines.flatMap((l, i) => typeof l.uuid === "string" ? [[l.uuid, i]] : []));
+  const parent = (v) => typeof v === "string" && at.has(v) ? `#${at.get(v)}` : "#elsewhere";
+  const deep = (v) => typeof v === "string" ? at.has(v) ? `#${at.get(v)}` : v : Array.isArray(v) ? v.map(deep) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, deep(x)])) : v;
+  return lines.map((l) => {
+    const out = {};
+    for (const [k, v] of Object.entries(l)) {
+      if (k === "sessionId" || k === "cwd" || k === "isSidechain") continue;
+      out[k] = k === "parentUuid" ? parent(v) : k === "message" ? v : deep(v);
+    }
+    return stable2(out);
+  });
+}
+var isNative = (r) => r.native?.source === "claude-code";
 function said(r) {
   const blocks = Array.isArray(r.content) ? r.content : [{ type: "text", text: r.content }];
   return stable2({
@@ -3014,7 +3229,7 @@ function verify(repo, session, remote) {
   const stored = readRecords(ref, { gitDir: repo.store });
   const agents = readAgents(ref, { gitDir: repo.store });
   const all = conversation(repo, state.conv, remote);
-  const replayed = new Set([...all.keys()].map((id) => uuidFor(id)));
+  const replayed = replayedIds(all.values());
   const elsewhere = (id) => all.has(id) || replayed.has(id);
   if (state.transcript && existsSync11(state.transcript)) {
     const n = compare("saved", readAll(state.transcript, session), stored, elsewhere, problems);
@@ -3034,19 +3249,24 @@ function verify(repo, session, remote) {
   } else checked.push("saved: the transcript is gone, so only the store is checked");
   const head = lastTurn(stored) ?? stored.at(-1)?.id;
   if (head) {
-    const parents = new Map([...all.values()].map((r) => [r.id, r.parentId ?? null]));
-    const path2 = ancestry(head, parents).reverse().map((id) => all.get(id)).filter((r) => !!r && r.type !== "transcript");
-    const header2 = { type: "transcript", atxf: "0.1", id: session, time: path2[0]?.time ?? "", source: { agent: "braid", sessionId: session } };
-    const text = claudeCode.fromAtxf({ header: header2, records: path2 }, { carry: false, sessionId: session });
-    const back = claudeCode.toAtxf(text, { integrity: false }).records.filter((r) => r.type === "message");
-    const before = path2.filter((r) => r.type === "message");
-    const differ = before.findIndex((r, i) => !back[i] || said(r) !== said(back[i]));
-    if (differ >= 0 || back.length !== before.length) {
-      const at = differ >= 0 ? differ : Math.min(before.length, back.length);
-      problems.push(`loads: ${before.length} messages, ${back.length} after loading; they differ from message ${at + 1}${before[at] ? `: ${describe(before[at], 80)}` : ""}`);
-    }
-    const since = path2[0]?.type === "custom" && String(path2[0].name ?? "").includes("compact") ? " since the last compaction" : "";
-    checked.push(`loads: ${before.length} messages${since}, the same after a fork`);
+    const fork = forkRecords(all, stored, head);
+    const text = forkText(fork, session, "/");
+    const onPath = new Set(fork.path.map((r) => r.id));
+    const written = fork.records.filter((r) => r.type === "message" && (isNative(r) || onPath.has(r.id)));
+    const original = replayedIds(fork.records);
+    const back = new Map(claudeCode.toAtxf(text, { integrity: false }).records.map((r) => [original.get(r.id) ?? r.id, r]));
+    const lost = written.filter((r) => !back.has(r.id) || said(back.get(r.id)) !== said(r));
+    if (lost.length) problems.push(`loads: ${lost.length} of the ${written.length} messages a fork writes read back otherwise, from: ${describe(lost[0], 80)}`);
+    const since = fork.path[0]?.type === "custom" && String(fork.path[0].name ?? "").includes("compact") ? " since the last compaction" : "";
+    if (state.transcript && existsSync11(state.transcript)) {
+      const resumed = canonical(resumeLines(readLines(state.transcript), head, stored, session));
+      const forked = canonical(text.split("\n").filter(Boolean).map((l) => JSON.parse(l)));
+      const at = resumed.findIndex((l, i) => l !== forked[i]);
+      if (at >= 0 || resumed.length !== forked.length) {
+        const i = at >= 0 ? at : Math.min(resumed.length, forked.length);
+        problems.push(`loads: Claude Code reads ${resumed.length} lines to resume the transcript and ${forked.length} from a fork; they differ from line ${i + 1}: ${(resumed[i] ?? forked[i] ?? "").slice(0, 120)}`);
+      } else checked.push(`loads: ${resumed.length} lines${since}, the same in a fork as in the transcript`);
+    } else checked.push(`loads: ${written.length} messages${since}, the same after a fork`);
   }
   const fsck = run(["fsck", "--no-dangling", "--no-progress"], { gitDir: repo.store });
   if (fsck.status !== 0 || /error|missing|broken/i.test(fsck.stdout + fsck.stderr)) problems.push(`store: git fsck: ${(fsck.stderr || fsck.stdout).trim().split("\n")[0]}`);
@@ -4056,13 +4276,13 @@ function importOpenclaw(repo, dbPath, only) {
 // src/statusline.ts
 import { spawn as spawn2, spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync14, mkdirSync as mkdirSync9, readFileSync as readFileSync9, statSync as statSync3, writeFileSync as writeFileSync8 } from "node:fs";
+import { existsSync as existsSync14, mkdirSync as mkdirSync9, readFileSync as readFileSync10, statSync as statSync3, writeFileSync as writeFileSync8 } from "node:fs";
 import { join as join14 } from "node:path";
 var hash2 = (s) => createHash3("sha1").update(s).digest("hex").slice(0, 16);
 function previous(stdin) {
   const file2 = join14(configDir(), "statusline.json");
   if (!existsSync14(file2)) return "";
-  const { previous: previous2 } = JSON.parse(readFileSync9(file2, "utf8"));
+  const { previous: previous2 } = JSON.parse(readFileSync10(file2, "utf8"));
   if (!previous2) return "";
   const r = spawnSync4("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
   return (r.stdout ?? "").trimEnd();
@@ -4080,7 +4300,7 @@ function pullRequest(repo) {
   } catch {
   }
   if (!fresh) {
-    writeFileSync8(file2, existsSync14(file2) ? readFileSync9(file2) : "");
+    writeFileSync8(file2, existsSync14(file2) ? readFileSync10(file2) : "");
     const tmp = `${file2}.${process.pid}`;
     spawn2("sh", ["-c", 'gh pr view --json number -q .number > "$T" 2>/dev/null; mv "$T" "$F"'], {
       cwd: repo.top,
@@ -4089,7 +4309,7 @@ function pullRequest(repo) {
       stdio: "ignore"
     }).unref();
   }
-  const n = readFileSync9(file2, "utf8").trim();
+  const n = readFileSync10(file2, "utf8").trim();
   return /^\d{1,7}$/.test(n) ? `#${n}` : "";
 }
 function braidPart(repo, session, remote) {
@@ -4107,7 +4327,7 @@ function braidPart(repo, session, remote) {
     ].join("\n")
   );
   const file2 = join14(repo.dir, "cache", `status-${key}`);
-  if (existsSync14(file2)) return readFileSync9(file2, "utf8");
+  if (existsSync14(file2)) return readFileSync10(file2, "utf8");
   const text = render(computeStatus(repo, session, remote));
   mkdirSync9(join14(repo.dir, "cache"), { recursive: true });
   writeFileSync8(file2, text);
@@ -4190,7 +4410,7 @@ Other
 `;
 function readStdin() {
   try {
-    return readFileSync10(0, "utf8");
+    return readFileSync11(0, "utf8");
   } catch {
     return "";
   }
@@ -4250,7 +4470,7 @@ function editInEditor(text) {
     const editor = process.env.VISUAL || process.env.EDITOR || "vi";
     const r = spawnSync5(`${editor} ${shellWord(file2)}`, { shell: true, stdio: "inherit" });
     if (r.status !== 0) throw new Error(`${editor} exited with ${r.status}; nothing changed`);
-    return readFileSync10(file2, "utf8");
+    return readFileSync11(file2, "utf8");
   } finally {
     rmSync3(dir, { recursive: true, force: true });
   }
