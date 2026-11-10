@@ -224,6 +224,24 @@ function writeChunk(
     delete state.pendingMerge;
   }
 
+  const agentRecords = new Map<string, Rec[]>();
+  for (const [id, a] of agents) {
+    agentRecords.set(id, a.records.map((r) => withBraid(r, { actor, session, agent: id })));
+    if (!a.link) continue;
+    const spawnedBy = toolCallRecord(repo, state, out, a.link.toolUseId) ?? lastNative;
+    out.push({
+      type: "agent_link",
+      id: `braid-agent-${id}`,
+      parentId: spawnedBy,
+      time: now,
+      relation: "spawn",
+      transcriptId: id,
+      ...(a.link.agentType || a.link.description ? { agent: { name: a.link.agentType ?? "subagent", ...(a.link.description ? { role: a.link.description } : {}) } } : {}),
+      ...(a.link.toolUseId ? { toolCallId: a.link.toolUseId } : {}),
+      ext: { braid: { actor, session } },
+    });
+  }
+  // Commit labels go last, so the agent links written in this chunk fall within the commit.
   if (final) {
     const target = lastTurn(out) ?? state.head;
     const commits = codeCommits.map((sha) => ({ sha, message: gitMaybe(["log", "-1", "--format=%s", sha], { cwd: repo.top })?.trim() ?? "" }));
@@ -242,23 +260,6 @@ function writeChunk(
         ext: { braid: { actor, session, ...kind } },
       });
     }
-  }
-  const agentRecords = new Map<string, Rec[]>();
-  for (const [id, a] of agents) {
-    agentRecords.set(id, a.records.map((r) => withBraid(r, { actor, session, agent: id })));
-    if (!a.link) continue;
-    const spawnedBy = toolCallRecord(repo, state, out, a.link.toolUseId) ?? lastNative;
-    out.push({
-      type: "agent_link",
-      id: `braid-agent-${id}`,
-      parentId: spawnedBy,
-      time: now,
-      relation: "spawn",
-      transcriptId: id,
-      ...(a.link.agentType || a.link.description ? { agent: { name: a.link.agentType ?? "subagent", ...(a.link.description ? { role: a.link.description } : {}) } } : {}),
-      ...(a.link.toolUseId ? { toolCallId: a.link.toolUseId } : {}),
-      ext: { braid: { actor, session } },
-    });
   }
   if (out.length === 0 && agentRecords.size === 0) return 0;
 

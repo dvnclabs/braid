@@ -149,6 +149,9 @@ test("save, publish, review, merge", () => {
   assert.equal(mine.find((r) => r.content === "Apply it.").parentId, merge.id, "the next turn continues from the merge");
   const codeLabel = mine.find((r) => r.type === "label" && r.ext?.braid?.code);
   assert.equal(codeLabel?.label, "Retry webhooks", "the agent's git commit is noted in the conversation");
+  const log = braid(s.env, alice, ["log", ALICE]).stdout;
+  assert.match(log, /code +Retry webhooks \([0-9a-f]{7}\)/);
+  assert.match(log, /commit +Retry webhooks\n/);
   assert.match(status()!, /: \*6$/, "the turns since the commit are not committed");
   assert.match(braid(s.env, alice, ["push", "--session", ALICE]).stdout, /up to date/);
 
@@ -213,6 +216,12 @@ test("braid review withholds and hides parts of a session, also after they are p
 
   // Putting back the result puts back its call too.
   assert.match(braid(s.env, repo, ["review", "--undo", "3", "--session", ALICE]).stdout, /2 records put back/);
+  assert.doesNotMatch(braid(s.env, repo, ["review", "--session", ALICE]).stdout, /\n *\d+ ✗/);
+
+  // --last withholds by time, and --undo --last puts the same records back.
+  assert.match(braid(s.env, repo, ["review", "--last", "3650d", "--session", ALICE]).stdout, /\d+ records withheld/);
+  const back = braid(s.env, repo, ["review", "--undo", "--last", "3650d", "--session", ALICE]).stdout;
+  assert.match(back, /\d+ records put back/);
   assert.doesNotMatch(braid(s.env, repo, ["review", "--session", ALICE]).stdout, /\n *\d+ ✗/);
 
   // --all keeps the whole session back.

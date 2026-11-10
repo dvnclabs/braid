@@ -286,12 +286,15 @@ function userConfig() {
   };
   const section = /^\s*\[paths\]\s*$([\s\S]*?)(?=^\s*\[|$(?![\s\S]))/m.exec(text)?.[1] ?? "";
   const paths = [...section.matchAll(/^\s*"([^"]+)"\s*=\s*"([^"]+)"/gm)].map((m) => [m[1], m[2]]);
-  return { autocommit: flag("autocommit"), autopush: flag("autopush"), paths };
+  const autopush = flag("autopush") ?? (/^\s*publish\s*=\s*"off"/m.test(top) ? false : void 0);
+  return { autocommit: flag("autocommit"), autopush, paths };
 }
 function readConfig(repo) {
   const config2 = { gitHooks: true, autocommit: false, autopush: true, link: "trailer", remote: "origin" };
   const path2 = join(repo.top, ".braid", "config.toml");
   if (existsSync(path2)) {
+    let autopushSet = false;
+    let publishOff = false;
     for (const line of readFileSync(path2, "utf8").split("\n")) {
       const m = /^\s*([a-z_-]+)\s*=\s*"?([^"#\n]*?)"?\s*(#.*)?$/.exec(line);
       if (!m) continue;
@@ -299,10 +302,12 @@ function readConfig(repo) {
       const flag = value === "true" ? true : value === "false" ? false : void 0;
       if (key === "git-hooks" && flag !== void 0) config2.gitHooks = flag;
       if (key === "autocommit" && flag !== void 0) config2.autocommit = flag;
-      if (key === "autopush" && flag !== void 0) config2.autopush = flag;
+      if (key === "autopush" && flag !== void 0) [config2.autopush, autopushSet] = [flag, true];
+      if (key === "publish" && value === "off") publishOff = true;
       if (key === "link" && (value === "trailer" || value === "store")) config2.link = value;
       if (key === "remote" && value) config2.remote = value;
     }
+    if (publishOff && !autopushSet) config2.autopush = false;
   }
   const own = userConfig();
   if (own.autocommit !== void 0) config2.autocommit = own.autocommit;
@@ -972,7 +977,7 @@ function computeStatus(repo, session, remote = "origin") {
   Object.assign(status, { saved: true, conv, private: state?.private ?? false });
   const tracking = remoteRefs(remote);
   const published = new Set(readRecords(`${tracking}/${conv}/${session}`, { cwd: repo.top }).map((r) => r.id));
-  const withheld = new Set(state?.withheld ?? []);
+  const withheld = spread(new Map((state?.withheld ?? []).map((id) => [id, "you"])), mine, /* @__PURE__ */ new Map());
   const committed = committedLength(mine);
   const counts = (recs) => recs.filter((r) => isTurn(r) && !published.has(r.id) && !withheld.has(r.id)).length;
   status.ahead = counts(mine.slice(0, committed));
@@ -2107,8 +2112,12 @@ function launchDir(transcript) {
   if (!transcript || !existsSync6(transcript)) return void 0;
   const buf = Buffer.alloc(256 * 1024);
   const fd = openSync(transcript, "r");
-  const n = readSync(fd, buf, 0, buf.length, 0);
-  closeSync(fd);
+  let n;
+  try {
+    n = readSync(fd, buf, 0, buf.length, 0);
+  } finally {
+    closeSync(fd);
+  }
   for (const line of buf.subarray(0, n).toString("utf8").split("\n")) {
     try {
       const cwd = JSON.parse(line).cwd;
@@ -2433,6 +2442,23 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
     state.reparent = { from: lastNative, to: pm.id };
     delete state.pendingMerge;
   }
+  const agentRecords = /* @__PURE__ */ new Map();
+  for (const [id, a] of agents) {
+    agentRecords.set(id, a.records.map((r) => withBraid(r, { actor, session, agent: id })));
+    if (!a.link) continue;
+    const spawnedBy = toolCallRecord(repo, state, out, a.link.toolUseId) ?? lastNative;
+    out.push({
+      type: "agent_link",
+      id: `braid-agent-${id}`,
+      parentId: spawnedBy,
+      time: now,
+      relation: "spawn",
+      transcriptId: id,
+      ...a.link.agentType || a.link.description ? { agent: { name: a.link.agentType ?? "subagent", ...a.link.description ? { role: a.link.description } : {} } } : {},
+      ...a.link.toolUseId ? { toolCallId: a.link.toolUseId } : {},
+      ext: { braid: { actor, session } }
+    });
+  }
   if (final) {
     const target = lastTurn(out) ?? state.head;
     const commits = codeCommits.map((sha) => ({ sha, message: gitMaybe(["log", "-1", "--format=%s", sha], { cwd: repo.top })?.trim() ?? "" }));
@@ -2450,23 +2476,6 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
         ext: { braid: { actor, session, ...kind } }
       });
     }
-  }
-  const agentRecords = /* @__PURE__ */ new Map();
-  for (const [id, a] of agents) {
-    agentRecords.set(id, a.records.map((r) => withBraid(r, { actor, session, agent: id })));
-    if (!a.link) continue;
-    const spawnedBy = toolCallRecord(repo, state, out, a.link.toolUseId) ?? lastNative;
-    out.push({
-      type: "agent_link",
-      id: `braid-agent-${id}`,
-      parentId: spawnedBy,
-      time: now,
-      relation: "spawn",
-      transcriptId: id,
-      ...a.link.agentType || a.link.description ? { agent: { name: a.link.agentType ?? "subagent", ...a.link.description ? { role: a.link.description } : {} } } : {},
-      ...a.link.toolUseId ? { toolCallId: a.link.toolUseId } : {},
-      ext: { braid: { actor, session } }
-    });
   }
   if (out.length === 0 && agentRecords.size === 0) return 0;
   const head = gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim();
@@ -3027,7 +3036,7 @@ function pickLines(lines, tokens) {
     picked.set(num, l);
   };
   for (const token of tokens.flatMap((t) => t.split(",")).filter(Boolean)) {
-    const m = /^(?:([0-9a-z]+)\.)?(\d+)(?:-(?:\1\.)?(\d+))?$/.exec(token);
+    const m = /^(?:([\w-]+)\.)?(\d+)(?:-(?:\1\.)?(\d+))?$/.exec(token);
     if (!m) throw new Error(`not a record number or range: ${token}`);
     const [, group, from, to] = m;
     const prefix = group ? `${group}.` : "";
@@ -3035,16 +3044,26 @@ function pickLines(lines, tokens) {
   }
   return [...picked.values()];
 }
-function causes(v, id) {
-  const all = [...v.chunks.flat(), ...[...v.agents.values()].flat(2)];
-  const r = all.find((x) => x.id === id);
-  if (!r) return [];
-  const callOf = (callId) => typeof callId === "string" ? all.filter((x) => Array.isArray(x.content) && x.content.some((b) => b?.type === "tool_call" && b.id === callId)).map((x) => x.id) : [];
-  const out = r.role === "tool" ? callOf(r.toolCallId) : [];
-  const agent = braidOf(r).agent;
-  const link = v.chunks.flat().find((x) => x.type === "agent_link" && (x.id === id || x.transcriptId === agent));
-  if (link) out.push(link.id, ...callOf(link.toolCallId));
-  return out;
+function causes(v) {
+  const main2 = v.chunks.flat();
+  const all = [...main2, ...[...v.agents.values()].flat(2)];
+  const byId = new Map(all.map((x) => [x.id, x]));
+  const callers = /* @__PURE__ */ new Map();
+  for (const x of all) {
+    if (!Array.isArray(x.content)) continue;
+    for (const b of x.content) if (b?.type === "tool_call" && b.id) callers.set(b.id, [...callers.get(b.id) ?? [], x.id]);
+  }
+  const callOf = (callId) => typeof callId === "string" ? callers.get(callId) ?? [] : [];
+  const links = main2.filter((x) => x.type === "agent_link");
+  return (id) => {
+    const r = byId.get(id);
+    if (!r) return [];
+    const out = r.role === "tool" ? [...callOf(r.toolCallId)] : [];
+    const agent = braidOf(r).agent;
+    const link = links.find((x) => x.id === id || agent !== void 0 && x.transcriptId === agent);
+    if (link) out.push(link.id, ...callOf(link.toolCallId));
+    return out;
+  };
 }
 function update(repo, session, fn) {
   withLock(repo, `save-${session}`, () => {
@@ -3059,7 +3078,8 @@ function withhold(repo, v, lines, picked, undo) {
   const kept = picked.filter((l) => l.withheld && l.withheld !== "you");
   update(repo, v.state.session, (state) => {
     const seeds2 = new Set(state.withheld ?? []);
-    if (undo) for (const id of ids) for (const x of [id, ...causes(v, id)]) seeds2.delete(x);
+    const causesOf = undo ? causes(v) : void 0;
+    if (causesOf) for (const id of ids) for (const x of [id, ...causesOf(id)]) seeds2.delete(x);
     else for (const id of ids) seeds2.add(id);
     state.withheld = [...seeds2];
     v.state.withheld = state.withheld;
@@ -3098,10 +3118,10 @@ function editRecord(repo, v, line, text) {
   });
   return { changed: [line], published: line.published ? 1 : 0 };
 }
-function withholdRecent(repo, v, lines, ms) {
+function withholdRecent(repo, v, lines, ms, undo = false) {
   const cutoff = Date.now() - ms;
   const recent = lines.filter((l) => l.rec.time && Date.parse(l.rec.time) >= cutoff);
-  return withhold(repo, v, lines, recent, false);
+  return withhold(repo, v, lines, recent, undo);
 }
 function setPrivate(repo, session, value) {
   update(repo, session, (state) => {
@@ -4135,9 +4155,10 @@ function main(argv) {
       const found = resolve(repo, args[0] ?? needSession(str("session")), remote);
       if (found.length !== 1) throw new Error(found.length ? "more than one session matches" : "no such session");
       for (const r of readRecords(found[0].ref, found[0].opts)) {
-        const commit = r.type === "label" ? braidOf(r).commit : void 0;
+        const code = r.type === "label" ? braidOf(r).code : void 0;
+        const commit = r.type === "label" ? braidOf(r).commit ?? code : void 0;
         if (!isTurn(r) && !commit) continue;
-        const kind = commit ? "commit" : r.type === "branch_summary" ? "merge" : r.role ?? r.type;
+        const kind = code ? "code" : commit ? "commit" : r.type === "branch_summary" ? "merge" : r.role ?? r.type;
         const text = commit ? `${String(r.label)}${commit.sha ? ` (${commit.sha.slice(0, 7)})` : ""}` : describe(r, 160).split("\n")[0];
         out(`${r.id.slice(0, 12)}  ${kind.padEnd(9)} ${text}`);
       }
@@ -4165,17 +4186,20 @@ function main(argv) {
       }
       const found = resolve(repo, args[0], remote).filter((f) => f.session !== current);
       if (found.length === 0) throw new Error(`no session matches ${args[0]}; try braid fetch --all, then braid sessions`);
-      const last = (f) => readRecords(f.ref, f.opts).findLast(isTurn)?.time ?? "";
-      const from = found.reduce((a, b) => last(b) > last(a) ? b : a);
+      const read = found.map((f) => ({ f, records: readRecords(f.ref, f.opts) }));
+      const last = (x) => x.records.findLast(isTurn)?.time ?? "";
+      const newest = read.reduce((a, b) => last(b) > last(a) ? b : a);
+      const from = newest.f;
       if (opts.here === true) {
         if (!current) throw new Error("no session to fork into: run inside an agent session, or pass --session <id>");
+        for (const f of found.filter((f2) => f2 !== from)) out(briefing(repo, f, remote).text);
         const b = briefing(repo, from, remote);
         out(b.text);
         markFork(repo, current, b);
         out(`braid: this session continues from ${from.session.slice(0, 8)} (${b.head.slice(0, 12)})`);
         return 0;
       }
-      const name2 = sessionTitle(readRecords(from.ref, from.opts), from.session);
+      const name2 = sessionTitle(newest.records, from.session);
       const others = found.length > 1 ? [`braid: ${args[0]} has ${found.length} sessions; this is the newest. To fork another, name it: ${found.filter((f) => f !== from).map((f) => f.session.slice(0, 8)).join(", ")}`] : [];
       const own = from.opts.gitDir ? loadState(repo, from.session) : void 0;
       const dir = own?.harness === "claude-code" ? launchDir(own.transcript) : void 0;
@@ -4235,10 +4259,10 @@ function main(argv) {
       const v = view(repo, state, remote);
       const lines = reviewLines(repo, v, remote);
       const undo = opts.undo === true;
+      const width = process.stdout.isTTY ? process.stdout.columns || 100 : 120;
       const edit = opts.all === true || opts.edit === true || str("last") !== void 0 || str("text") !== void 0 || args.length > 0;
       if (!edit) {
-        const width2 = process.stdout.isTTY ? process.stdout.columns || 100 : 120;
-        const text2 = renderReview(v, lines, width2).join("\n");
+        const text2 = renderReview(v, lines, width).join("\n");
         const hint = session.explicit ? "" : `
 (newest session here; to edit it, add --session ${session.id.slice(0, 8)})`;
         page(`${text2}${hint}
@@ -4279,8 +4303,7 @@ function main(argv) {
         return 0;
       }
       const text = str("text");
-      const result = text !== void 0 ? hide(repo, v, lines, text, undo) : str("last") !== void 0 ? withholdRecent(repo, v, lines, duration(str("last"))) : withhold(repo, v, lines, pickLines(lines, args), undo);
-      const width = process.stdout.isTTY ? process.stdout.columns || 100 : 120;
+      const result = text !== void 0 ? hide(repo, v, lines, text, undo) : str("last") !== void 0 ? withholdRecent(repo, v, lines, duration(str("last")), undo) : withhold(repo, v, lines, pickLines(lines, args), undo);
       const verb = text !== void 0 ? undo ? `shown again` : `hidden` : undo ? "put back" : "withheld";
       const what = text !== void 0 ? `${JSON.stringify(text)} ${verb} in ${result.changed.length} records` : `${result.changed.length} records ${verb}`;
       out(`braid: ${what}${result.changed.length ? ":" : ""}`);

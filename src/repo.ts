@@ -77,7 +77,9 @@ export function userConfig(): UserConfig {
   };
   const section = /^\s*\[paths\]\s*$([\s\S]*?)(?=^\s*\[|$(?![\s\S]))/m.exec(text)?.[1] ?? "";
   const paths = [...section.matchAll(/^\s*"([^"]+)"\s*=\s*"([^"]+)"/gm)].map((m) => [m[1]!, m[2]!] as [string, string]);
-  return { autocommit: flag("autocommit"), autopush: flag("autopush"), paths };
+  // publish = "off", from before autopush, still keeps git push from publishing.
+  const autopush = flag("autopush") ?? (/^\s*publish\s*=\s*"off"/m.test(top) ? false : undefined);
+  return { autocommit: flag("autocommit"), autopush, paths };
 }
 
 /** Reads the few keys braid uses from `.braid/config.toml`, a flat `key = "value"` file, then the user's own settings. */
@@ -85,6 +87,8 @@ export function readConfig(repo: Repo): Config {
   const config: Config = { gitHooks: true, autocommit: false, autopush: true, link: "trailer", remote: "origin" };
   const path = join(repo.top, ".braid", "config.toml");
   if (existsSync(path)) {
+    let autopushSet = false;
+    let publishOff = false;
     for (const line of readFileSync(path, "utf8").split("\n")) {
       const m = /^\s*([a-z_-]+)\s*=\s*"?([^"#\n]*?)"?\s*(#.*)?$/.exec(line);
       if (!m) continue;
@@ -92,10 +96,13 @@ export function readConfig(repo: Repo): Config {
       const flag = value === "true" ? true : value === "false" ? false : undefined;
       if (key === "git-hooks" && flag !== undefined) config.gitHooks = flag;
       if (key === "autocommit" && flag !== undefined) config.autocommit = flag;
-      if (key === "autopush" && flag !== undefined) config.autopush = flag;
+      if (key === "autopush" && flag !== undefined) [config.autopush, autopushSet] = [flag, true];
+      if (key === "publish" && value === "off") publishOff = true;
       if (key === "link" && (value === "trailer" || value === "store")) config.link = value;
       if (key === "remote" && value) config.remote = value;
     }
+    // A config written before autopush, with publish = "off" (public repositories), keeps git push from publishing.
+    if (publishOff && !autopushSet) config.autopush = false;
   }
   const own = userConfig();
   if (own.autocommit !== undefined) config.autocommit = own.autocommit;

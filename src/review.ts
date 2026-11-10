@@ -2,7 +2,7 @@
 // numbered, and the edits that keep parts of it back before a commit: withhold
 // records by number, hide text everywhere in the session, or keep it private.
 import { readAgents, readRecords } from "./chunks.ts";
-import { applyEdit, clean, committedAgentRecord, editableText, spread, termRule, view, type View } from "./publish.ts";
+import { applyEdit, clean, committedAgentRecord, editableText, spread, termRule, type View } from "./publish.ts";
 import { redactValue, type Counts } from "./redact.ts";
 import { braidOf, describe, type Rec } from "./records.ts";
 import { remoteRefs, type Repo } from "./repo.ts";
@@ -130,7 +130,7 @@ export function pickLines(lines: Line[], tokens: string[]): Line[] {
     picked.set(num, l);
   };
   for (const token of tokens.flatMap((t) => t.split(",")).filter(Boolean)) {
-    const m = /^(?:([0-9a-z]+)\.)?(\d+)(?:-(?:\1\.)?(\d+))?$/.exec(token);
+    const m = /^(?:([\w-]+)\.)?(\d+)(?:-(?:\1\.)?(\d+))?$/.exec(token);
     if (!m) throw new Error(`not a record number or range: ${token}`);
     const [, group, from, to] = m;
     const prefix = group ? `${group}.` : "";
@@ -140,19 +140,26 @@ export function pickLines(lines: Line[], tokens: string[]): Line[] {
 }
 
 /** The records a withheld record was withheld with: the call behind a result, the link and call behind a subagent's records. */
-function causes(v: View, id: string): string[] {
-  const all = [...v.chunks.flat(), ...[...v.agents.values()].flat(2)];
-  const r = all.find((x) => x.id === id);
-  if (!r) return [];
-  const callOf = (callId: unknown) =>
-    typeof callId === "string"
-      ? all.filter((x) => Array.isArray(x.content) && (x.content as { type?: string; id?: string }[]).some((b) => b?.type === "tool_call" && b.id === callId)).map((x) => x.id)
-      : [];
-  const out = r.role === "tool" ? callOf(r.toolCallId) : [];
-  const agent = braidOf(r).agent;
-  const link = v.chunks.flat().find((x) => x.type === "agent_link" && (x.id === id || x.transcriptId === agent));
-  if (link) out.push(link.id, ...callOf(link.toolCallId));
-  return out;
+function causes(v: View): (id: string) => string[] {
+  const main = v.chunks.flat();
+  const all = [...main, ...[...v.agents.values()].flat(2)];
+  const byId = new Map(all.map((x) => [x.id, x]));
+  const callers = new Map<string, string[]>();
+  for (const x of all) {
+    if (!Array.isArray(x.content)) continue;
+    for (const b of x.content as { type?: string; id?: string }[]) if (b?.type === "tool_call" && b.id) callers.set(b.id, [...(callers.get(b.id) ?? []), x.id]);
+  }
+  const callOf = (callId: unknown) => (typeof callId === "string" ? (callers.get(callId) ?? []) : []);
+  const links = main.filter((x) => x.type === "agent_link");
+  return (id) => {
+    const r = byId.get(id);
+    if (!r) return [];
+    const out = r.role === "tool" ? [...callOf(r.toolCallId)] : [];
+    const agent = braidOf(r).agent;
+    const link = links.find((x) => x.id === id || (agent !== undefined && x.transcriptId === agent));
+    if (link) out.push(link.id, ...callOf(link.toolCallId));
+    return out;
+  };
 }
 
 export interface Edit {
@@ -178,7 +185,8 @@ export function withhold(repo: Repo, v: View, lines: Line[], picked: Line[], und
   const kept = picked.filter((l) => l.withheld && l.withheld !== "you");
   update(repo, v.state.session, (state) => {
     const seeds = new Set(state.withheld ?? []);
-    if (undo) for (const id of ids) for (const x of [id, ...causes(v, id)]) seeds.delete(x);
+    const causesOf = undo ? causes(v) : undefined;
+    if (causesOf) for (const id of ids) for (const x of [id, ...causesOf(id)]) seeds.delete(x);
     else for (const id of ids) seeds.add(id);
     state.withheld = [...seeds];
     v.state.withheld = state.withheld;
@@ -224,11 +232,11 @@ export function editRecord(repo: Repo, v: View, line: Line, text: string | undef
   return { changed: [line], published: line.published ? 1 : 0 };
 }
 
-/** Withholds every record written in the last `ms` milliseconds. */
-export function withholdRecent(repo: Repo, v: View, lines: Line[], ms: number): Edit {
+/** Withholds every record written in the last `ms` milliseconds, or with `undo` puts them back. */
+export function withholdRecent(repo: Repo, v: View, lines: Line[], ms: number, undo = false): Edit {
   const cutoff = Date.now() - ms;
   const recent = lines.filter((l) => l.rec.time && Date.parse(l.rec.time) >= cutoff);
-  return withhold(repo, v, lines, recent, false);
+  return withhold(repo, v, lines, recent, undo);
 }
 
 /** Keeps the whole session from being published, or with `undo` lets it be published again. */
@@ -237,5 +245,3 @@ export function setPrivate(repo: Repo, session: string, value: boolean): void {
     state.private = value || undefined;
   });
 }
-
-export { view };

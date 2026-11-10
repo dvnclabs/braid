@@ -5,6 +5,7 @@ import { readRecords } from "./chunks.ts";
 import { forEachRef } from "./git.ts";
 import { braidOf, committedLength, isTurn, type Rec } from "./records.ts";
 import { isEnabled, remoteRefs, SESSION_REFS, storeRef, type Repo } from "./repo.ts";
+import { spread } from "./publish.ts";
 import { loadState } from "./state.ts";
 
 export interface Waiting {
@@ -81,7 +82,8 @@ export function computeStatus(repo: Repo, session: string, remote = "origin"): S
 
   const tracking = remoteRefs(remote);
   const published = new Set(readRecords(`${tracking}/${conv}/${session}`, { cwd: repo.top }).map((r) => r.id));
-  const withheld = new Set(state?.withheld ?? []);
+  // A withheld record takes its tool results along, as publishing does.
+  const withheld = spread(new Map((state?.withheld ?? []).map((id) => [id, "you"])), mine, new Map());
   const committed = committedLength(mine);
   const counts = (recs: Rec[]) => recs.filter((r) => isTurn(r) && !published.has(r.id) && !withheld.has(r.id)).length;
   status.ahead = counts(mine.slice(0, committed));

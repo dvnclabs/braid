@@ -18,8 +18,12 @@ export function launchDir(transcript: string | undefined): string | undefined {
   if (!transcript || !existsSync(transcript)) return undefined;
   const buf = Buffer.alloc(256 * 1024);
   const fd = openSync(transcript, "r");
-  const n = readSync(fd, buf, 0, buf.length, 0);
-  closeSync(fd);
+  let n: number;
+  try {
+    n = readSync(fd, buf, 0, buf.length, 0);
+  } finally {
+    closeSync(fd);
+  }
   for (const line of buf.subarray(0, n).toString("utf8").split("\n")) {
     try {
       const cwd = (JSON.parse(line) as { cwd?: unknown }).cwd;

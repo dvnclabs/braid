@@ -8,13 +8,13 @@ import { readAgents, readRecords } from "./chunks.ts";
 import { fetchSessions } from "./fetch.ts";
 import { postCommit, postRewrite, prePush, prepareCommitMsg } from "./githooks.ts";
 import { sessionEnd, sessionStart, stop } from "./hooks.ts";
-import { allSessions, briefing, markFork, resolve, type Found } from "./load.ts";
+import { allSessions, briefing, markFork, resolve } from "./load.ts";
 import { context, pick, record } from "./merge.ts";
 import { launchDir, replay, shellWord } from "./replay.ts";
 import { readEntry } from "./registry.ts";
-import { editRecord, hide, lineText, pickLines, renderReview, reviewLines, setPrivate, view, withhold, withholdRecent } from "./review.ts";
+import { editRecord, hide, lineText, pickLines, renderReview, reviewLines, setPrivate, withhold, withholdRecent } from "./review.ts";
 import { importOpenclaw, openclawDatabases } from "./openclaw.ts";
-import { publish, type PublishResult } from "./publish.ts";
+import { publish, view, type PublishResult } from "./publish.ts";
 import { braidOf, describe, isTurn, type Rec } from "./records.ts";
 import { findRepo, isEnabled, readConfig, type Repo } from "./repo.ts";
 import { save } from "./save.ts";
@@ -326,9 +326,10 @@ function main(argv: string[]): number {
       const found = resolve(repo, args[0] ?? needSession(str("session")), remote);
       if (found.length !== 1) throw new Error(found.length ? "more than one session matches" : "no such session");
       for (const r of readRecords(found[0]!.ref, found[0]!.opts)) {
-        const commit = r.type === "label" ? braidOf(r).commit : undefined;
+        const code = r.type === "label" ? braidOf(r).code : undefined;
+        const commit = r.type === "label" ? (braidOf(r).commit ?? code) : undefined;
         if (!isTurn(r) && !commit) continue;
-        const kind = commit ? "commit" : r.type === "branch_summary" ? "merge" : (r.role ?? r.type);
+        const kind = code ? "code" : commit ? "commit" : r.type === "branch_summary" ? "merge" : (r.role ?? r.type);
         const text = commit ? `${String(r.label)}${commit.sha ? ` (${commit.sha.slice(0, 7)})` : ""}` : describe(r, 160).split("\n")[0];
         out(`${r.id.slice(0, 12)}  ${kind.padEnd(9)} ${text}`);
       }
@@ -356,17 +357,21 @@ function main(argv: string[]): number {
       }
       const found = resolve(repo, args[0], remote).filter((f) => f.session !== current);
       if (found.length === 0) throw new Error(`no session matches ${args[0]}; try braid fetch --all, then braid sessions`);
-      const last = (f: Found) => readRecords(f.ref, f.opts).findLast(isTurn)?.time ?? "";
-      const from = found.reduce((a, b) => (last(b) > last(a) ? b : a));
+      const read = found.map((f) => ({ f, records: readRecords(f.ref, f.opts) }));
+      const last = (x: (typeof read)[number]) => x.records.findLast(isTurn)?.time ?? "";
+      const newest = read.reduce((a, b) => (last(b) > last(a) ? b : a));
+      const from = newest.f;
       if (opts.here === true) {
         if (!current) throw new Error("no session to fork into: run inside an agent session, or pass --session <id>");
+        // The others are read too, as a review of a pull request with several sessions needs; this one continues from the newest.
+        for (const f of found.filter((f) => f !== from)) out(briefing(repo, f, remote).text);
         const b = briefing(repo, from, remote);
         out(b.text);
         markFork(repo, current, b);
         out(`braid: this session continues from ${from.session.slice(0, 8)} (${b.head.slice(0, 12)})`);
         return 0;
       }
-      const name = sessionTitle(readRecords(from.ref, from.opts), from.session);
+      const name = sessionTitle(newest.records, from.session);
       const others = found.length > 1 ? [`braid: ${args[0]} has ${found.length} sessions; this is the newest. To fork another, name it: ${found.filter((f) => f !== from).map((f) => f.session.slice(0, 8)).join(", ")}`] : [];
       // Your own session, with its transcript on this machine: Claude Code forks it, with everything it holds.
       const own = from.opts.gitDir ? loadState(repo, from.session) : undefined;
@@ -427,9 +432,9 @@ function main(argv: string[]): number {
       const v = view(repo, state, remote);
       const lines = reviewLines(repo, v, remote);
       const undo = opts.undo === true;
+      const width = process.stdout.isTTY ? process.stdout.columns || 100 : 120;
       const edit = opts.all === true || opts.edit === true || str("last") !== undefined || str("text") !== undefined || args.length > 0;
       if (!edit) {
-        const width = process.stdout.isTTY ? process.stdout.columns || 100 : 120;
         const text = renderReview(v, lines, width).join("\n");
         const hint = session.explicit ? "" : `\n(newest session here; to edit it, add --session ${session.id.slice(0, 8)})`;
         page(`${text}${hint}\n`);
@@ -469,8 +474,7 @@ function main(argv: string[]): number {
         return 0;
       }
       const text = str("text");
-      const result = text !== undefined ? hide(repo, v, lines, text, undo) : str("last") !== undefined ? withholdRecent(repo, v, lines, duration(str("last")!)) : withhold(repo, v, lines, pickLines(lines, args), undo);
-      const width = process.stdout.isTTY ? process.stdout.columns || 100 : 120;
+      const result = text !== undefined ? hide(repo, v, lines, text, undo) : str("last") !== undefined ? withholdRecent(repo, v, lines, duration(str("last")!), undo) : withhold(repo, v, lines, pickLines(lines, args), undo);
       const verb = text !== undefined ? (undo ? `shown again` : `hidden`) : undo ? "put back" : "withheld";
       const what = text !== undefined ? `${JSON.stringify(text)} ${verb} in ${result.changed.length} records` : `${result.changed.length} records ${verb}`;
       out(`braid: ${what}${result.changed.length ? ":" : ""}`);
