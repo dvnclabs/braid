@@ -65,8 +65,8 @@ function defaultBranch(repo: Repo, remote: string): string | undefined {
 }
 
 /**
- * The rules for a session. `code` is the code repository a session kept in a
- * separate repository ran in: its rules apply too, as they would next to the code.
+ * The rules for a session. `code` is the code repository the session ran in:
+ * when another repository publishes it, its rules apply too.
  */
 export function loadRules(repo: Repo, remote: string, code?: string): Rules {
   const rules: Rules = { redact: [], ignores: [], withholdSession: false, sources: [], problems: [] };
@@ -74,7 +74,7 @@ export function loadRules(repo: Repo, remote: string, code?: string): Rules {
   const own = join(configDir(), "redact.toml");
   if (existsSync(own)) texts.push([own.replace(process.env.HOME ?? "\0", "~"), readFileSync(own, "utf8")]);
   // Shared rules come from the default branch of the code: the code repository's, else this one's.
-  const codeRepo = code && existsSync(code) ? findRepo(code) : undefined;
+  const codeRepo = code && code !== repo.top && existsSync(code) ? findRepo(code) : undefined;
   const ruled = codeRepo ?? repo;
   const branch = defaultBranch(ruled, codeRepo ? "origin" : remote);
   const shared = branch ? gitMaybe(["show", `${branch}:.braid/redact.toml`], { cwd: ruled.top }) : undefined;

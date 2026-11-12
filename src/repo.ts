@@ -1,36 +1,45 @@
-// Where braid keeps conversations: in the git repository the session runs in,
-// inside its .git, or outside one in ~/.braid, a git repository of its own.
-// The `repo` setting can name another path, a repository apart from the code.
-// With autopilot (the default) braid works on this machine only: it never
-// pushes, fetches or asks GitHub anything.
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+// Where braid keeps conversations: in the braid repository (~/.braid), apart
+// from any code, each conversation under its own refs. A session that runs in
+// a code repository takes its settings, rules and git hooks from it, and
+// publishes to its remote; the conversation itself stays in the braid
+// repository. The `repo` setting can name another braid repository. With
+// autopilot (the default) braid works on this machine only: it never pushes,
+// fetches or asks GitHub anything.
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { git, gitMaybe } from "./git.ts";
 
 export interface Repo {
-  /** Top of the working tree. */
+  /** Top of the code repository's working tree; for a session outside any, the braid repository's. */
   top: string;
-  /** The git directory shared by all worktrees. */
+  /** Its git directory, shared by all worktrees. */
   common: string;
-  /** braid's own directory: <common>/braid. */
+  /** The braid repository, apart from the code: every conversation, each under its own refs. */
+  home: string;
+  /** braid's own directory in the braid repository: session state and locks. */
   dir: string;
-  /** The unredacted session store, a separate bare repository. */
+  /** The unredacted session store, a bare repository in the braid repository. */
   store: string;
-  /** A git repository that holds conversations only, apart from the code. */
+  /** What braid caches about the code repository: commit links, the status line, the last fetch. */
+  cache: string;
+  /** The session runs in no code repository: `top` is the braid repository itself. */
   separate?: boolean;
-  /** For a separate repository: the code repository the command or session runs in, if any. */
-  code?: string;
-  /** A repository braid keeps conversations in on autopilot, without `.braid/config.toml`. */
+  /** A code repository braid keeps conversations for on autopilot, without `.braid/config.toml`. */
   auto?: boolean;
 }
 
+const real = (path: string) => (existsSync(path) ? realpathSync(path) : path);
+
+/** The code repository `cwd` is in, with braid's storage in the braid repository; undefined outside any git repository. */
 export function findRepo(cwd: string): Repo | undefined {
   const top = gitMaybe(["rev-parse", "--show-toplevel"], { cwd })?.trim();
   if (!top) return undefined;
   const common = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: top }).trim();
-  const dir = join(common, "braid");
-  return { top, common, dir, store: join(dir, "store") };
+  const home = homeFor(top);
+  const dir = join(home, ".git", "braid");
+  const separate = real(home) === real(top);
+  return { top, common, home, dir, store: join(dir, "store"), cache: join(dir, "cache", separate ? "home" : common.replace(/[^A-Za-z0-9]/g, "-")), ...(separate ? { separate } : {}) };
 }
 
 /** braid is on for a repository once `.braid/config.toml` is committed or created there, and always where it located one itself. */
@@ -38,11 +47,16 @@ export function isEnabled(repo: Repo): boolean {
   return !!repo.separate || !!repo.auto || hasConfig(repo);
 }
 
-const hasConfig = (repo: Repo) => existsSync(join(repo.top, ".braid", "config.toml"));
+const hasConfig = (repo: Pick<Repo, "top">) => existsSync(join(repo.top, ".braid", "config.toml"));
 
-/** The separate repository braid uses where no other is set: ~/.braid. */
-export function defaultSeparate(): string {
+/** The braid repository where no other is set: ~/.braid. */
+export function defaultHome(): string {
   return process.env.BRAID_HOME || join(homedir(), ".braid");
+}
+
+/** The braid repository for sessions in the code repository at `top`: the `repo` setting's, else the default. */
+export function homeFor(top: string | undefined): string {
+  return repoSetting(top) ?? defaultHome();
 }
 
 /** A path from a setting: ~ is the home directory, and a relative path starts from `base`. */
@@ -51,46 +65,52 @@ export function expandPath(path: string, base: string): string {
   return isAbsolute(path) ? path : resolve(base, path);
 }
 
-/** A separate repository at `path`, created when `create` is set; undefined when there is none. */
-export function separateRepo(path: string, code: string | undefined, create: boolean): Repo | undefined {
-  if (!existsSync(join(path, ".git"))) {
+const isRepo = (path: string) => {
+  try {
+    return statSync(join(path, ".git")).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+/** The braid repository at `path`, created when `create` is set; undefined when there is none. */
+export function homeRepo(path: string, create: boolean): Repo | undefined {
+  if (!isRepo(path)) {
     if (!create) return undefined;
     mkdirSync(path, { recursive: true });
     git(["init", "--quiet", path]);
   }
   const repo = findRepo(path);
-  if (!repo) return undefined;
-  return { ...repo, separate: true, code: code && code !== repo.top ? code : undefined };
+  return repo?.separate ? repo : undefined;
 }
 
 /**
- * Where the conversations of sessions in `cwd` are kept, or undefined when
- * braid keeps none there: a repository set up with braid; with autopilot, any
- * git repository, inside its .git; else ~/.braid. braid init turns this on for
- * the machine, by creating ~/.braid.
+ * Where the conversations of sessions in `cwd` are kept, with the code
+ * repository they run in, or undefined when braid keeps none: in a repository
+ * set up with braid, always; elsewhere once braid init created the braid
+ * repository on this machine, for any code repository and outside one.
  */
 export function locate(cwd: string): Repo | undefined {
   const code = findRepo(cwd);
-  const enabled = code && hasConfig(code) ? code : undefined;
-  const setting = repoSetting(enabled);
-  if (setting) return separateRepo(setting, code?.top, true);
-  if (enabled) return enabled;
-  const home = separateRepo(defaultSeparate(), code?.top, false);
-  if (home && code && !home.code) return home; // inside ~/.braid itself
-  if (home && code && readConfig(code).autopilot) return { ...code, auto: true };
-  return home;
+  if (code && !code.separate && hasConfig(code)) return code;
+  const home = code?.home ?? defaultHome();
+  if (!isRepo(home)) return undefined;
+  if (code && !code.separate) return { ...code, auto: true };
+  return homeRepo(home, false);
 }
 
-/** The path the `repo` setting names, from the user's config or the repository's, or undefined for "auto". */
-export function repoSetting(code: Repo | undefined): string | undefined {
+/** The path the `repo` setting names, from the user's config or the code repository's, or undefined for "auto". */
+export function repoSetting(top: string | undefined): string | undefined {
   const own = userConfig().repo;
   if (own !== undefined) return own === "auto" ? undefined : expandPath(own, homedir());
-  const value = code ? readKeys(code).get("repo") : undefined;
-  return value && value !== "auto" ? expandPath(value, code!.top) : undefined;
+  const value = top ? readKeys({ top }).get("repo") : undefined;
+  return value && value !== "auto" ? expandPath(value, top!) : undefined;
 }
 
+/** Creates the braid repository and its store, the first time a session is saved there. */
 export function ensureStore(repo: Repo): void {
   if (existsSync(join(repo.store, "HEAD"))) return;
+  if (!isRepo(repo.home)) homeRepo(repo.home, true);
   mkdirSync(repo.dir, { recursive: true });
   git(["init", "--quiet", "--bare", repo.store]);
 }
@@ -100,7 +120,7 @@ export interface Config {
   autopilot: boolean;
   /** Before a turn that changes a lot, braid marks a point to fork from. On by default. */
   autofork: boolean;
-  /** Where conversations are kept: undefined for the repository itself, or the path of a separate repository. */
+  /** The braid repository conversations are kept in, when the `repo` setting names one: undefined for ~/.braid. */
   repo?: string;
   /** Git hooks: commits name the agent session that made them, for autocommit and autopush. On by default. */
   gitHooks: boolean;
@@ -119,7 +139,7 @@ export function configDir(): string {
 }
 
 export interface UserConfig {
-  /** "auto", or a path: then every conversation is kept in that separate repository. */
+  /** "auto" (~/.braid), or the path of the braid repository every conversation is kept in. */
   repo?: string;
   autopilot?: boolean;
   autofork?: boolean;
@@ -135,7 +155,7 @@ export interface UserConfig {
  *
  *   autopilot = false     # let braid push and fetch conversations
  *   autopush = false
- *   repo = "~/.braid"     # keep every conversation in this repository, apart from the code
+ *   repo = "~/convos"     # keep every conversation in this braid repository, instead of ~/.braid
  *   [paths]
  *   "/Users/alice/dev" = "/home/alice/dev"
  */
@@ -157,7 +177,7 @@ export function userConfig(): UserConfig {
 }
 
 /** The `key = value` lines of a repository's `.braid/config.toml`, quotes and comments removed. */
-function readKeys(repo: Repo): Map<string, string> {
+function readKeys(repo: Pick<Repo, "top">): Map<string, string> {
   const keys = new Map<string, string>();
   const path = join(repo.top, ".braid", "config.toml");
   if (!existsSync(path)) return keys;
@@ -169,15 +189,13 @@ function readKeys(repo: Repo): Map<string, string> {
 }
 
 /**
- * Reads the few keys braid uses from `.braid/config.toml`, then the user's own
- * settings. A separate repository has no git hooks, autocommit or autopush;
- * on autopilot, nothing leaves the machine: no autopush, and no trailers.
+ * Reads the few keys braid uses from the code repository's
+ * `.braid/config.toml`, then the user's own settings. On autopilot, nothing
+ * leaves the machine: no autopush, and no trailers.
  */
 export function readConfig(repo: Repo): Config {
   const config: Config = { autopilot: true, autofork: true, gitHooks: true, autocommit: false, autopush: true, link: "trailer", remote: "origin" };
-  // A separate repository follows the autopilot and autofork of the code repository it serves, if any.
-  const fromCode = repo.code ? readKeys({ top: repo.code } as Repo) : new Map<string, string>();
-  const keys = repo.separate ? new Map([...fromCode].filter(([k]) => k === "autopilot" || k === "autofork")) : readKeys(repo);
+  const keys = repo.separate ? new Map<string, string>() : readKeys(repo);
   const flag = (key: string) => (keys.get(key) === "true" ? true : keys.get(key) === "false" ? false : undefined);
   // braid installs git hooks only where it was set up, never in a repository it found on autopilot.
   config.gitHooks = hasConfig(repo) ? (flag("git-hooks") ?? true) : false;
@@ -194,8 +212,7 @@ export function readConfig(repo: Repo): Config {
   if (own.autofork !== undefined) config.autofork = own.autofork;
   if (own.autocommit !== undefined) config.autocommit = own.autocommit;
   if (own.autopush !== undefined) config.autopush = own.autopush;
-  config.repo = repo.separate ? repo.top : repoSetting(repo);
-  if (config.repo) [config.gitHooks, config.autocommit, config.autopush] = [false, false, false];
+  config.repo = repoSetting(repo.separate ? undefined : repo.top);
   if (config.autopilot) [config.autopush, config.link] = [false, "store"];
   return config;
 }

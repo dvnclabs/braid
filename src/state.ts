@@ -1,4 +1,4 @@
-// Per-session state, kept next to the store: <common>/braid/sessions/<id>.json.
+// Per-session state, kept next to the store in the braid repository: ~/.braid/.git/braid/sessions/<id>.json.
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Repo } from "./repo.ts";
@@ -41,7 +41,7 @@ export interface SessionState {
   forkFrom?: { session: string; conv: string; head: string; actor?: string; replayed?: boolean; lines?: number };
   /** The last braid verify, run when the session ended. */
   verified?: { ok: boolean; at: string; problems?: string[] };
-  /** For a session kept in a separate repository: the code repository it ran in, whose .braidignore applies to it. */
+  /** The code repository the session ran in, whose .braidignore applies to it wherever it is published. */
   code?: string;
   pendingMerge?: PendingMerge;
   /** Native records whose parent is `from` continue from the merge record `to`. */
@@ -54,8 +54,8 @@ export interface SessionState {
   terms?: string[];
   /** Records rewritten with braid edit --rewrite: the text published in their place, by record id. */
   edits?: Record<string, string>;
-  /** The published copy this machine pushed last, to tell its own edits from another machine's. */
-  published?: string;
+  /** The published copy this machine pushed last to each code repository's remote (`<git dir> <remote>`), to tell its own edits from another machine's. */
+  published?: Record<string, string>;
   /** Forked from someone else's session: published when it ends, since a review has no commits to push. */
   review?: boolean;
   private?: boolean;

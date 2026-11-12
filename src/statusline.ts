@@ -32,9 +32,8 @@ function pullRequest(repo: Repo): string {
   if (process.env.BRAID_STATUS_NO_PR) return "";
   const branch = gitMaybe(["branch", "--show-current"], { cwd: repo.top })?.trim();
   if (!branch) return "";
-  const dir = join(repo.dir, "cache");
-  mkdirSync(dir, { recursive: true });
-  const file = join(dir, `pr-${hash(branch)}`);
+  mkdirSync(repo.cache, { recursive: true });
+  const file = join(repo.cache, `pr-${hash(branch)}`);
   let fresh = false;
   try {
     fresh = Date.now() - statSync(file).mtimeMs < 5 * 60_000;
@@ -70,10 +69,10 @@ function braidPart(repo: Repo, session: string, remote: string): string {
       existsSync(statePath) ? statSync(statePath).mtimeMs : 0,
     ].join("\n"),
   );
-  const file = join(repo.dir, "cache", `status-${key}`);
+  const file = join(repo.cache, `status-${key}`);
   if (existsSync(file)) return readFileSync(file, "utf8");
   const text = render(computeStatus(repo, session, remote));
-  mkdirSync(join(repo.dir, "cache"), { recursive: true });
+  mkdirSync(repo.cache, { recursive: true });
   writeFileSync(file, text);
   return text;
 }

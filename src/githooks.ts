@@ -86,17 +86,16 @@ export function uninstallHooks(repo: Repo): string[] {
 const active = (repo: Repo) => isEnabled(repo) && readConfig(repo).gitHooks;
 
 /**
- * The agent session running git here, registered in this repository. A
- * session that started in another repository is adopted the first time it
- * commits here, so it is saved and published here too.
+ * The agent session running git here. A session that started in another
+ * repository is noted the first time it commits here, so that this
+ * repository's remote publishes it too.
  */
 function agentSession(repo: Repo): string | undefined {
   const session = process.env.BRAID_SESSION;
   if (!session || !active(repo)) return undefined;
-  if (loadState(repo, session)) return session;
-  const transcript = readEntry(session)?.transcript;
-  if (!transcript) return undefined;
-  register(repo, session, transcript);
+  const transcript = loadState(repo, session) ? undefined : readEntry(session)?.transcript;
+  if (!loadState(repo, session) && !transcript) return undefined;
+  if (transcript) register(repo, session, transcript);
   recordSession(session, { repo: repo.top });
   return session;
 }

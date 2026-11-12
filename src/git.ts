@@ -1,6 +1,9 @@
 // Thin wrappers over git plumbing. braid never links libgit2; everything goes
 // through the git binary the user already has.
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 export interface GitOptions {
   /** Working directory, for commands that act on a checkout. */
@@ -96,8 +99,20 @@ export function lsTree(treeish: string, opts: GitOptions): TreeEntry[] {
     });
 }
 
+/**
+ * Writes a blob from a file rather than a pipe: a pipe into git can stall
+ * for good with a large chunk half written (seen once, for 29 hours), and a
+ * save must never hang.
+ */
 export function writeBlob(content: string, opts: GitOptions): string {
-  return git(["hash-object", "-w", "--stdin"], { ...opts, input: content }).trim();
+  const dir = mkdtempSync(join(tmpdir(), "braid-blob-"));
+  try {
+    const file = join(dir, "blob");
+    writeFileSync(file, content);
+    return git(["hash-object", "-w", "--no-filters", "--", file], opts).trim();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 export function mktree(entries: TreeEntry[], opts: GitOptions): string {

@@ -247,6 +247,7 @@ export function publish(repo: Repo, session: string, opts: { remote?: string; dr
       return { ...result, records, redactions, uncommitted, reason: `${repo.top} has no remote ${remote}: git -C ${shellWord(repo.top)} remote add ${remote} <url>`, report };
     }
     const published = `${PUBLISHED_REFS}/${state.conv}/${session}`;
+    const target = `${repo.common} ${remote}`;
     const tracking = `${remoteRefs(remote)}/${state.conv}/${session}`;
     const localIds = new Set([...v.chunks.flat(), ...[...v.agents.values()].flat(2)].map((r) => r.id));
     const mine = new Map(chunks.flat().map((r) => [r.id, r]));
@@ -264,7 +265,7 @@ export function publish(repo: Repo, session: string, opts: { remote?: string; dr
       const extra = theirs.filter((r) => !localIds.has(r.id));
       const changed = [...theirs, ...theirAgents].filter((r) => localIds.has(r.id) && ours.get(r.id) !== stable(r)).length;
       // A copy this machine pushed last differs only by its own edits; any other copy differs by another machine's.
-      const ownCopy = !!parent && parent === state.published;
+      const ownCopy = !!parent && parent === state.published?.[target];
       const conflicts = ownCopy ? [] : theirs.filter((r) => mine.has(r.id) && stable(mine.get(r.id)) !== stable(r)).map((r) => r.id);
       const commit = writeChunks(extra.length ? [...chunks, extra] : chunks, parent, `publish ${session}`, { cwd: repo.top }, agents, changed > 0);
       return { commit, parent, replaced: changed - conflicts.length, conflicts };
@@ -285,7 +286,7 @@ export function publish(repo: Repo, session: string, opts: { remote?: string; dr
     updateRef(tracking, a.commit, a.parent, { cwd: repo.top });
     withLock(repo, `save-${session}`, () => {
       const s = loadState(repo, session);
-      if (s) saveState(repo, { ...s, published: a.commit });
+      if (s) saveState(repo, { ...s, published: { ...s.published, [target]: a.commit! } });
     });
     return { session, pushed: true, records, redactions, uncommitted, replaced: a.replaced, conflicts: a.conflicts };
   });

@@ -1,13 +1,13 @@
 // braid init: once per machine (the braid command, the status line, and the
-// separate repository for conversations outside repositories with braid), and
-// once per repository that keeps its conversations next to the code.
+// braid repository that keeps every conversation), and once per code
+// repository whose sessions braid saves (its settings, rules and git hooks).
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installHooks, uninstallHooks } from "./githooks.ts";
-import { configDir, defaultSeparate, ensureStore, expandPath, findRepo, readConfig, separateRepo, userConfig, type Repo } from "./repo.ts";
+import { configDir, ensureStore, expandPath, findRepo, homeFor, homeRepo, readConfig, userConfig, type Repo } from "./repo.ts";
 
 export { configDir };
 
@@ -30,14 +30,13 @@ function visibility(repo: Repo): string | undefined {
 const TEMPLATE = (s: Settings) =>
   [
     "# braid: efficient session manager. https://github.com/gbarbalinardo/braid",
-    "# autopilot: braid works on this machine only. It keeps conversations in its own git",
-    "#   storage inside .git, and never pushes, fetches or asks GitHub anything. false: braid",
-    "#   can publish conversations to the remote, for teammates and pull request reviews.",
+    "# autopilot: braid works on this machine only. It keeps conversations in the braid",
+    "#   repository, and never pushes, fetches or asks GitHub anything. false: git push can",
+    "#   publish them to this repository's remote, for teammates and pull request reviews.",
     "# autofork: before a turn that changes a lot, braid marks a point to fork from",
     "#   (braid fork @N). false: no points.",
-    '# repo: where conversations are kept. "auto": in this repository, next to the code. A path,',
-    '#   such as "~/.braid": in that separate git repository; autocommit and autopush are then',
-    "#   off, and /braid:push pushes to its origin.",
+    '# repo: the braid repository conversations are kept in, apart from the code. "auto":',
+    '#   ~/.braid. A path, such as "~/work-convos": that git repository instead.',
     "# git-hooks: commits name the agent session that made them (a Braid-Session trailer), so",
     "#   autocommit and autopush can follow them. false: braid leaves git alone.",
     "# autocommit: each commit the agent makes commits its conversation too. false: you commit",
@@ -78,15 +77,22 @@ const IGNORE_TEMPLATE = [
  */
 export function init(cwd: string, opts: Partial<Settings> = {}): string[] {
   const notes = setup();
-  const home = defaultSeparate();
-  if (!separateRepo(home, undefined, false)) {
-    separateRepo(home, undefined, true);
-    notes.push(`created ${home}, a git repository for conversations outside repositories with braid; git -C ${home} remote add origin <url> lets /braid:push share them`);
-  }
   const code = findRepo(cwd);
-  if (code && code.top !== separateRepo(home, undefined, false)?.top) return [...notes, ...initRepo(code, opts)];
-  // Outside a repository, settings go to the user's own config, for every repository.
-  for (const [key, value] of Object.entries(opts)) if (value !== undefined) notes.push(...setUserKey(key, value));
+  if (code && !code.separate) {
+    notes.push(...initRepo(code, opts));
+  } else {
+    // Outside a code repository, settings go to the user's own config, for every repository.
+    for (const [key, value] of Object.entries(opts)) if (value !== undefined) notes.push(...setUserKey(key, value));
+  }
+  // The machine's braid repository, and the one this code repository's `repo` setting names, if another.
+  const homes = new Set([homeFor(undefined), ...(code && !code.separate ? [findRepo(code.top)!.home] : [])]);
+  for (const home of homes) {
+    if (!homeRepo(home, false)) {
+      homeRepo(home, true);
+      notes.push(`created ${home}, the braid repository: every conversation is kept there, apart from the code`);
+    }
+    ensureStore(findRepo(home)!);
+  }
   return notes;
 }
 
@@ -105,11 +111,11 @@ function setUserKey(key: string, value: string | boolean): string[] {
   mkdirSync(configDir(), { recursive: true });
   writeFileSync(file, text);
   const notes = [`set ${line} in ${file.replace(homedir(), "~")}`];
-  if (key === "repo" && typeof value === "string" && value !== "auto") notes.push(`conversations are kept in ${separateRepo(expandPath(value, homedir()), undefined, true)!.top}; autocommit and autopush are off there`);
+  if (key === "repo" && typeof value === "string" && value !== "auto") notes.push(`conversations are kept in ${homeRepo(expandPath(value, homedir()), true)!.top}`);
   return notes;
 }
 
-/** Once per repository: `.braid/config.toml`, `.braidignore`, the store, and the git hooks when git-hooks is on. */
+/** Once per code repository: `.braid/config.toml`, `.braidignore`, and the git hooks when git-hooks is on. */
 function initRepo(repo: Repo, opts: Partial<Settings>): string[] {
   const notes: string[] = [];
   const file = join(repo.top, ".braid", "config.toml");
@@ -155,13 +161,8 @@ function initRepo(repo: Repo, opts: Partial<Settings>): string[] {
     notes.push("wrote .braidignore: tool calls on .env files and keys are never published; add your own paths");
   }
   const config = readConfig(repo);
-  // With a separate repository, the code repository gets no store and no hooks.
-  if (!config.repo) ensureStore(repo);
   notes.push(...(config.gitHooks ? installHooks(repo) : uninstallHooks(repo)));
-  if (config.repo) {
-    separateRepo(config.repo, repo.top, true);
-    notes.push(`conversations here are kept in ${config.repo}, apart from the code; autocommit and autopush are off, and /braid:push pushes to its origin`);
-  }
+  if (config.repo) notes.push(`conversations here are kept in ${config.repo}, apart from the code`);
   return notes;
 }
 

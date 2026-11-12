@@ -22,9 +22,9 @@ braid starts on autopilot: it does everything by itself and nothing leaves your 
 
 | Setting | Default | What it does |
 |---|---|---|
-| `autopilot` | on | braid keeps conversations in its own git storage, inside `.git/braid` of the repository the session runs in, or in `~/.braid` outside one, and never pushes, fetches or asks GitHub anything. Off, it can share them through the repository's remote. |
+| `autopilot` | on | braid keeps conversations on this machine, in the braid repository, and never pushes, fetches or asks GitHub anything. Off, it can share them through the code repository's remote. |
 | `autofork` | on | before a turn that changes a lot (5 files edited, or 30 tool calls), braid marks the conversation as it stood, so you can fork from there: `braid fork @1`. |
-| `repo` | `auto` | where conversations are kept: `auto` is the repository itself; a path such as `~/convos` is a separate git repository, which `git push` of the code leaves alone. |
+| `repo` | `auto` | the braid repository, which keeps every conversation apart from the code: `auto` is `~/.braid`; a path such as `~/work-convos` names another. |
 | `autocommit` | off | each commit the agent makes commits the conversation too. Off, you commit it with `/braid:commit` after `/braid:edit`. |
 | `autopush` | on in private repositories, off in public ones | off autopilot, `git push` publishes the committed part of the sessions behind the pushed commits. Off, `/braid:push` publishes. |
 
@@ -126,7 +126,7 @@ On autopilot nothing leaves your machine. Off autopilot, nothing is published un
 
 ## How it works
 
-Each session lives on its own git ref, in [ATXF](https://github.com/leostera/atxf), an open format for agent transcripts. Your unredacted copy stays in `.git/braid/store`, or in the separate repository you chose, where no push of the code can reach it; published copies go under `refs/braid/` on the remote. No server or GitHub App is involved. [docs/design.md](docs/design.md) covers the model, storage, publishing, trust, merging and review, and [examples/pr-review](examples/pr-review) is a complete conversation between an author and a reviewer.
+A conversation belongs to no code repository: a session can start in one repository, commit in two others, or run outside any. braid keeps every conversation in one git repository of its own, the braid repository (`~/.braid`), each session on its own git ref, in [ATXF](https://github.com/leostera/atxf), an open format for agent transcripts. Your unredacted copy stays there, where no push of the code can reach it; published copies go under `refs/braid/` on the remote of the code repository being pushed. No server or GitHub App is involved. [docs/design.md](docs/design.md) covers the model, storage, publishing, trust, merging and review, and [examples/pr-review](examples/pr-review) is a complete conversation between an author and a reviewer.
 
 ## Development
 

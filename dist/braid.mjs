@@ -2,13 +2,16 @@
 
 // src/cli.ts
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { appendFileSync as appendFileSync2, existsSync as existsSync15, mkdirSync as mkdirSync10, mkdtempSync, readdirSync as readdirSync5, readFileSync as readFileSync11, rmSync as rmSync3, statSync as statSync4, writeFileSync as writeFileSync9 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join as join15 } from "node:path";
+import { appendFileSync as appendFileSync2, existsSync as existsSync15, mkdirSync as mkdirSync10, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync11, rmSync as rmSync4, statSync as statSync5, writeFileSync as writeFileSync10 } from "node:fs";
+import { homedir as homedir7, tmpdir as tmpdir2 } from "node:os";
+import { join as join16 } from "node:path";
 import { parseArgs } from "node:util";
 
 // src/git.ts
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 var GitError = class extends Error {
   args;
   status;
@@ -64,7 +67,14 @@ function lsTree(treeish, opts) {
   });
 }
 function writeBlob(content2, opts) {
-  return git(["hash-object", "-w", "--stdin"], { ...opts, input: content2 }).trim();
+  const dir = mkdtempSync(join(tmpdir(), "braid-blob-"));
+  try {
+    const file2 = join(dir, "blob");
+    writeFileSync(file2, content2);
+    return git(["hash-object", "-w", "--no-filters", "--", file2], opts).trim();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 function mktree(entries, opts) {
   const input = entries.map((e) => `${e.mode} ${e.type} ${e.sha}	${e.name}\0`).join("");
@@ -296,72 +306,82 @@ function writeChunks(chunks, parent, message, opts, agents = /* @__PURE__ */ new
 
 // src/fetch.ts
 import { spawn } from "node:child_process";
-import { mkdirSync as mkdirSync4, statSync as statSync2, utimesSync, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join4 } from "node:path";
+import { mkdirSync as mkdirSync4, statSync as statSync3, utimesSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { join as join5 } from "node:path";
 
 // src/links.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync3, readdirSync, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync3, readdirSync, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join4 } from "node:path";
 
 // src/repo.ts
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join as join2, resolve } from "node:path";
+var real = (path2) => existsSync(path2) ? realpathSync(path2) : path2;
 function findRepo(cwd) {
   const top = gitMaybe(["rev-parse", "--show-toplevel"], { cwd })?.trim();
   if (!top) return void 0;
   const common = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: top }).trim();
-  const dir = join(common, "braid");
-  return { top, common, dir, store: join(dir, "store") };
+  const home = homeFor(top);
+  const dir = join2(home, ".git", "braid");
+  const separate = real(home) === real(top);
+  return { top, common, home, dir, store: join2(dir, "store"), cache: join2(dir, "cache", separate ? "home" : common.replace(/[^A-Za-z0-9]/g, "-")), ...separate ? { separate } : {} };
 }
 function isEnabled(repo) {
   return !!repo.separate || !!repo.auto || hasConfig(repo);
 }
-var hasConfig = (repo) => existsSync(join(repo.top, ".braid", "config.toml"));
-function defaultSeparate() {
-  return process.env.BRAID_HOME || join(homedir(), ".braid");
+var hasConfig = (repo) => existsSync(join2(repo.top, ".braid", "config.toml"));
+function defaultHome() {
+  return process.env.BRAID_HOME || join2(homedir(), ".braid");
+}
+function homeFor(top) {
+  return repoSetting(top) ?? defaultHome();
 }
 function expandPath(path2, base) {
-  if (path2 === "~" || path2.startsWith("~/")) return join(homedir(), path2.slice(1));
+  if (path2 === "~" || path2.startsWith("~/")) return join2(homedir(), path2.slice(1));
   return isAbsolute(path2) ? path2 : resolve(base, path2);
 }
-function separateRepo(path2, code, create) {
-  if (!existsSync(join(path2, ".git"))) {
+var isRepo = (path2) => {
+  try {
+    return statSync(join2(path2, ".git")).isDirectory();
+  } catch {
+    return false;
+  }
+};
+function homeRepo(path2, create) {
+  if (!isRepo(path2)) {
     if (!create) return void 0;
     mkdirSync(path2, { recursive: true });
     git(["init", "--quiet", path2]);
   }
   const repo = findRepo(path2);
-  if (!repo) return void 0;
-  return { ...repo, separate: true, code: code && code !== repo.top ? code : void 0 };
+  return repo?.separate ? repo : void 0;
 }
 function locate(cwd) {
   const code = findRepo(cwd);
-  const enabled = code && hasConfig(code) ? code : void 0;
-  const setting = repoSetting(enabled);
-  if (setting) return separateRepo(setting, code?.top, true);
-  if (enabled) return enabled;
-  const home = separateRepo(defaultSeparate(), code?.top, false);
-  if (home && code && !home.code) return home;
-  if (home && code && readConfig(code).autopilot) return { ...code, auto: true };
-  return home;
+  if (code && !code.separate && hasConfig(code)) return code;
+  const home = code?.home ?? defaultHome();
+  if (!isRepo(home)) return void 0;
+  if (code && !code.separate) return { ...code, auto: true };
+  return homeRepo(home, false);
 }
-function repoSetting(code) {
+function repoSetting(top) {
   const own = userConfig().repo;
   if (own !== void 0) return own === "auto" ? void 0 : expandPath(own, homedir());
-  const value = code ? readKeys(code).get("repo") : void 0;
-  return value && value !== "auto" ? expandPath(value, code.top) : void 0;
+  const value = top ? readKeys({ top }).get("repo") : void 0;
+  return value && value !== "auto" ? expandPath(value, top) : void 0;
 }
 function ensureStore(repo) {
-  if (existsSync(join(repo.store, "HEAD"))) return;
+  if (existsSync(join2(repo.store, "HEAD"))) return;
+  if (!isRepo(repo.home)) homeRepo(repo.home, true);
   mkdirSync(repo.dir, { recursive: true });
   git(["init", "--quiet", "--bare", repo.store]);
 }
 function configDir() {
-  return join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "braid");
+  return join2(process.env.XDG_CONFIG_HOME || join2(homedir(), ".config"), "braid");
 }
 function userConfig() {
-  const path2 = join(configDir(), "config.toml");
+  const path2 = join2(configDir(), "config.toml");
   if (!existsSync(path2)) return { paths: [] };
   const text = readFileSync(path2, "utf8");
   const top = text.split(/^\s*\[/m)[0] ?? "";
@@ -377,7 +397,7 @@ function userConfig() {
 }
 function readKeys(repo) {
   const keys = /* @__PURE__ */ new Map();
-  const path2 = join(repo.top, ".braid", "config.toml");
+  const path2 = join2(repo.top, ".braid", "config.toml");
   if (!existsSync(path2)) return keys;
   for (const line of readFileSync(path2, "utf8").split("\n")) {
     const m = /^\s*([a-z_-]+)\s*=\s*"?([^"#\n]*?)"?\s*(#.*)?$/.exec(line);
@@ -387,8 +407,7 @@ function readKeys(repo) {
 }
 function readConfig(repo) {
   const config2 = { autopilot: true, autofork: true, gitHooks: true, autocommit: false, autopush: true, link: "trailer", remote: "origin" };
-  const fromCode = repo.code ? readKeys({ top: repo.code }) : /* @__PURE__ */ new Map();
-  const keys = repo.separate ? new Map([...fromCode].filter(([k]) => k === "autopilot" || k === "autofork")) : readKeys(repo);
+  const keys = repo.separate ? /* @__PURE__ */ new Map() : readKeys(repo);
   const flag = (key) => keys.get(key) === "true" ? true : keys.get(key) === "false" ? false : void 0;
   config2.gitHooks = hasConfig(repo) ? flag("git-hooks") ?? true : false;
   config2.autopilot = flag("autopilot") ?? config2.autopilot;
@@ -403,8 +422,7 @@ function readConfig(repo) {
   if (own.autofork !== void 0) config2.autofork = own.autofork;
   if (own.autocommit !== void 0) config2.autocommit = own.autocommit;
   if (own.autopush !== void 0) config2.autopush = own.autopush;
-  config2.repo = repo.separate ? repo.top : repoSetting(repo);
-  if (config2.repo) [config2.gitHooks, config2.autocommit, config2.autopush] = [false, false, false];
+  config2.repo = repoSetting(repo.separate ? void 0 : repo.top);
   if (config2.autopilot) [config2.autopush, config2.link] = [false, "store"];
   return config2;
 }
@@ -418,10 +436,10 @@ function storeRef(conv, session) {
 }
 
 // src/state.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join as join2 } from "node:path";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join3 } from "node:path";
 function path(repo, session) {
-  return join2(repo.dir, "sessions", `${session}.json`);
+  return join3(repo.dir, "sessions", `${session}.json`);
 }
 function loadState(repo, session) {
   const p = path(repo, session);
@@ -430,9 +448,9 @@ function loadState(repo, session) {
 }
 function saveState(repo, state) {
   const p = path(repo, state.session);
-  mkdirSync2(join2(repo.dir, "sessions"), { recursive: true });
+  mkdirSync2(join3(repo.dir, "sessions"), { recursive: true });
   const tmp = `${p}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
+  writeFileSync2(tmp, JSON.stringify(state, null, 2) + "\n");
   renameSync(tmp, p);
 }
 function newState(session, transcript) {
@@ -440,8 +458,8 @@ function newState(session, transcript) {
 }
 var sleeper = new Int32Array(new SharedArrayBuffer(4));
 function withLock(repo, name2, fn) {
-  const lock = join2(repo.dir, "locks", name2);
-  mkdirSync2(join2(repo.dir, "locks"), { recursive: true });
+  const lock = join3(repo.dir, "locks", name2);
+  mkdirSync2(join3(repo.dir, "locks"), { recursive: true });
   const deadline = Date.now() + 1e4;
   for (; ; ) {
     try {
@@ -450,11 +468,11 @@ function withLock(repo, name2, fn) {
     } catch {
       let stale = false;
       try {
-        stale = Date.now() - statSync(lock).mtimeMs > 3e4;
+        stale = Date.now() - statSync2(lock).mtimeMs > 3e4;
       } catch {
         continue;
       }
-      if (stale) rmSync(lock, { recursive: true, force: true });
+      if (stale) rmSync2(lock, { recursive: true, force: true });
       else if (Date.now() > deadline) throw new Error(`braid: ${name2} is locked`);
       else Atomics.wait(sleeper, 0, 0, 50);
     }
@@ -462,7 +480,7 @@ function withLock(repo, name2, fn) {
   try {
     return fn();
   } finally {
-    rmSync(lock, { recursive: true, force: true });
+    rmSync2(lock, { recursive: true, force: true });
   }
 }
 
@@ -476,7 +494,7 @@ function commitsOf(repo, logArgs) {
   return (gitMaybe(["log", "--format=%H", ...logArgs], { cwd: repo.top }) ?? "").split("\n").filter(Boolean);
 }
 function commitIndex(repo, remote) {
-  const cacheFile = join3(repo.dir, "cache", "commits.json");
+  const cacheFile = join4(repo.cache, "commits.json");
   let cache = {};
   try {
     cache = JSON.parse(readFileSync3(cacheFile, "utf8"));
@@ -497,14 +515,14 @@ function commitIndex(repo, remote) {
     next[r.key] = { sha: r.sha, session: r.ref.slice(r.ref.lastIndexOf("/") + 1), commits };
   }
   try {
-    mkdirSync3(join3(repo.dir, "cache"), { recursive: true });
-    writeFileSync2(cacheFile, JSON.stringify(next));
+    mkdirSync3(repo.cache, { recursive: true });
+    writeFileSync3(cacheFile, JSON.stringify(next));
   } catch {
   }
   const index2 = /* @__PURE__ */ new Map();
   const add = (sha, session) => index2.set(sha, (index2.get(sha) ?? /* @__PURE__ */ new Set()).add(session));
   for (const { session, commits } of Object.values(next)) for (const sha of commits) add(sha, session);
-  const states = join3(repo.dir, "sessions");
+  const states = join4(repo.dir, "sessions");
   for (const name2 of existsSync3(states) ? readdirSync(states) : []) {
     const state = name2.endsWith(".json") ? loadState(repo, name2.slice(0, -".json".length)) : void 0;
     for (const sha of state?.commits ?? []) add(sha, state.session);
@@ -546,13 +564,13 @@ function fetchSessions(repo, remote, opts = {}) {
 function fetchInBackground(repo, remote, minutes = 3) {
   if (readConfig(repo).autopilot) return;
   if (repo.separate && !gitMaybe(["remote", "get-url", remote], { cwd: repo.top })) return;
-  const stamp = join4(repo.dir, "cache", "fetch");
+  const stamp = join5(repo.cache, "fetch");
   try {
-    if (Date.now() - statSync2(stamp).mtimeMs < minutes * 6e4) return;
+    if (Date.now() - statSync3(stamp).mtimeMs < minutes * 6e4) return;
   } catch {
   }
-  mkdirSync4(join4(repo.dir, "cache"), { recursive: true });
-  writeFileSync3(stamp, "");
+  mkdirSync4(repo.cache, { recursive: true });
+  writeFileSync4(stamp, "");
   const now = /* @__PURE__ */ new Date();
   utimesSync(stamp, now, now);
   const cli = process.argv[1];
@@ -561,8 +579,8 @@ function fetchInBackground(repo, remote, minutes = 3) {
 }
 
 // src/githooks.ts
-import { chmodSync, existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync7, renameSync as renameSync3, rmSync as rmSync2, writeFileSync as writeFileSync6 } from "node:fs";
-import { isAbsolute as isAbsolute3, join as join9 } from "node:path";
+import { chmodSync, existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync7, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync7 } from "node:fs";
+import { isAbsolute as isAbsolute3, join as join10 } from "node:path";
 
 // src/publish.ts
 import { existsSync as existsSync6 } from "node:fs";
@@ -618,8 +636,8 @@ function redactValue(value, counts, extra = []) {
 }
 
 // src/rules.ts
-import { existsSync as existsSync4, readFileSync as readFileSync4, realpathSync } from "node:fs";
-import { dirname, isAbsolute as isAbsolute2, join as join5, normalize, relative } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync4, realpathSync as realpathSync2 } from "node:fs";
+import { dirname, isAbsolute as isAbsolute2, join as join6, normalize, relative } from "node:path";
 
 // src/ignore.ts
 function globBody(glob) {
@@ -705,9 +723,9 @@ function defaultBranch(repo, remote) {
 function loadRules(repo, remote, code) {
   const rules = { redact: [], ignores: [], withholdSession: false, sources: [], problems: [] };
   const texts = [];
-  const own = join5(configDir(), "redact.toml");
+  const own = join6(configDir(), "redact.toml");
   if (existsSync4(own)) texts.push([own.replace(process.env.HOME ?? "\0", "~"), readFileSync4(own, "utf8")]);
-  const codeRepo = code && existsSync4(code) ? findRepo(code) : void 0;
+  const codeRepo = code && code !== repo.top && existsSync4(code) ? findRepo(code) : void 0;
   const ruled = codeRepo ?? repo;
   const branch = defaultBranch(ruled, codeRepo ? "origin" : remote);
   const shared = branch ? gitMaybe(["show", `${branch}:.braid/redact.toml`], { cwd: ruled.top }) : void 0;
@@ -729,10 +747,10 @@ function loadRules(repo, remote, code) {
   }
   const file2 = (path2) => existsSync4(path2) ? readFileSync4(path2, "utf8") : void 0;
   const ignores = [
-    ["~/.config/braid/ignore", file2(join5(configDir(), "ignore"))],
+    ["~/.config/braid/ignore", file2(join6(configDir(), "ignore"))],
     [`.braidignore on ${(branch ?? "").replace(/^refs\/(remotes|heads)\//, "")}`, branch ? gitMaybe(["show", `${branch}:.braidignore`], { cwd: ruled.top }) : void 0],
-    [".braidignore", file2(join5(ruled.top, ".braidignore"))],
-    ...codeRepo ? [[`.braidignore in ${repo.top}`, file2(join5(repo.top, ".braidignore"))]] : []
+    [".braidignore", file2(join6(ruled.top, ".braidignore"))],
+    ...codeRepo ? [[`.braidignore in ${repo.top}`, file2(join6(repo.top, ".braidignore"))]] : []
   ];
   const seen = /* @__PURE__ */ new Set();
   for (const [source, text] of ignores) {
@@ -755,8 +773,8 @@ function pathsOf(args) {
 function inRepo(p, top) {
   let rel = isAbsolute2(p) ? relative(top, p) : normalize(p);
   if (isAbsolute2(p) && rel.startsWith("..")) {
-    const real = existsSync4(p) ? realpathSync(p) : existsSync4(dirname(p)) ? join5(realpathSync(dirname(p)), p.slice(dirname(p).length + 1)) : void 0;
-    rel = real ? relative(top, real) : "..";
+    const real2 = existsSync4(p) ? realpathSync2(p) : existsSync4(dirname(p)) ? join6(realpathSync2(dirname(p)), p.slice(dirname(p).length + 1)) : void 0;
+    rel = real2 ? relative(top, real2) : "..";
   }
   return rel && !rel.startsWith("..") && !isAbsolute2(rel) ? rel : void 0;
 }
@@ -796,9 +814,9 @@ function pathWithheld(records, rules, top) {
 
 // src/replay.ts
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync as existsSync5, mkdirSync as mkdirSync5, openSync, readSync, realpathSync as realpathSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { closeSync, existsSync as existsSync5, mkdirSync as mkdirSync5, openSync, readSync, realpathSync as realpathSync3, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 
 // node_modules/@leostera/atxf/dist/types.js
 var TREE_TYPES = /* @__PURE__ */ new Set([
@@ -1883,7 +1901,7 @@ function allSessions(repo, remote) {
   return [...out.values()];
 }
 function prSessions(repo, n, remote) {
-  const r = spawnSync2("gh", ["pr", "view", n, "--json", "commits"], { cwd: repo.code ?? repo.top, encoding: "utf8" });
+  const r = spawnSync2("gh", ["pr", "view", n, "--json", "commits"], { cwd: repo.top, encoding: "utf8" });
   let commits = [];
   try {
     commits = JSON.parse(r.stdout || "{}").commits ?? [];
@@ -1992,8 +2010,8 @@ function launchDir(transcript) {
 }
 var shellWord = (s) => /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 function projectDir(cwd) {
-  const root = process.env.CLAUDE_CONFIG_DIR || join6(homedir3(), ".claude");
-  return join6(root, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
+  const root = process.env.CLAUDE_CONFIG_DIR || join7(homedir3(), ".claude");
+  return join7(root, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
 }
 function rewrite(value, pairs) {
   if (typeof value === "string") {
@@ -2085,7 +2103,7 @@ function replay(repo, found, remote, opts = {}) {
   const head = lastTurn(own) ?? own.at(-1)?.id;
   if (!head) throw new Error(`session ${found.session.slice(0, 8)} has no records to replay`);
   const fork = forkRecords(all, own, head);
-  const cwd = realpathSync2(opts.cwd ?? process.cwd());
+  const cwd = realpathSync3(opts.cwd ?? process.cwd());
   const from = sourceCwd([...all.values()]);
   const within = !!from && (from === cwd || cwd.startsWith(`${from}/`) || from.startsWith(`${cwd}/`));
   const pairs = [...from && !within ? [[from, cwd]] : [], ...userConfig().paths];
@@ -2093,8 +2111,8 @@ function replay(repo, found, remote, opts = {}) {
   const text = forkText(fork, session, cwd, pairs);
   const dir = projectDir(cwd);
   mkdirSync5(dir, { recursive: true });
-  const file2 = join6(dir, `${session}.jsonl`);
-  writeFileSync4(file2, text);
+  const file2 = join7(dir, `${session}.jsonl`);
+  writeFileSync5(file2, text);
   const state = loadState(repo, session) ?? newState(session, file2);
   const first = own.find((r) => braidOf(r).actor);
   const lines = text.split("\n").filter(Boolean).length;
@@ -2285,6 +2303,7 @@ function publish(repo, session, opts = {}) {
       return { ...result, records, redactions, uncommitted, reason: `${repo.top} has no remote ${remote}: git -C ${shellWord(repo.top)} remote add ${remote} <url>`, report };
     }
     const published = `${PUBLISHED_REFS}/${state.conv}/${session}`;
+    const target = `${repo.common} ${remote}`;
     const tracking = `${remoteRefs(remote)}/${state.conv}/${session}`;
     const localIds = new Set([...v.chunks.flat(), ...[...v.agents.values()].flat(2)].map((r) => r.id));
     const mine = new Map(chunks.flat().map((r) => [r.id, r]));
@@ -2295,7 +2314,7 @@ function publish(repo, session, opts = {}) {
       const theirAgents = parent ? [...readAgents(tracking, { cwd: repo.top }).values()].flat() : [];
       const extra = theirs.filter((r) => !localIds.has(r.id));
       const changed = [...theirs, ...theirAgents].filter((r) => localIds.has(r.id) && ours.get(r.id) !== stable(r)).length;
-      const ownCopy = !!parent && parent === state.published;
+      const ownCopy = !!parent && parent === state.published?.[target];
       const conflicts = ownCopy ? [] : theirs.filter((r) => mine.has(r.id) && stable(mine.get(r.id)) !== stable(r)).map((r) => r.id);
       const commit = writeChunks(extra.length ? [...chunks, extra] : chunks, parent, `publish ${session}`, { cwd: repo.top }, agents, changed > 0);
       return { commit, parent, replaced: changed - conflicts.length, conflicts };
@@ -2315,7 +2334,7 @@ function publish(repo, session, opts = {}) {
     updateRef(tracking, a.commit, a.parent, { cwd: repo.top });
     withLock(repo, `save-${session}`, () => {
       const s = loadState(repo, session);
-      if (s) saveState(repo, { ...s, published: a.commit });
+      if (s) saveState(repo, { ...s, published: { ...s.published, [target]: a.commit } });
     });
     return { session, pushed: true, records, redactions, uncommitted, replaced: a.replaced, conflicts: a.conflicts };
   });
@@ -2325,12 +2344,12 @@ function stable(value) {
 }
 
 // src/registry.ts
-import { existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join7 } from "node:path";
+import { join as join8 } from "node:path";
 function file(session) {
   if (!/^[A-Za-z0-9-]{8,80}$/.test(session)) return void 0;
-  return join7(process.env.XDG_DATA_HOME || join7(homedir4(), ".local", "share"), "braid", "sessions", `${session}.json`);
+  return join8(process.env.XDG_DATA_HOME || join8(homedir4(), ".local", "share"), "braid", "sessions", `${session}.json`);
 }
 function readEntry(session) {
   const path2 = file(session);
@@ -2348,16 +2367,16 @@ function recordSession(session, update2) {
   const entry = readEntry(session) ?? { repos: [] };
   if (update2.transcript) entry.transcript = update2.transcript;
   if (update2.repo && !entry.repos.includes(update2.repo)) entry.repos.push(update2.repo);
-  mkdirSync6(join7(path2, ".."), { recursive: true });
+  mkdirSync6(join8(path2, ".."), { recursive: true });
   const tmp = `${path2}.${process.pid}.tmp`;
-  writeFileSync5(tmp, JSON.stringify(entry, null, 2) + "\n");
+  writeFileSync6(tmp, JSON.stringify(entry, null, 2) + "\n");
   renameSync2(tmp, path2);
 }
 
 // src/save.ts
 import { existsSync as existsSync8, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
 import { hostname, userInfo } from "node:os";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 import { randomUUID as randomUUID2 } from "node:crypto";
 
 // src/points.ts
@@ -2524,7 +2543,7 @@ function header(h, session) {
 }
 function forkSource(repo, session, native) {
   const firstMessage = native.find((r) => r.type === "message")?.id;
-  const dir = join8(repo.dir, "sessions");
+  const dir = join9(repo.dir, "sessions");
   if (!firstMessage || !existsSync8(dir)) return void 0;
   for (const name2 of readdirSync2(dir)) {
     if (!name2.endsWith(".json") || name2 === `${session}.json`) continue;
@@ -2542,7 +2561,7 @@ function save(repo, session, transcript, opts = {}) {
   ensureStore(repo);
   return withLock(repo, `save-${session}`, () => {
     const state = loadState(repo, session) ?? newState(session, transcript);
-    if (repo.code && !state.code) state.code = repo.code;
+    if (!repo.separate && !state.code) state.code = repo.top;
     if (transcript) state.transcript = transcript;
     const path2 = state.transcript;
     if (!path2 || !existsSync8(path2)) {
@@ -2709,13 +2728,13 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
 }
 function collectAgents(repo, state, path2) {
   const out = /* @__PURE__ */ new Map();
-  const dir = join8(path2.replace(/\.jsonl$/, ""), "subagents");
+  const dir = join9(path2.replace(/\.jsonl$/, ""), "subagents");
   if (!existsSync8(dir)) return out;
   state.agents ??= {};
   for (const file2 of readdirSync2(dir).sort()) {
     const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file2)?.[1];
     if (!id) continue;
-    const fp = join8(dir, file2);
+    const fp = join9(dir, file2);
     const prior = state.agents[id];
     const rescan = !!prior && !intact(fp, prior.cursor);
     const st = rescan || !prior ? { cursor: START, linked: prior?.linked } : prior;
@@ -2739,7 +2758,7 @@ function collectAgents(repo, state, path2) {
     if (!st.linked) {
       st.linked = true;
       try {
-        const meta = JSON.parse(readFileSync6(join8(dir, `agent-${id}.meta.json`), "utf8"));
+        const meta = JSON.parse(readFileSync6(join9(dir, `agent-${id}.meta.json`), "utf8"));
         const str = (k) => typeof meta[k] === "string" ? meta[k] : void 0;
         link = { toolUseId: str("toolUseId"), description: str("description"), agentType: str("agentType") };
       } catch {
@@ -2759,7 +2778,7 @@ function register(repo, session, transcript) {
   ensureStore(repo);
   const state = loadState(repo, session) ?? newState(session, transcript);
   if (transcript) state.transcript = transcript;
-  if (repo.code && !state.code) state.code = repo.code;
+  if (!repo.separate && !state.code) state.code = repo.top;
   saveState(repo, state);
   return state;
 }
@@ -2784,12 +2803,12 @@ ${stdin ? `printf '%s\\n' "$input" | "$@"` : '"$@" || true'}
 }
 function hooksDir(repo) {
   const custom = config("core.hooksPath", { cwd: repo.top });
-  if (custom) return { dir: isAbsolute3(custom) ? custom : join9(repo.top, custom), managed: true };
-  return { dir: join9(repo.common, "hooks"), managed: false };
+  if (custom) return { dir: isAbsolute3(custom) ? custom : join10(repo.top, custom), managed: true };
+  return { dir: join10(repo.common, "hooks"), managed: false };
 }
 function hooksInstalled(repo) {
   const { dir } = hooksDir(repo);
-  return HOOKS.every((h) => existsSync9(join9(dir, h)) && readFileSync7(join9(dir, h), "utf8").includes(MARK));
+  return HOOKS.every((h) => existsSync9(join10(dir, h)) && readFileSync7(join10(dir, h), "utf8").includes(MARK));
 }
 function installHooks(repo) {
   const { dir, managed } = hooksDir(repo);
@@ -2803,14 +2822,14 @@ function installHooks(repo) {
   mkdirSync7(dir, { recursive: true });
   const notes = [];
   for (const hook of HOOKS) {
-    const path2 = join9(dir, hook);
+    const path2 = join10(dir, hook);
     if (existsSync9(path2) && !readFileSync7(path2, "utf8").includes(MARK)) {
       if (!existsSync9(`${path2}.local`)) {
         renameSync3(path2, `${path2}.local`);
         notes.push(`kept your ${hook} hook as ${hook}.local; braid runs it first`);
       }
     }
-    writeFileSync6(path2, script(hook));
+    writeFileSync7(path2, script(hook));
     chmodSync(path2, 493);
   }
   return notes;
@@ -2820,9 +2839,9 @@ function uninstallHooks(repo) {
   if (managed) return [`core.hooksPath is set to ${dir}: remove the braid git-hook lines from your hook manager`];
   const notes = [];
   for (const hook of HOOKS) {
-    const path2 = join9(dir, hook);
+    const path2 = join10(dir, hook);
     if (!existsSync9(path2) || !readFileSync7(path2, "utf8").includes(MARK)) continue;
-    rmSync2(path2);
+    rmSync3(path2);
     if (existsSync9(`${path2}.local`)) renameSync3(`${path2}.local`, path2);
     notes.push(`removed the ${hook} hook`);
   }
@@ -2832,10 +2851,9 @@ var active = (repo) => isEnabled(repo) && readConfig(repo).gitHooks;
 function agentSession(repo) {
   const session = process.env.BRAID_SESSION;
   if (!session || !active(repo)) return void 0;
-  if (loadState(repo, session)) return session;
-  const transcript = readEntry(session)?.transcript;
-  if (!transcript) return void 0;
-  register(repo, session, transcript);
+  const transcript = loadState(repo, session) ? void 0 : readEntry(session)?.transcript;
+  if (!loadState(repo, session) && !transcript) return void 0;
+  if (transcript) register(repo, session, transcript);
   recordSession(session, { repo: repo.top });
   return session;
 }
@@ -2896,20 +2914,20 @@ function prePush(repo, remote, stdin) {
 
 // src/hooks.ts
 import { appendFileSync, existsSync as existsSync12 } from "node:fs";
-import { dirname as dirname3, join as join12 } from "node:path";
+import { dirname as dirname3, join as join13 } from "node:path";
 
 // src/setup.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { chmodSync as chmodSync2, existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync8, writeFileSync as writeFileSync7 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync8, writeFileSync as writeFileSync8 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { dirname as dirname2, join as join10, resolve as resolve3 } from "node:path";
+import { dirname as dirname2, join as join11, resolve as resolve3 } from "node:path";
 import { fileURLToPath } from "node:url";
 function cliPath() {
   return resolve3(process.argv[1] ?? fileURLToPath(import.meta.url));
 }
 function writePointer() {
   mkdirSync8(configDir(), { recursive: true });
-  writeFileSync7(join10(configDir(), "cli"), cliPath());
+  writeFileSync8(join11(configDir(), "cli"), cliPath());
 }
 function visibility(repo) {
   const r = spawnSync3("gh", ["repo", "view", "--json", "visibility", "-q", ".visibility"], { cwd: repo.top, encoding: "utf8" });
@@ -2917,14 +2935,13 @@ function visibility(repo) {
 }
 var TEMPLATE = (s) => [
   "# braid: efficient session manager. https://github.com/gbarbalinardo/braid",
-  "# autopilot: braid works on this machine only. It keeps conversations in its own git",
-  "#   storage inside .git, and never pushes, fetches or asks GitHub anything. false: braid",
-  "#   can publish conversations to the remote, for teammates and pull request reviews.",
+  "# autopilot: braid works on this machine only. It keeps conversations in the braid",
+  "#   repository, and never pushes, fetches or asks GitHub anything. false: git push can",
+  "#   publish them to this repository's remote, for teammates and pull request reviews.",
   "# autofork: before a turn that changes a lot, braid marks a point to fork from",
   "#   (braid fork @N). false: no points.",
-  '# repo: where conversations are kept. "auto": in this repository, next to the code. A path,',
-  '#   such as "~/.braid": in that separate git repository; autocommit and autopush are then',
-  "#   off, and /braid:push pushes to its origin.",
+  '# repo: the braid repository conversations are kept in, apart from the code. "auto":',
+  '#   ~/.braid. A path, such as "~/work-convos": that git repository instead.',
   "# git-hooks: commits name the agent session that made them (a Braid-Session trailer), so",
   "#   autocommit and autopush can follow them. false: braid leaves git alone.",
   "# autocommit: each commit the agent makes commits its conversation too. false: you commit",
@@ -2955,18 +2972,24 @@ var IGNORE_TEMPLATE = [
 ].join("\n");
 function init(cwd, opts = {}) {
   const notes = setup();
-  const home = defaultSeparate();
-  if (!separateRepo(home, void 0, false)) {
-    separateRepo(home, void 0, true);
-    notes.push(`created ${home}, a git repository for conversations outside repositories with braid; git -C ${home} remote add origin <url> lets /braid:push share them`);
-  }
   const code = findRepo(cwd);
-  if (code && code.top !== separateRepo(home, void 0, false)?.top) return [...notes, ...initRepo(code, opts)];
-  for (const [key, value] of Object.entries(opts)) if (value !== void 0) notes.push(...setUserKey(key, value));
+  if (code && !code.separate) {
+    notes.push(...initRepo(code, opts));
+  } else {
+    for (const [key, value] of Object.entries(opts)) if (value !== void 0) notes.push(...setUserKey(key, value));
+  }
+  const homes = /* @__PURE__ */ new Set([homeFor(void 0), ...code && !code.separate ? [findRepo(code.top).home] : []]);
+  for (const home of homes) {
+    if (!homeRepo(home, false)) {
+      homeRepo(home, true);
+      notes.push(`created ${home}, the braid repository: every conversation is kept there, apart from the code`);
+    }
+    ensureStore(findRepo(home));
+  }
   return notes;
 }
 function setUserKey(key, value) {
-  const file2 = join10(configDir(), "config.toml");
+  const file2 = join11(configDir(), "config.toml");
   let text = existsSync10(file2) ? readFileSync8(file2, "utf8") : "";
   const line = `${key} = ${tomlValue(value)}`;
   const re = new RegExp(`^${key}\\s*=.*$`, "m");
@@ -2978,14 +3001,14 @@ function setUserKey(key, value) {
 ${text.slice(at)}`;
   }
   mkdirSync8(configDir(), { recursive: true });
-  writeFileSync7(file2, text);
+  writeFileSync8(file2, text);
   const notes = [`set ${line} in ${file2.replace(homedir5(), "~")}`];
-  if (key === "repo" && typeof value === "string" && value !== "auto") notes.push(`conversations are kept in ${separateRepo(expandPath(value, homedir5()), void 0, true).top}; autocommit and autopush are off there`);
+  if (key === "repo" && typeof value === "string" && value !== "auto") notes.push(`conversations are kept in ${homeRepo(expandPath(value, homedir5()), true).top}`);
   return notes;
 }
 function initRepo(repo, opts) {
   const notes = [];
-  const file2 = join10(repo.top, ".braid", "config.toml");
+  const file2 = join11(repo.top, ".braid", "config.toml");
   const autopilot = opts.autopilot ?? (existsSync10(file2) ? readConfig(repo).autopilot : userConfig().autopilot ?? true);
   const pushDefault = () => {
     if (opts.autopush !== void 0) return [opts.autopush, "as asked"];
@@ -2998,7 +3021,7 @@ function initRepo(repo, opts) {
   if (!existsSync10(file2)) {
     const [autopush, why] = pushDefault();
     mkdirSync8(dirname2(file2), { recursive: true });
-    writeFileSync7(
+    writeFileSync8(
       file2,
       TEMPLATE({ autopilot, autofork: opts.autofork ?? true, repo: opts.repo ?? "auto", "git-hooks": opts["git-hooks"] ?? true, autocommit: opts.autocommit ?? false, autopush })
     );
@@ -3019,24 +3042,20 @@ ${line}
 `;
       notes.push(`set ${line} in .braid/config.toml`);
     }
-    if (changes.length) writeFileSync7(file2, text);
+    if (changes.length) writeFileSync8(file2, text);
   }
-  const ignore = join10(repo.top, ".braidignore");
+  const ignore = join11(repo.top, ".braidignore");
   if (!existsSync10(ignore)) {
-    writeFileSync7(ignore, IGNORE_TEMPLATE);
+    writeFileSync8(ignore, IGNORE_TEMPLATE);
     notes.push("wrote .braidignore: tool calls on .env files and keys are never published; add your own paths");
   }
   const config2 = readConfig(repo);
-  if (!config2.repo) ensureStore(repo);
   notes.push(...config2.gitHooks ? installHooks(repo) : uninstallHooks(repo));
-  if (config2.repo) {
-    separateRepo(config2.repo, repo.top, true);
-    notes.push(`conversations here are kept in ${config2.repo}, apart from the code; autocommit and autopush are off, and /braid:push pushes to its origin`);
-  }
+  if (config2.repo) notes.push(`conversations here are kept in ${config2.repo}, apart from the code`);
   return notes;
 }
 function settingsPath() {
-  return join10(process.env.CLAUDE_CONFIG_DIR || join10(homedir5(), ".claude"), "settings.json");
+  return join11(process.env.CLAUDE_CONFIG_DIR || join11(homedir5(), ".claude"), "settings.json");
 }
 var SHIM = `#!/bin/sh
 # braid: runs the braid CLI wherever the Claude Code plugin installed it.
@@ -3047,30 +3066,30 @@ exec node "$(cat "$cli")" "$@"
 function setup(opts = {}) {
   const notes = [];
   const settingsFile = settingsPath();
-  const saved = join10(configDir(), "statusline.json");
+  const saved = join11(configDir(), "statusline.json");
   const settings = existsSync10(settingsFile) ? JSON.parse(readFileSync8(settingsFile, "utf8")) : {};
   const current = settings.statusLine;
   if (opts.undo) {
     const prev = existsSync10(saved) ? JSON.parse(readFileSync8(saved, "utf8")) : {};
     if (prev.previous) settings.statusLine = { type: "command", command: prev.previous, ...prev.refreshInterval ? { refreshInterval: prev.refreshInterval } : {} };
     else delete settings.statusLine;
-    writeFileSync7(settingsFile, JSON.stringify(settings, null, 2) + "\n");
+    writeFileSync8(settingsFile, JSON.stringify(settings, null, 2) + "\n");
     return [`restored the previous status line in ${settingsFile}`];
   }
   writePointer();
-  const bin = join10(homedir5(), ".local", "bin");
+  const bin = join11(homedir5(), ".local", "bin");
   mkdirSync8(bin, { recursive: true });
-  writeFileSync7(join10(bin, "braid"), SHIM);
-  chmodSync2(join10(bin, "braid"), 493);
-  notes.push(`installed ${join10(bin, "braid")}`);
+  writeFileSync8(join11(bin, "braid"), SHIM);
+  chmodSync2(join11(bin, "braid"), 493);
+  notes.push(`installed ${join11(bin, "braid")}`);
   if (!(process.env.PATH ?? "").split(":").includes(bin)) notes.push(`add ${bin} to your PATH to run braid from a terminal`);
-  const command = `${join10(bin, "braid")} statusline`;
+  const command = `${join11(bin, "braid")} statusline`;
   if (current?.command !== command) {
     mkdirSync8(configDir(), { recursive: true });
-    writeFileSync7(saved, JSON.stringify({ previous: current?.command ?? "", refreshInterval: current?.refreshInterval }, null, 2) + "\n");
+    writeFileSync8(saved, JSON.stringify({ previous: current?.command ?? "", refreshInterval: current?.refreshInterval }, null, 2) + "\n");
     settings.statusLine = { type: "command", command, refreshInterval: 30 };
     mkdirSync8(dirname2(settingsFile), { recursive: true });
-    writeFileSync7(settingsFile, JSON.stringify(settings, null, 2) + "\n");
+    writeFileSync8(settingsFile, JSON.stringify(settings, null, 2) + "\n");
     notes.push(`status line set in ${settingsFile}${current?.command ? "; braid runs your previous one first" : ""}`);
   }
   return notes;
@@ -3078,7 +3097,7 @@ function setup(opts = {}) {
 
 // src/verify.ts
 import { existsSync as existsSync11, readdirSync as readdirSync3, readFileSync as readFileSync9 } from "node:fs";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 function readAll(path2, id) {
   const out = /* @__PURE__ */ new Map();
   let cursor = START;
@@ -3234,7 +3253,7 @@ function verify(repo, session, remote) {
   if (state.transcript && existsSync11(state.transcript)) {
     const n = compare("saved", readAll(state.transcript, session), stored, elsewhere, problems);
     checked.push(`saved: ${n} records of the transcript`);
-    const dir = join11(state.transcript.replace(/\.jsonl$/, ""), "subagents");
+    const dir = join12(state.transcript.replace(/\.jsonl$/, ""), "subagents");
     for (const file2 of existsSync11(dir) ? readdirSync3(dir).sort() : []) {
       const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file2)?.[1];
       if (!id) continue;
@@ -3243,7 +3262,7 @@ function verify(repo, session, remote) {
         problems.push(`saved: subagent ${id.slice(0, 8)} is not saved`);
         continue;
       }
-      compare(`subagent ${id.slice(0, 8)}`, readAll(join11(dir, file2), id), mine, () => false, problems);
+      compare(`subagent ${id.slice(0, 8)}`, readAll(join12(dir, file2), id), mine, () => false, problems);
     }
     if (agents.size) checked.push(`saved: ${agents.size} subagents`);
   } else checked.push("saved: the transcript is gone, so only the store is checked");
@@ -3313,7 +3332,7 @@ function sessionStart(input) {
   recordSession(session, { transcript: input.transcript_path });
   const envFile = process.env.CLAUDE_ENV_FILE;
   if (envFile) {
-    const bin = join12(dirname3(dirname3(cliPath())), "bin");
+    const bin = join13(dirname3(dirname3(cliPath())), "bin");
     appendFileSync(envFile, `export BRAID_SESSION=${session}
 export PATH="${bin}:$PATH"
 `);
@@ -3332,8 +3351,7 @@ export PATH="${bin}:$PATH"
 function stop(input) {
   const session = input.session_id;
   if (!session) return "";
-  const repo = locate(input.cwd ?? process.cwd());
-  for (const other of otherRepos(session, repo)) save(other, session, input.transcript_path);
+  const repo = locate(input.cwd ?? process.cwd()) ?? otherRepos(session, void 0)[0];
   if (!repo) return "";
   save(repo, session, input.transcript_path);
   const remote = readConfig(repo).remote;
@@ -3352,18 +3370,16 @@ function sessionEnd(input) {
   const session = input.session_id;
   if (!session) return "";
   const current = locate(input.cwd ?? process.cwd());
-  const failed = [];
-  for (const repo of [...current ? [current] : [], ...otherRepos(session, current)]) {
-    const { state } = save(repo, session, input.transcript_path);
-    if (state.chunks > 0 && state.review && readConfig(repo).autopush) publish(repo, session);
-    if (state.chunks > 0) {
-      const v = verify(repo, session, readConfig(repo).remote);
-      const s = loadState(repo, session);
-      if (s) saveState(repo, { ...s, verified: { ok: v.problems.length === 0, at: (/* @__PURE__ */ new Date()).toISOString(), ...v.problems.length ? { problems: v.problems } : {} } });
-      if (v.problems.length) failed.push(`braid verify ${session} in ${repo.top}: ${v.problems.join("; ")}`);
-    }
-  }
-  if (failed.length) throw new Error(failed.join("\n"));
+  const repos = [...current ? [current] : [], ...otherRepos(session, current)];
+  const repo = repos[0];
+  if (!repo) return "";
+  const { state } = save(repo, session, input.transcript_path);
+  if (state.chunks === 0) return "";
+  for (const r of repos) if (state.review && readConfig(r).autopush) publish(r, session);
+  const v = verify(repo, session, readConfig(repo).remote);
+  const s = loadState(repo, session);
+  if (s) saveState(repo, { ...s, verified: { ok: v.problems.length === 0, at: (/* @__PURE__ */ new Date()).toISOString(), ...v.problems.length ? { problems: v.problems } : {} } });
+  if (v.problems.length) throw new Error(`braid verify ${session} in ${repo.home}: ${v.problems.join("; ")}`);
   return "";
 }
 
@@ -3622,7 +3638,7 @@ function setPrivate(repo, session, value) {
 import { existsSync as existsSync13, readdirSync as readdirSync4 } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir as homedir6 } from "node:os";
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 
 // node_modules/@leostera/atxf/dist/formats/pi.js
@@ -4192,9 +4208,9 @@ function openDatabase(path2) {
   }
 }
 function openclawDatabases() {
-  const agents = join13(process.env.OPENCLAW_HOME || join13(homedir6(), ".openclaw"), "agents");
+  const agents = join14(process.env.OPENCLAW_HOME || join14(homedir6(), ".openclaw"), "agents");
   if (!existsSync13(agents)) return [];
-  return readdirSync4(agents).map((a) => join13(agents, a, "agent", "openclaw-agent.sqlite")).filter((p) => existsSync13(p));
+  return readdirSync4(agents).map((a) => join14(agents, a, "agent", "openclaw-agent.sqlite")).filter((p) => existsSync13(p));
 }
 var decode3 = (row) => (row.event_json ?? zstdDecompressSync(Buffer.from(row.event_zstd ?? new Uint8Array())).toString("utf8")).trim();
 function importOpenclaw(repo, dbPath, only) {
@@ -4276,11 +4292,11 @@ function importOpenclaw(repo, dbPath, only) {
 // src/statusline.ts
 import { spawn as spawn2, spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync14, mkdirSync as mkdirSync9, readFileSync as readFileSync10, statSync as statSync3, writeFileSync as writeFileSync8 } from "node:fs";
-import { join as join14 } from "node:path";
+import { existsSync as existsSync14, mkdirSync as mkdirSync9, readFileSync as readFileSync10, statSync as statSync4, writeFileSync as writeFileSync9 } from "node:fs";
+import { join as join15 } from "node:path";
 var hash2 = (s) => createHash3("sha1").update(s).digest("hex").slice(0, 16);
 function previous(stdin) {
-  const file2 = join14(configDir(), "statusline.json");
+  const file2 = join15(configDir(), "statusline.json");
   if (!existsSync14(file2)) return "";
   const { previous: previous2 } = JSON.parse(readFileSync10(file2, "utf8"));
   if (!previous2) return "";
@@ -4291,16 +4307,15 @@ function pullRequest(repo) {
   if (process.env.BRAID_STATUS_NO_PR) return "";
   const branch = gitMaybe(["branch", "--show-current"], { cwd: repo.top })?.trim();
   if (!branch) return "";
-  const dir = join14(repo.dir, "cache");
-  mkdirSync9(dir, { recursive: true });
-  const file2 = join14(dir, `pr-${hash2(branch)}`);
+  mkdirSync9(repo.cache, { recursive: true });
+  const file2 = join15(repo.cache, `pr-${hash2(branch)}`);
   let fresh = false;
   try {
-    fresh = Date.now() - statSync3(file2).mtimeMs < 5 * 6e4;
+    fresh = Date.now() - statSync4(file2).mtimeMs < 5 * 6e4;
   } catch {
   }
   if (!fresh) {
-    writeFileSync8(file2, existsSync14(file2) ? readFileSync10(file2) : "");
+    writeFileSync9(file2, existsSync14(file2) ? readFileSync10(file2) : "");
     const tmp = `${file2}.${process.pid}`;
     spawn2("sh", ["-c", 'gh pr view --json number -q .number > "$T" 2>/dev/null; mv "$T" "$F"'], {
       cwd: repo.top,
@@ -4314,7 +4329,7 @@ function pullRequest(repo) {
 }
 function braidPart(repo, session, remote) {
   const conv = convOf(repo, session);
-  const statePath = join14(repo.dir, "sessions", `${session}.json`);
+  const statePath = join15(repo.dir, "sessions", `${session}.json`);
   const key = hash2(
     [
       session,
@@ -4323,14 +4338,14 @@ function braidPart(repo, session, remote) {
       ...forEachRef([`${SESSION_REFS}/${conv ?? "-"}/`], { gitDir: repo.store }).map((r) => r.sha + r.ref),
       ...forEachRef([`${remoteRefs(remote)}/${conv ?? "-"}/`], { cwd: repo.top }).map((r) => r.sha + r.ref),
       gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim(),
-      existsSync14(statePath) ? statSync3(statePath).mtimeMs : 0
+      existsSync14(statePath) ? statSync4(statePath).mtimeMs : 0
     ].join("\n")
   );
-  const file2 = join14(repo.dir, "cache", `status-${key}`);
+  const file2 = join15(repo.cache, `status-${key}`);
   if (existsSync14(file2)) return readFileSync10(file2, "utf8");
   const text = render(computeStatus(repo, session, remote));
-  mkdirSync9(join14(repo.dir, "cache"), { recursive: true });
-  writeFileSync8(file2, text);
+  mkdirSync9(repo.cache, { recursive: true });
+  writeFileSync9(file2, text);
   return text;
 }
 function statusline(stdin) {
@@ -4367,13 +4382,13 @@ Save, edit, commit, push, fork and merge coding-agent sessions with git. Each co
 works on the session it runs in ($BRAID_SESSION), or the one named with --session <id>.
 
 Set up
-  braid init                  this machine: the braid command, the status line, and ~/.braid for
-                              conversations outside repositories with braid. Inside a git
+  braid init                  this machine: the braid command, the status line, and ~/.braid, the
+                              braid repository that keeps every conversation. Inside a git
                               repository, braid there too: .braid/config.toml, .braidignore, git hooks
     --autopilot|--no-autopilot  braid works on this machine only: no push, fetch or GitHub (on by default)
     --autofork|--no-autofork    mark a fork point before each big turn (on by default)
-    --repo <path>|auto        keep conversations in a separate git repository (autocommit and
-                              autopush off), or in the repository itself (auto, the default)
+    --repo <path>|auto        keep conversations in another braid repository, or in ~/.braid
+                              (auto, the default)
     --autocommit|--no-autocommit  a code commit commits the conversation too (off by default)
     --autopush|--no-autopush      git push publishes the committed conversation (on by default)
     --no-git-hooks            leave git alone
@@ -4418,7 +4433,7 @@ function readStdin() {
 function logError(err) {
   try {
     mkdirSync10(configDir(), { recursive: true });
-    appendFileSync2(join15(configDir(), "errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${err instanceof Error ? err.stack : String(err)}
+    appendFileSync2(join16(configDir(), "errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${err instanceof Error ? err.stack : String(err)}
 `);
   } catch {
   }
@@ -4456,23 +4471,24 @@ function editSession(repo, remote, flag) {
     if (own.length > 1) throw new Error(`${named} matches ${own.length} of your sessions; name one`);
     return { id: named, explicit: true };
   }
-  const dir = join15(repo.dir, "sessions");
-  const newest = (existsSync15(dir) ? readdirSync5(dir) : []).filter((f) => f.endsWith(".json")).map((f) => ({ id: f.slice(0, -".json".length), at: statSync4(join15(dir, f)).mtimeMs })).sort((a, b) => b.at - a.at)[0];
+  const dir = join16(repo.dir, "sessions");
+  const here = (id) => repo.separate || loadState(repo, id)?.code === repo.top;
+  const newest = (existsSync15(dir) ? readdirSync5(dir) : []).filter((f) => f.endsWith(".json")).map((f) => ({ id: f.slice(0, -".json".length), at: statSync5(join16(dir, f)).mtimeMs })).sort((a, b) => b.at - a.at).find((f) => here(f.id));
   if (!newest) throw new Error("no saved session in this repository");
   return { id: newest.id, explicit: false };
 }
 function editInEditor(text) {
-  const dir = mkdtempSync(join15(tmpdir(), "braid-edit-"));
-  const file2 = join15(dir, "RECORD.md");
+  const dir = mkdtempSync2(join16(tmpdir2(), "braid-edit-"));
+  const file2 = join16(dir, "RECORD.md");
   try {
-    writeFileSync9(file2, `${text}
+    writeFileSync10(file2, `${text}
 `);
     const editor = process.env.VISUAL || process.env.EDITOR || "vi";
     const r = spawnSync5(`${editor} ${shellWord(file2)}`, { shell: true, stdio: "inherit" });
     if (r.status !== 0) throw new Error(`${editor} exited with ${r.status}; nothing changed`);
     return readFileSync11(file2, "utf8");
   } finally {
-    rmSync3(dir, { recursive: true, force: true });
+    rmSync4(dir, { recursive: true, force: true });
   }
 }
 function page(text) {
@@ -4593,8 +4609,7 @@ function main(argv) {
       const repo = locate(process.cwd());
       if (session && repo && transcript && existsSync15(transcript)) {
         const r = save(repo, session, transcript);
-        const where = repo.separate ? repo.top : join15(repo.common, "braid");
-        out(`braid: saved this conversation (${session.slice(0, 8)}), ${r.added} records, in ${where}`);
+        out(`braid: saved this conversation (${session.slice(0, 8)}), ${r.added} records, in ${repo.home}`);
       }
       return 0;
     }
@@ -4670,7 +4685,8 @@ function main(argv) {
       for (const f of allSessions(repo, remote)) {
         const records = readRecords(f.ref, f.opts);
         const actor = records.map((r) => braidOf(r).actor).find(Boolean);
-        out(`${f.session.slice(0, 8)}  conv ${f.conv.slice(0, 8)}  ${sessionName(records, f.session).padEnd(12)} ${actor?.actorId ?? "?"}  ${records.filter(isTurn).length} records${f.opts.gitDir ? "  (yours)" : ""}`);
+        const ran = f.opts.gitDir ? loadState(repo, f.session)?.code : void 0;
+        out(`${f.session.slice(0, 8)}  conv ${f.conv.slice(0, 8)}  ${sessionName(records, f.session).padEnd(12)} ${actor?.actorId ?? "?"}  ${records.filter(isTurn).length} records${f.opts.gitDir ? `  (yours${ran ? `, in ${ran.replace(homedir7(), "~")}` : ""})` : ""}`);
         for (const line of agentLines(records, readAgents(f.ref, f.opts))) out(`    ${line}`);
       }
       return 0;

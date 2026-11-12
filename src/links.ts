@@ -32,7 +32,7 @@ type IndexCache = Record<string, { sha: string; session: string; commits: string
  * are cached by the ref's sha, so only sessions that moved are read again.
  */
 export function commitIndex(repo: Repo, remote: string): Map<string, Set<string>> {
-  const cacheFile = join(repo.dir, "cache", "commits.json");
+  const cacheFile = join(repo.cache, "commits.json");
   let cache: IndexCache = {};
   try {
     cache = JSON.parse(readFileSync(cacheFile, "utf8")) as IndexCache;
@@ -56,7 +56,7 @@ export function commitIndex(repo: Repo, remote: string): Map<string, Set<string>
     next[r.key] = { sha: r.sha, session: r.ref.slice(r.ref.lastIndexOf("/") + 1), commits };
   }
   try {
-    mkdirSync(join(repo.dir, "cache"), { recursive: true });
+    mkdirSync(repo.cache, { recursive: true });
     writeFileSync(cacheFile, JSON.stringify(next));
   } catch {
     // a read-only checkout still answers

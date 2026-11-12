@@ -32,8 +32,23 @@ export function sandbox(): Env {
   return { root, env };
 }
 
+// Clones on another machine, and the braid repository there.
+const people = new Map<string, string>();
+
+/** The braid repository of whoever works in `dir`: on another machine, theirs there; else the sandbox's ~/.braid. */
+export function braidHome(env: NodeJS.ProcessEnv, dir: string): string {
+  for (const [clone, home] of people) if (dir === clone || dir.startsWith(`${clone}/`)) return home;
+  return join(env.HOME!, ".braid");
+}
+
+/** The store in the braid repository of whoever works in `dir`. */
+export function storeOf(env: NodeJS.ProcessEnv, dir: string): string {
+  return join(braidHome(env, dir), ".git", "braid", "store");
+}
+
 export function run(env: NodeJS.ProcessEnv, cwd: string, cmd: string, args: string[], input?: string) {
-  const r = spawnSync(cmd, args, { cwd, env, input, encoding: "utf8" });
+  const home = [...people].find(([clone]) => cwd === clone || cwd.startsWith(`${clone}/`))?.[1];
+  const r = spawnSync(cmd, args, { cwd, env: home && !env.BRAID_HOME ? { ...env, BRAID_HOME: home } : env, input, encoding: "utf8" });
   return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
@@ -47,9 +62,13 @@ export function braid(env: NodeJS.ProcessEnv, cwd: string, args: string[], input
   return run({ ...env, ...extra }, cwd, "braid", args, input);
 }
 
-/** Clones the sandbox remote as a person with their own git identity. */
-export function clone(s: Env, name: string, email: string): string {
+/**
+ * Clones the sandbox remote as a person with their own git identity. Someone
+ * on another `machine` has their own braid repository there.
+ */
+export function clone(s: Env, name: string, email: string, machine?: string): string {
   const dir = join(s.root, name);
+  if (machine) people.set(dir, join(s.root, "machines", machine, ".braid"));
   must(s.env, s.root, "git", ["clone", "--quiet", join(s.root, "remote.git"), dir]);
   must(s.env, dir, "git", ["config", "user.name", name]);
   must(s.env, dir, "git", ["config", "user.email", email]);

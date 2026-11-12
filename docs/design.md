@@ -44,15 +44,18 @@ A **projection** renders a branch for one reader in one harness:
 
 | Location | Holds |
 |---|---|
-| `.git/braid/store`, a separate bare repository, ref `refs/sessions/<conversation>/<session>` | your sessions as written, unredacted |
-| `refs/braid/sessions/<conversation>/<session>` on the remote | published sessions: redacted, with withheld records removed |
-| `refs/braid/remotes/origin/sessions/<conversation>/<session>` in your clone | the last fetched copy of each published session |
-| `.git/braid/sessions/<session>.json` | the session's state: where the last save stopped, what `braid edit` withheld, rewrote or hid, a merge waiting to be written, the last `braid verify` |
+| `~/.braid/.git/braid/store`, a bare repository in the braid repository, ref `refs/sessions/<conversation>/<session>` | your sessions as written, unredacted, from every code repository and from outside any |
+| `refs/braid/sessions/<conversation>/<session>` on a code repository's remote | published sessions: redacted, with withheld records removed |
+| `refs/braid/remotes/origin/sessions/<conversation>/<session>` in your clone of the code | the last fetched copy of each published session |
+| `~/.braid/.git/braid/sessions/<session>.json` | the session's state: the code repository it ran in, where the last save stopped, what `braid edit` withheld, rewrote or hid, a merge waiting to be written, the last `braid verify` |
 | `refs/tags/points/<session>/<n>` in the store | fork points: with autofork, the session as it stood before a turn that changed a lot |
+| `~/.braid/.git/braid/cache/<code repository>/` | what braid caches about each code repository: which commits lead to which sessions, the status line, the last fetch |
 
-On autopilot, the default, braid keeps conversations in the repository the session runs in, inside its `.git`, even where braid was never set up there, and in `~/.braid` outside any repository. It writes no files into the working tree and installs no hooks unless `braid init` ran in that repository, and it never pushes, fetches or calls `gh`. The `repo` setting can name a separate git repository instead, such as `~/convos`: braid then keeps the conversations of that repository there, with no store, hooks, autocommit or autopush in the code repository, and `/braid:push` pushes to the separate repository's `origin`. The code repository's `.braidignore` and `redact.toml` still apply to its sessions.
+A conversation belongs to no code repository: a session can start in one repository, commit in two others, or run outside any. braid keeps every conversation in one git repository of its own, the braid repository, `~/.braid` by default, each session under its own ref, and notes in each session's state the code repository it ran in. A code repository holds braid's settings (`.braid/config.toml`), its rules (`.braidignore`, `.braid/redact.toml`) and its git hooks, and its remote is where `git push` publishes the sessions behind the pushed commits; the conversations themselves stay in the braid repository. Forking, merging and reading a session work the same from any directory, since every conversation is in one place.
 
-The unredacted store sits outside the repository's refs, so no git command can push it by accident, `git push --mirror` included. The repository itself only ever holds copies that were already published.
+On autopilot, the default, braid saves the sessions of any git repository once `braid init` has created `~/.braid` on the machine, and of repositories set up with braid in any case. It writes nothing into the code's working tree or `.git`, installs no hooks unless `braid init` ran in that repository, and never pushes, fetches or calls `gh`. The `repo` setting names another braid repository, such as `~/work-convos`: in your own config for every repository, or in one repository's `.braid/config.toml` for its sessions. A session's own code repository's `.braidignore` and `redact.toml` apply wherever it is published. Sessions outside any code repository are published with `/braid:push` to the braid repository's `origin`, once it has one.
+
+The unredacted store is a bare repository inside the braid repository's `.git`, outside the refs of any repository, so no git command can push it by accident, `git push --mirror` included. A code repository only ever holds copies that were already published.
 
 A session ref holds only the records that session wrote. The conversation is the union of its sessions, and reading it reconciles them. Each person publishes only their own sessions, and continuing someone else's session always starts a new one, so every ref has a single writer. Publishing pushes with `--force-with-lease`. When the same session is saved on two machines, as when a transcript is copied by hand, each publish keeps the records the remote copy has and this machine lacks, and after a lease failure braid fetches the remote copy and tries once more. A record both copies hold with different content is reported, and the publishing machine's version wins.
 
@@ -101,7 +104,7 @@ These settings in `.braid/config.toml` decide what braid does by itself, and you
 |---|---|---|
 | `autopilot` | `true` | braid works on this machine only: no pushing, fetching or `gh`, so no autopush, and no trailers (as with `link = "store"`). Off, the settings below decide how sessions are shared. |
 | `autofork` | `true` | before a turn that edits 5 files or makes 30 tool calls, braid tags the session as it stood, a fork point that `braid fork @N` continues from in a new window |
-| `repo` | `auto` | `auto` keeps conversations in the repository; a path keeps them in that separate git repository, with autocommit and autopush off |
+| `repo` | `auto` | the braid repository conversations are kept in: `auto` is `~/.braid`; a path names another git repository |
 | `autocommit` | `false` | each code commit the agent makes commits its conversation too; off, you commit it with `/braid:commit` after `/braid:edit` |
 | `autopush` | `true`; `braid init` writes `false` in public repositories, and on autopilot | off autopilot, `git push` publishes the committed part of the sessions behind the pushed commits; off, `/braid:push` publishes |
 
@@ -309,7 +312,7 @@ The skills and the hooks call the CLI. You rarely need it yourself.
 
 | Command | |
 |---|---|
-| `braid init [--[no-]autopilot] [--[no-]autofork] [--repo <path>\|auto] [--no-git-hooks] [--[no-]autocommit] [--[no-]autopush] [--undo]` | once per machine: a `braid` command in `~/.local/bin`, braid's part of the status line, and `~/.braid`; inside a repository, `.braid/config.toml`, `.braidignore`, the store, and git hooks unless turned off; later, change the settings. It saves the conversation it runs in. |
+| `braid init [--[no-]autopilot] [--[no-]autofork] [--repo <path>\|auto] [--no-git-hooks] [--[no-]autocommit] [--[no-]autopush] [--undo]` | once per machine: a `braid` command in `~/.local/bin`, braid's part of the status line, and `~/.braid`, the braid repository; inside a code repository, `.braid/config.toml`, `.braidignore`, and git hooks unless turned off; later, change the settings. It saves the conversation it runs in. |
 | `braid status` | where this session stands, and the sessions of its conversation |
 | `braid edit [<n>…] [--rewrite <n>] [--hide <s>] [--last 30m] [--all] [--undo]` | the session as it would be published, and what to withhold, rewrite or hide |
 | `braid commit -m "<message>"` | commit the conversation up to here |
@@ -349,7 +352,7 @@ braid ships as a Claude Code plugin served from this repository. The plugin carr
 Built, for Claude Code:
 - **Saving:** each turn is saved into the store, read incrementally in bounded windows, and subagents are saved with their session. On autopilot, the default, every session on the machine is saved and nothing leaves it. `braid verify` checks that a session was saved as it happened, and that a fork written from the store holds the lines Claude Code reads to resume the transcript; it runs when each session ends. `npm run check:resume -- <transcript>` resumes a session and its fork in Claude Code against a local server and compares the requests Claude Code would send, byte for byte. Autofork marks fork points before big turns.
 - **Git:** `/braid:commit` commits the conversation, and publishing goes up to the last commit. The agent's code commits get trailers and labels in the conversation, or with `link = "store"` labels only; `autocommit` makes them commit the conversation too. `post-rewrite` carries those links across amends and rebases. The git hooks are on by default; `git-hooks = false` turns them off.
-- **Repositories:** a session is saved and published in every repository it commits in.
+- **Repositories:** every conversation is kept in the braid repository (`~/.braid`), apart from the code; a session is published to the remote of every repository it commits in.
 - **Publishing:** `git push` publishes with `autopush`, with built-in and team redaction rules, `.braidignore`, and `--dry-run`. `braid edit` withholds, rewrites and hides parts of a session, and the next push replaces what was already published. The status line and the after-turn line show where each session stands, and `braid fetch` gets teammates' sessions.
 - **Forks and merges:** `/braid:fork` prints the command that continues this session, or another, in a new window, Claude Code's `/branch` is recorded as a branch, and `/braid:merge` merges or skips waiting or named sessions.
 - **Machines:** `braid fork` continues a session here or on another machine, and two machines can publish the same session.

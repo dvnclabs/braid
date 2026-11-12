@@ -34,15 +34,15 @@ export function fetchSessions(repo: Repo, remote: string, opts: { all?: boolean 
 /** Starts a background fetch when the last one is older than `minutes`. */
 export function fetchInBackground(repo: Repo, remote: string, minutes = 3): void {
   if (readConfig(repo).autopilot) return;
-  // A separate repository often has no remote: nothing to fetch.
+  // The braid repository often has no remote: nothing to fetch.
   if (repo.separate && !gitMaybe(["remote", "get-url", remote], { cwd: repo.top })) return;
-  const stamp = join(repo.dir, "cache", "fetch");
+  const stamp = join(repo.cache, "fetch");
   try {
     if (Date.now() - statSync(stamp).mtimeMs < minutes * 60_000) return;
   } catch {
     // never fetched
   }
-  mkdirSync(join(repo.dir, "cache"), { recursive: true });
+  mkdirSync(repo.cache, { recursive: true });
   writeFileSync(stamp, "");
   const now = new Date();
   utimesSync(stamp, now, now);

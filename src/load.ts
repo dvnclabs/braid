@@ -38,7 +38,7 @@ export function allSessions(repo: Repo, remote: string): Found[] {
  * after a squash merge rewrote them on the base branch.
  */
 function prSessions(repo: Repo, n: string, remote: string): Set<string> {
-  const r = spawnSync("gh", ["pr", "view", n, "--json", "commits"], { cwd: repo.code ?? repo.top, encoding: "utf8" });
+  const r = spawnSync("gh", ["pr", "view", n, "--json", "commits"], { cwd: repo.top, encoding: "utf8" });
   let commits: { oid?: string; messageBody?: string }[] = [];
   try {
     commits = (JSON.parse(r.stdout || "{}") as { commits?: typeof commits }).commits ?? [];

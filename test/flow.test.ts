@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { braid, clone, must, run, sandbox, Transcript } from "./helpers.ts";
+import { braid, clone, must, run, sandbox, storeOf, Transcript } from "./helpers.ts";
 
 const ALICE = "5b0e2c1a-7f3d-4c2e-9a61-0d8e4b2f6c13";
 const BOB = "01a1bc3e-e950-7c4b-9e7a-62f0e9a7c418";
@@ -85,7 +85,7 @@ test("save, publish, review, merge", () => {
   assert.equal(line.stdout.trim(), "5b0e2c1a · ✓");
 
   // Bob clones; his first session sets up the hooks itself and lists Alice's session.
-  const bob = clone(s, "bob", "bob@example.com");
+  const bob = clone(s, "bob", "bob@example.com", "bob");
   const tb = new Transcript(s.root, BOB);
   const bobEnv = join(s.root, "env-bob");
   writeFileSync(bobEnv, "");
@@ -137,7 +137,7 @@ test("save, publish, review, merge", () => {
   ta.user("Apply it.");
   braid(s.env, alice, ["hook", "stop"], hookIn(ALICE, ta, alice));
 
-  const store = join(alice, ".git", "braid", "store");
+  const store = storeOf(s.env, alice);
   const mine = records(s.env, alice, store, `refs/sessions/${ALICE}/${ALICE}`);
   const merge = mine.find((r) => r.type === "branch_summary");
   assert.ok(merge, "the merge record is saved");
@@ -257,7 +257,7 @@ test("commit, branch, and merge the branch back", () => {
   tb.user("Try a TTL cache instead.");
   const ttl = tb.assistant("A TTL of 60 s fits.");
   braid(s.env, repo, ["hook", "stop"], hookIn(BRANCH, tb));
-  const store = join(repo, ".git", "braid", "store");
+  const store = storeOf(s.env, repo);
   const branch = records(s.env, repo, store, `refs/sessions/${ALICE}/${BRANCH}`).filter((r) => r.type === "message");
   assert.deepEqual(branch.map((r) => r.id).at(-1), ttl);
   assert.equal(branch.length, 2, "the copied records are not saved twice");
@@ -323,7 +323,7 @@ test("subagents are saved, published and briefed with their session", () => {
   writeFileSync(join(dir, "agent-a36fc26663a698234.meta.json"), JSON.stringify({ agentType: "Explore", description: "Find webhook callers", toolUseId: "toolu_agent1" }));
   braid(s.env, repo, ["hook", "stop"], hookIn);
 
-  const store = join(repo, ".git", "braid", "store");
+  const store = storeOf(s.env, repo);
   const ref = `refs/sessions/${ALICE}/${ALICE}`;
   const mine = records(s.env, repo, store, ref);
   const link = mine.find((r) => r.type === "agent_link");
@@ -454,7 +454,7 @@ test("with link = store, commits carry no trailer and still lead to their sessio
   );
 
   // A teammate on the branch sees the session in the index.
-  const bob = clone(s, "bob", "bob@example.com");
+  const bob = clone(s, "bob", "bob@example.com", "bob");
   must(s.env, bob, "git", ["checkout", "--quiet", "retries"]);
   braid(s.env, bob, ["fetch"]);
   const tb = new Transcript(s.root, BOB);
@@ -569,7 +569,7 @@ test("a session moves to another machine, and two machines publish one session",
   appendFileSync(file, JSON.stringify({ parentUuid: last, type: "user", message: { role: "user", content: "Now add tests." }, uuid: "b0000000-0000-4000-8000-000000000001", timestamp: "2026-11-09T12:00:00.000Z", sessionId: newId, cwd: real }) + "\n");
   braid(envB, b, ["hook", "session-start"], hookIn(newId, file, b));
   braid(envB, b, ["hook", "stop"], hookIn(newId, file, b));
-  const store = join(b, ".git", "braid", "store");
+  const store = storeOf(envB, b);
   const saved = records(envB, b, store, `refs/sessions/${ALICE}/${newId}`).filter((x) => x.type === "message");
   assert.deepEqual(saved.map((x) => x.content), ["Now add tests."], "the copied records are not saved again");
   assert.equal(saved[0].parentId, head, "the fork continues from the source head");
@@ -627,7 +627,7 @@ test("OpenClaw sessions import from SQLite, incrementally", async () => {
   assert.match(first.stdout, /6f0a5d05 Inbox: imported 4 records/);
   assert.match(first.stdout, /77aa0000 Research: imported 1 records/);
   assert.doesNotMatch(first.stderr, /ExperimentalWarning/);
-  const store = join(repo, ".git", "braid", "store");
+  const store = storeOf(s.env, repo);
   assert.ok(must(s.env, repo, "git", ["--git-dir", store, "for-each-ref", "--format=%(refname)"]).includes(`refs/sessions/${MAIN}/${CHILD}`), "a spawned session joins its parent's conversation");
 
   // Only new events are imported the next time.
@@ -698,13 +698,15 @@ test("on autopilot, braid keeps conversations on this machine, saves the convers
   t.user("Plan the parser rewrite.");
   t.assistant("Start with the tokenizer.");
   braid(s.env, repo, ["hook", "stop"], hookIn);
-  assert.equal(existsSync(join(repo, ".git", "braid", "store")), false);
+  assert.equal(existsSync(storeOf(s.env, repo)), false);
 
   // /braid:init in that session saves it from its first turn, and leaves autopilot on.
   const init = braid(s.env, repo, ["init"], undefined, { BRAID_SESSION: ALICE });
   assert.equal(init.status, 0, init.stderr);
   assert.match(init.stdout, /autopilot: conversations stay on this machine/);
-  assert.match(init.stdout, /saved this conversation \(5b0e2c1a\), 3 records, in \S+\/\.git\/braid/);
+  assert.match(init.stdout, /created \S+\/home\/\.braid, the braid repository/);
+  assert.match(init.stdout, /saved this conversation \(5b0e2c1a\), 3 records, in \S+\/home\/\.braid$/m);
+  assert.equal(existsSync(join(repo, ".git", "braid")), false, "nothing in the code repository's .git");
   assert.match(readFileSync(join(repo, ".braid", "config.toml"), "utf8"), /^autopilot = true$/m);
 
   // A big turn: braid marks the conversation as it stood before it.
@@ -740,7 +742,7 @@ test("on autopilot, braid keeps conversations on this machine, saves the convers
   assert.match(braid(s.env, repo, ["fetch"]).stderr, /autopilot is on/);
   assert.match(braid(s.env, repo, ["review", "1", "--session", ALICE]).stderr, /autopilot is on/);
 
-  // On autopilot braid keeps conversations in any git repository, inside its .git, with no files and no hooks there.
+  // On autopilot braid keeps the conversations of any git repository in the braid repository, with no files and no hooks in the code.
   const other = clone(s, "erin2", "erin@example.com");
   const t2 = new Transcript(s.root, BOB);
   const in2 = JSON.stringify({ session_id: BOB, transcript_path: t2.path, cwd: other });
@@ -748,21 +750,26 @@ test("on autopilot, braid keeps conversations on this machine, saves the convers
   t2.user("Read the README.");
   t2.assistant("It says shop.");
   braid(s.env, other, ["hook", "stop"], in2);
-  assert.equal(records(s.env, s.root, join(other, ".git", "braid", "store"), `refs/sessions/${BOB}/${BOB}`).length, 3);
+  assert.equal(records(s.env, s.root, storeOf(s.env, other), `refs/sessions/${BOB}/${BOB}`).length, 3);
   assert.equal(existsSync(join(other, ".braid")), false);
+  assert.equal(existsSync(join(other, ".git", "braid")), false);
   assert.equal(existsSync(join(other, ".git", "hooks", "post-commit")), false);
+  // One braid repository holds both conversations, and lists each with where it ran.
+  const list = braid(s.env, other, ["sessions"]).stdout;
+  assert.match(list, new RegExp(`^${ALICE.slice(0, 8)} .*\\(yours, in \\S+/erin\\)$`, "m"));
+  assert.match(list, new RegExp(`^${BOB.slice(0, 8)} .*\\(yours, in \\S+/erin2\\)$`, "m"));
 });
 
-test("a separate repository keeps conversations apart from the code, and outside any repository", () => {
+test("the repo setting names another braid repository; the code's remote still publishes; outside any repository, ~/.braid", () => {
   const s = sandbox();
   const repo = clone(s, "dana", "dana@example.com");
   writeFileSync(join(repo, ".env"), "TOKEN=hunter2\n");
   must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
   const init = braid(s.env, repo, ["init", "--no-autopilot", "--repo", "~/convos"]);
   assert.equal(init.status, 0, init.stderr);
-  assert.match(init.stdout, /conversations here are kept in \S+\/convos, apart from the code; autocommit and autopush are off/);
+  assert.match(init.stdout, /conversations here are kept in \S+\/convos, apart from the code/);
   assert.match(readFileSync(join(repo, ".braid", "config.toml"), "utf8"), /^repo = "~\/convos"$/m);
-  assert.equal(existsSync(join(repo, ".git", "hooks", "pre-push")), false, "no git hooks in the code repository");
+  assert.ok(existsSync(join(repo, ".git", "hooks", "pre-push")), "the code repository's git hooks still publish");
 
   const t = new Transcript(s.root, ALICE);
   const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo });
@@ -773,19 +780,15 @@ test("a separate repository keeps conversations apart from the code, and outside
   braid(s.env, repo, ["hook", "stop"], hookIn);
   const convos = join(s.env.HOME!, "convos");
   assert.ok(records(s.env, s.root, join(convos, ".git", "braid", "store"), `refs/sessions/${ALICE}/${ALICE}`).length > 0);
-  assert.equal(existsSync(join(repo, ".git", "braid", "store")), false);
+  assert.equal(existsSync(join(repo, ".git", "braid")), false);
 
-  // The code repository's .braidignore still applies; braid push needs a remote for ~/convos.
+  // The code repository's .braidignore applies, and braid push publishes to the code repository's remote.
   braid(s.env, repo, ["commit", "-m", "Token check", "--session", ALICE]);
   assert.match(braid(s.env, repo, ["edit", "--session", ALICE]).stdout, /✗ agent +→ Read \S*\/\.env {2}\[\.braidignore \.env\]/);
-  assert.match(braid(s.env, repo, ["push", "--session", ALICE]).stdout, /has no remote origin: git -C \S+convos remote add origin <url>/);
-  must(s.env, s.root, "git", ["init", "--quiet", "--bare", "convos.git"]);
-  must(s.env, convos, "git", ["remote", "add", "origin", join(s.root, "convos.git")]);
   assert.match(braid(s.env, repo, ["push", "--session", ALICE]).stdout, /published 5b0e2c1a, 2 records/);
-  const text = JSON.stringify(records(s.env, s.root, join(s.root, "convos.git"), `refs/braid/sessions/${ALICE}/${ALICE}`));
+  const text = JSON.stringify(records(s.env, s.root, join(s.root, "remote.git"), `refs/braid/sessions/${ALICE}/${ALICE}`));
   assert.match(text, /The token is set/);
   assert.doesNotMatch(text, /hunter2/);
-  assert.equal(must(s.env, s.root, "git", ["--git-dir", join(s.root, "remote.git"), "for-each-ref", "refs/braid"]), "", "nothing on the code's remote");
 
   // Outside any git repository, sessions go to ~/.braid.
   const scratch = join(s.root, "scratch");
@@ -827,7 +830,7 @@ test("braid verify: sessions are saved as they happened and load back the same, 
     tb.assistant(`Branch step ${i} done.`);
   }
   braid(s.env, repo, ["hook", "stop"], hookIn(BRANCH, tb), small);
-  const ids = records(s.env, repo, join(repo, ".git", "braid", "store"), `refs/sessions/${ALICE}/${BRANCH}`).map((r) => r.id);
+  const ids = records(s.env, repo, storeOf(s.env, repo), `refs/sessions/${ALICE}/${BRANCH}`).map((r) => r.id);
   assert.equal(new Set(ids).size, ids.length, "no record saved twice");
   const branch = braid(s.env, repo, ["verify", "--session", BRANCH], undefined, small);
   assert.equal(branch.status, 0, branch.stdout);
@@ -917,6 +920,6 @@ test("a fork holds what Claude Code reads to resume: what a compaction kept, par
   const forkIn = JSON.stringify({ session_id: id, transcript_path: file, cwd: repo });
   braid(s.env, repo, ["hook", "session-start"], forkIn);
   braid(s.env, repo, ["hook", "stop"], forkIn);
-  const saved = records(s.env, repo, join(repo, ".git", "braid", "store"), `refs/sessions/${ALICE}/${id}`).filter((x) => x.type !== "transcript");
+  const saved = records(s.env, repo, storeOf(s.env, repo), `refs/sessions/${ALICE}/${id}`).filter((x) => x.type !== "transcript");
   assert.deepEqual(saved.map((x) => x.content), ["Next."], "the copied lines are not saved again");
 });

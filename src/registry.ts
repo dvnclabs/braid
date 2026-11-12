@@ -1,14 +1,14 @@
-// The sessions running on this machine, and the repositories each one committed
-// in. An agent often starts in one repository and commits in another (a nested
-// repository, a worktree); the git hooks of that repository find the session's
-// transcript here, and the session is then saved and published there too.
+// The sessions running on this machine, and the code repositories each one
+// committed in. An agent often starts in one repository and commits in another
+// (a nested repository, a worktree); the git hooks of that repository find the
+// session's transcript here, and that repository's remote publishes it too.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 export interface Entry {
   transcript?: string;
-  /** Working trees of the repositories the session is saved in. */
+  /** Working trees of the code repositories the session ran or committed in. */
   repos: string[];
 }
 

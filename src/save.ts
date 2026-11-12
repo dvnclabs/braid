@@ -81,7 +81,7 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
   ensureStore(repo);
   return withLock(repo, `save-${session}`, () => {
     const state = loadState(repo, session) ?? newState(session, transcript);
-    if (repo.code && !state.code) state.code = repo.code;
+    if (!repo.separate && !state.code) state.code = repo.top;
     if (transcript) state.transcript = transcript;
     const path = state.transcript;
     if (!path || !existsSync(path)) {
@@ -347,7 +347,7 @@ export function register(repo: Repo, session: string, transcript?: string): Sess
   ensureStore(repo);
   const state = loadState(repo, session) ?? newState(session, transcript);
   if (transcript) state.transcript = transcript;
-  if (repo.code && !state.code) state.code = repo.code;
+  if (!repo.separate && !state.code) state.code = repo.top;
   saveState(repo, state);
   return state;
 }

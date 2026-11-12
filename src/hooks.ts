@@ -44,7 +44,7 @@ function index(repo: Repo, current: string, remote: string): string {
   ].join("\n");
 }
 
-/** Other repositories this session committed in, where braid is set up. */
+/** Other code repositories this session committed in, where braid is set up: their remotes publish it too. */
 function otherRepos(session: string, current: Repo | undefined): Repo[] {
   const seen = new Set(current ? [current.common] : []);
   const out: Repo[] = [];
@@ -75,7 +75,7 @@ export function sessionStart(input: HookInput): string {
   recordSession(session, { repo: repo.top });
   const remote = config.remote;
   fetchInBackground(repo, remote, 0);
-  // A separate repository has no code, so no branch to list sessions behind.
+  // Outside a code repository there is no branch to list sessions behind.
   const context = repo.separate ? "" : index(repo, session, remote);
   return context ? JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context } }) : "";
 }
@@ -83,8 +83,8 @@ export function sessionStart(input: HookInput): string {
 export function stop(input: HookInput): string {
   const session = input.session_id;
   if (!session) return "";
-  const repo = locate(input.cwd ?? process.cwd());
-  for (const other of otherRepos(session, repo)) save(other, session, input.transcript_path);
+  // One braid repository holds the session, whichever code repositories it ran and committed in.
+  const repo = locate(input.cwd ?? process.cwd()) ?? otherRepos(session, undefined)[0];
   if (!repo) return "";
   save(repo, session, input.transcript_path);
   const remote = readConfig(repo).remote;
@@ -105,19 +105,17 @@ export function sessionEnd(input: HookInput): string {
   const session = input.session_id;
   if (!session) return "";
   const current = locate(input.cwd ?? process.cwd());
-  const failed: string[] = [];
-  for (const repo of [...(current ? [current] : []), ...otherRepos(session, current)]) {
-    const { state } = save(repo, session, input.transcript_path);
-    if (state.chunks > 0 && state.review && readConfig(repo).autopush) publish(repo, session);
-    // Each session is checked when it ends: saved as it happened, and loads back the same.
-    if (state.chunks > 0) {
-      const v = verify(repo, session, readConfig(repo).remote);
-      const s = loadState(repo, session);
-      if (s) saveState(repo, { ...s, verified: { ok: v.problems.length === 0, at: new Date().toISOString(), ...(v.problems.length ? { problems: v.problems } : {}) } });
-      if (v.problems.length) failed.push(`braid verify ${session} in ${repo.top}: ${v.problems.join("; ")}`);
-    }
-  }
+  const repos = [...(current ? [current] : []), ...otherRepos(session, current)];
+  const repo = repos[0];
+  if (!repo) return "";
+  const { state } = save(repo, session, input.transcript_path);
+  if (state.chunks === 0) return "";
+  for (const r of repos) if (state.review && readConfig(r).autopush) publish(r, session);
+  // Each session is checked when it ends: saved as it happened, and loads back the same.
+  const v = verify(repo, session, readConfig(repo).remote);
+  const s = loadState(repo, session);
+  if (s) saveState(repo, { ...s, verified: { ok: v.problems.length === 0, at: new Date().toISOString(), ...(v.problems.length ? { problems: v.problems } : {}) } });
   // Logged by the hook runner; the status line shows ⚠ braid verify when the session is resumed.
-  if (failed.length) throw new Error(failed.join("\n"));
+  if (v.problems.length) throw new Error(`braid verify ${session} in ${repo.home}: ${v.problems.join("; ")}`);
   return "";
 }

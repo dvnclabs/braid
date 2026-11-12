@@ -1,7 +1,7 @@
 // braid command line. Hooks call it too, so hook commands never fail loudly.
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { readAgents, readRecords } from "./chunks.ts";
@@ -32,13 +32,13 @@ Save, edit, commit, push, fork and merge coding-agent sessions with git. Each co
 works on the session it runs in ($BRAID_SESSION), or the one named with --session <id>.
 
 Set up
-  braid init                  this machine: the braid command, the status line, and ~/.braid for
-                              conversations outside repositories with braid. Inside a git
+  braid init                  this machine: the braid command, the status line, and ~/.braid, the
+                              braid repository that keeps every conversation. Inside a git
                               repository, braid there too: .braid/config.toml, .braidignore, git hooks
     --autopilot|--no-autopilot  braid works on this machine only: no push, fetch or GitHub (on by default)
     --autofork|--no-autofork    mark a fork point before each big turn (on by default)
-    --repo <path>|auto        keep conversations in a separate git repository (autocommit and
-                              autopush off), or in the repository itself (auto, the default)
+    --repo <path>|auto        keep conversations in another braid repository, or in ~/.braid
+                              (auto, the default)
     --autocommit|--no-autocommit  a code commit commits the conversation too (off by default)
     --autopush|--no-autopush      git push publishes the committed conversation (on by default)
     --no-git-hooks            leave git alone
@@ -135,11 +135,14 @@ function editSession(repo: Repo, remote: string, flag: string | undefined): { id
     if (own.length > 1) throw new Error(`${named} matches ${own.length} of your sessions; name one`);
     return { id: named, explicit: true };
   }
+  // The braid repository holds every conversation: the newest that ran here.
   const dir = join(repo.dir, "sessions");
+  const here = (id: string) => repo.separate || loadState(repo, id)?.code === repo.top;
   const newest = (existsSync(dir) ? readdirSync(dir) : [])
     .filter((f) => f.endsWith(".json"))
     .map((f) => ({ id: f.slice(0, -".json".length), at: statSync(join(dir, f)).mtimeMs }))
-    .sort((a, b) => b.at - a.at)[0];
+    .sort((a, b) => b.at - a.at)
+    .find((f) => here(f.id));
   if (!newest) throw new Error("no saved session in this repository");
   return { id: newest.id, explicit: false };
 }
@@ -279,8 +282,7 @@ function main(argv: string[]): number {
       const repo = locate(process.cwd());
       if (session && repo && transcript && existsSync(transcript)) {
         const r = save(repo, session, transcript);
-        const where = repo.separate ? repo.top : join(repo.common, "braid");
-        out(`braid: saved this conversation (${session.slice(0, 8)}), ${r.added} records, in ${where}`);
+        out(`braid: saved this conversation (${session.slice(0, 8)}), ${r.added} records, in ${repo.home}`);
       }
       return 0;
     }
@@ -356,7 +358,8 @@ function main(argv: string[]): number {
       for (const f of allSessions(repo, remote)) {
         const records = readRecords(f.ref, f.opts);
         const actor = records.map((r) => braidOf(r).actor).find(Boolean);
-        out(`${f.session.slice(0, 8)}  conv ${f.conv.slice(0, 8)}  ${sessionName(records, f.session).padEnd(12)} ${actor?.actorId ?? "?"}  ${records.filter(isTurn).length} records${f.opts.gitDir ? "  (yours)" : ""}`);
+        const ran = f.opts.gitDir ? loadState(repo, f.session)?.code : undefined;
+        out(`${f.session.slice(0, 8)}  conv ${f.conv.slice(0, 8)}  ${sessionName(records, f.session).padEnd(12)} ${actor?.actorId ?? "?"}  ${records.filter(isTurn).length} records${f.opts.gitDir ? `  (yours${ran ? `, in ${ran.replace(homedir(), "~")}` : ""})` : ""}`);
         for (const line of agentLines(records, readAgents(f.ref, f.opts))) out(`    ${line}`);
       }
       return 0;
