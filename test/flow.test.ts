@@ -817,10 +817,14 @@ test("braid verify: sessions are saved as they happened and load back the same, 
     t.user(`Step ${i}: ${"plan ".repeat(60)}`);
     t.assistant(`Done with step ${i}.`);
   }
+  // After a resume, Claude Code writes an early line again under its uuid: several windows back.
+  const early = JSON.parse(readFileSync(t.path, "utf8").split("\n")[1]!);
+  appendFileSync(t.path, JSON.stringify({ ...early, cwd: "/work/sub" }) + "\n");
   braid(s.env, repo, ["hook", "stop"], hookIn(ALICE, t), small);
   const ok = braid(s.env, repo, ["verify", "--session", ALICE], undefined, small);
   assert.equal(ok.status, 0, ok.stdout);
-  assert.match(ok.stdout, /braid verify 5b0e2c1a: ok\n {2}✓ saved: 24 records of the transcript\n {2}✓ loads: 24 lines, the same in a fork as in the transcript/);
+  assert.match(ok.stdout, /braid verify 5b0e2c1a: ok\n {2}✓ saved: 25 records of the transcript\n {2}✓ loads: 25 lines, the same in a fork as in the transcript/);
+  assert.equal(records(s.env, repo, storeOf(s.env, repo), `refs/sessions/${ALICE}/${ALICE}`).filter((r) => r.id === early.uuid).length, 2, "each line is saved once");
 
   // A /branch copy whose first save spans several windows saves each record once.
   const BRANCH = "7c1d2e3f-0000-4000-8000-0000000000bb";

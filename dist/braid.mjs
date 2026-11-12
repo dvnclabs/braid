@@ -1184,14 +1184,14 @@ function jsonlLine(value) {
 }
 var jsonl = {
   parse(text) {
-    const units = [];
+    const units2 = [];
     let leading = "";
     for (const line of text.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
       if (line.trim() === "") {
-        if (units.length === 0)
+        if (units2.length === 0)
           leading += line;
         else
-          units[units.length - 1].raw += line;
+          units2[units2.length - 1].raw += line;
         continue;
       }
       let value = null;
@@ -1199,27 +1199,27 @@ var jsonl = {
         value = JSON.parse(line);
       } catch {
       }
-      units.push({ value, raw: leading + line });
+      units2.push({ value, raw: leading + line });
       leading = "";
     }
     if (leading !== "") {
-      units.push({ value: null, raw: leading });
+      units2.push({ value: null, raw: leading });
     }
-    return units;
+    return units2;
   },
-  print(units) {
-    return units.map((unit) => unit.raw).join("");
+  print(units2) {
+    return units2.map((unit) => unit.raw).join("");
   },
   canonical: jsonlLine
 };
-function nativeOf(units, source, format, canonical2 = jsonlLine) {
-  const records = units.map((unit) => unit.value);
-  const exact = units.some((unit) => unit.raw !== canonical2(unit.value));
+function nativeOf(units2, source, format, canonical2 = jsonlLine) {
+  const records = units2.map((unit) => unit.value);
+  const exact = units2.some((unit) => unit.raw !== canonical2(unit.value));
   return {
     source,
     ...format ? { format } : {},
     records,
-    ...exact ? { raw: units.map((unit) => unit.raw) } : {}
+    ...exact ? { raw: units2.map((unit) => unit.raw) } : {}
   };
 }
 function nativeOfShared(of, source, format) {
@@ -1237,22 +1237,22 @@ function isPureNative(transcript, agent) {
   return records.every((record2) => record2.native?.source === agent);
 }
 function nativeUnits(transcript, canonical2 = jsonlLine) {
-  const units = [];
+  const units2 = [];
   if (transcript.header.native)
-    units.push(...unitsOfNative(transcript.header.native, canonical2));
+    units2.push(...unitsOfNative(transcript.header.native, canonical2));
   for (const record2 of transcript.records)
-    units.push(...unitsOfNative(record2.native, canonical2));
-  return units;
+    units2.push(...unitsOfNative(record2.native, canonical2));
+  return units2;
 }
 
 // node_modules/@leostera/atxf/dist/codec.js
 function defineConverter(spec, defaults = {}) {
   const toAtxf = (text, options = {}) => {
     const integrity = options.integrity ?? defaults.integrity ?? true;
-    const units = spec.framing.parse(text);
-    const carried = spec.carrier.detach(units);
+    const units2 = spec.framing.parse(text);
+    const carried = spec.carrier.detach(units2);
     if (!carried) {
-      const decoded2 = spec.decode(units, { known: /* @__PURE__ */ new Map(), ids: new IdAllocator() });
+      const decoded2 = spec.decode(units2, { known: /* @__PURE__ */ new Map(), ids: new IdAllocator() });
       const header2 = { ...decoded2.header, fidelity: { ...decoded2.header.fidelity, nativeDigest: nativeDigest(text) } };
       const transcript2 = { header: header2, records: decoded2.records };
       return integrity ? addIntegrity(transcript2) : transcript2;
@@ -1458,11 +1458,11 @@ var ATXF_VERSION = "0.1";
 // node_modules/@leostera/atxf/dist/formats/claude-code.js
 var AGENT = "claude-code";
 var FORMAT = "claude-code/session-jsonl";
-function decode(units, context2) {
+function decode(units2, context2) {
   const tree = new TreeBuilder(context2);
   const native = (unit) => nativeOf([unit], AGENT, FORMAT);
-  const header2 = sessionHeader(units);
-  units.forEach((unit, index2) => {
+  const header2 = sessionHeader(units2);
+  units2.forEach((unit, index2) => {
     const entry = isObject(unit.value) ? unit.value : {};
     if (context2.known.has(index2)) {
       if (typeof entry.uuid === "string")
@@ -1525,8 +1525,8 @@ function decode(units, context2) {
   });
   return { header: header2, records: tree.records };
 }
-function sessionHeader(units) {
-  const entries = units.map((unit) => unit.value).filter(isObject);
+function sessionHeader(units2) {
+  const entries = units2.map((unit) => unit.value).filter(isObject);
   const first = entries.find((entry) => typeof entry.sessionId === "string") ?? {};
   const withCwd = entries.find((entry) => typeof entry.cwd === "string");
   const withTime = entries.find((entry) => isoTime(entry.timestamp, "") !== "");
@@ -1786,11 +1786,11 @@ var carrier = {
   attach(values, transcript) {
     return [{ type: "atxf", transcript: carriedValue(transcript) }, ...values];
   },
-  detach(units) {
-    const index2 = units.findIndex((unit) => isObject(unit.value) && unit.value.type === "atxf" && isObject(unit.value.transcript));
+  detach(units2) {
+    const index2 = units2.findIndex((unit) => isObject(unit.value) && unit.value.type === "atxf" && isObject(unit.value.transcript));
     if (index2 === -1)
       return void 0;
-    return { transcript: units[index2].value.transcript, units: units.filter((_, i) => i !== index2) };
+    return { transcript: units2[index2].value.transcript, units: units2.filter((_, i) => i !== index2) };
   }
 };
 var claudeCode = defineConverter({ agent: AGENT, format: FORMAT, framing: jsonl, decode, encode, carrier });
@@ -1927,8 +1927,13 @@ function resolve2(repo, target, remote) {
 }
 function conversation(repo, conv, remote) {
   const byId = /* @__PURE__ */ new Map();
+  const own = /* @__PURE__ */ new Set();
   for (const s of allSessions(repo, remote).filter((s2) => s2.conv === conv)) {
-    for (const r of readRecords(s.ref, s.opts)) if (!byId.has(r.id) || s.opts.gitDir) byId.set(r.id, r);
+    for (const r of readRecords(s.ref, s.opts)) {
+      if (own.has(r.id) || byId.has(r.id) && !s.opts.gitDir) continue;
+      byId.set(r.id, r);
+      if (s.opts.gitDir) own.add(r.id);
+    }
   }
   return byId;
 }
@@ -2468,6 +2473,49 @@ function renumber(records, base, session) {
     return out;
   });
 }
+function units(buf, from, to) {
+  let n = 0;
+  let filled = false;
+  for (let i = from; i < to; i++) {
+    const c = buf[i];
+    if (c === NL) {
+      if (filled) n++;
+      filled = false;
+    } else if (c !== 32 && c !== 9 && c !== 13) filled = true;
+  }
+  return filled ? n + 1 : n;
+}
+function firstAfter(records, lines) {
+  let seen = 0;
+  for (let i = 0; i < records.length; i++) {
+    const native = records[i].native;
+    const own = native && !native.of ? native.records?.length ?? 0 : 0;
+    if (own > 0 && seen >= lines) return i;
+    seen += own;
+  }
+  return records.length;
+}
+function nativeIds(records) {
+  const rename = /* @__PURE__ */ new Map();
+  for (const r of records) {
+    const uuid = r.native?.records?.[0]?.uuid;
+    if (typeof uuid === "string" && r.id !== uuid && r.id.startsWith(`${uuid}-`) && /^\d+$/.test(r.id.slice(uuid.length + 1))) rename.set(r.id, uuid);
+  }
+  if (rename.size === 0) return records;
+  const fix = (v) => {
+    if (typeof v !== "string") return v;
+    const colon = v.indexOf(":");
+    const head = colon < 0 ? v : v.slice(0, colon);
+    return rename.has(head) ? `${rename.get(head)}${colon < 0 ? "" : v.slice(colon)}` : v;
+  };
+  return records.map((r) => {
+    const out = { ...r, id: fix(r.id) };
+    for (const key of ["parentId", "targetId", "fromId"]) if (key in r) out[key] = fix(r[key]);
+    const native = r.native;
+    if (native?.of && rename.has(native.of.split(":")[0])) out.native = { ...native, of: fix(native.of) };
+    return out;
+  });
+}
 function lineAt(fd, pos) {
   const block = 64 * 1024;
   for (let end = pos; end > 0; ) {
@@ -2497,8 +2545,10 @@ function readWindow(path2, cursor, session, limits = { maxBytes: MAX_WINDOW, ove
     if (start + used <= cursor.offset) return void 0;
     const base = cursor.lines - newlines(buf, 0, cursor.offset - start);
     const t = claudeCode.toAtxf(buf.toString("utf8", 0, used), { integrity: false });
+    const records = nativeIds(renumber(t.records, base, session));
     return {
-      records: renumber(t.records, base, session),
+      records,
+      fresh: firstAfter(records, units(buf, 0, cursor.offset - start)),
       header: t.header,
       cursor: {
         offset: start + used,
@@ -2557,6 +2607,15 @@ function forkSource(repo, session, native) {
   }
   return void 0;
 }
+function unsavedOf(saved) {
+  const left = /* @__PURE__ */ new Map();
+  for (const r of saved) left.set(r.id, (left.get(r.id) ?? 0) + 1);
+  return (r) => {
+    const n = left.get(r.id) ?? 0;
+    if (n > 0) left.set(r.id, n - 1);
+    return n === 0;
+  };
+}
 function save(repo, session, transcript, opts = {}) {
   ensureStore(repo);
   return withLock(repo, `save-${session}`, () => {
@@ -2573,22 +2632,16 @@ function save(repo, session, transcript, opts = {}) {
     }
     const rewritten = state.cursor ? !intact(path2, state.cursor) : state.chunks > 0;
     let cursor = rewritten || !state.cursor ? START : state.cursor;
-    let saved;
-    const savedIds = () => saved ??= new Set(readRecords(storeRef(state.conv, session), { gitDir: repo.store }).map((r) => r.id));
+    const unseen = rewritten ? unsavedOf(readRecords(storeRef(state.conv, session), { gitDir: repo.store })) : void 0;
     let source;
     let added = 0;
-    const unsaved = (r) => state.chunks === 0 || !savedIds().has(r.id);
-    const fresh = (native) => {
+    const fresh = (w) => {
+      const native = unseen ? w.records.slice(w.fresh).filter(unseen) : w.records.slice(w.fresh);
       if (replayed) {
-        return native.filter((r) => !replayed.has(r.id) && !copied(r) && unsaved(r)).map((r) => r.parentId && replayed.has(r.parentId) ? { ...r, parentId: replayed.get(r.parentId) } : r);
+        return native.filter((r) => !replayed.has(r.id) && !copied(r)).map((r) => r.parentId && replayed.has(r.parentId) ? { ...r, parentId: replayed.get(r.parentId) } : r);
       }
-      if (source) return native.filter((r) => !source.known.has(r.id) && unsaved(r));
-      if (state.chunks === 0 && !state.last) return native;
-      if (!rewritten && state.last) {
-        const i = native.findIndex((r) => r.id === state.last);
-        if (i >= 0) return native.slice(i + 1);
-      }
-      return native.filter((r) => !savedIds().has(r.id));
+      if (source) return native.filter((r) => !source.known.has(r.id));
+      return native;
     };
     const agents = collectAgents(repo, state, path2);
     const replayed = state.chunks === 0 && state.forkFrom?.replayed ? replayedIds(conversation(repo, state.forkFrom.conv, readConfig(repo).remote).values()) : void 0;
@@ -2600,8 +2653,7 @@ function save(repo, session, transcript, opts = {}) {
       if (source) state.conv = source.conv;
     }
     for (; ; ) {
-      const records = window ? fresh(window.records) : [];
-      for (const r of records) saved?.add(r.id);
+      const records = window ? fresh(window) : [];
       const final = !window?.more;
       state.first ??= window?.records.find((r) => r.type === "message")?.id;
       const pending = final && (state.pendingMerge || (state.commits ?? []).length > 0 || opts.commit !== void 0 || agents.size > 0);
@@ -2738,16 +2790,10 @@ function collectAgents(repo, state, path2) {
     const prior = state.agents[id];
     const rescan = !!prior && !intact(fp, prior.cursor);
     const st = rescan || !prior ? { cursor: START, linked: prior?.linked } : prior;
-    let saved;
+    const unseen = rescan ? unsavedOf(readAgents(storeRef(state.conv, state.session), { gitDir: repo.store }).get(id) ?? []) : void 0;
     const records = [];
     for (let w = readWindow(fp, st.cursor, id); w; w = w.more ? readWindow(fp, st.cursor, id) : void 0) {
-      let fresh = w.records;
-      const i = st.last ? fresh.findIndex((r) => r.id === st.last) : -1;
-      if (i >= 0) fresh = fresh.slice(i + 1);
-      else if (rescan) {
-        saved ??= new Set((readAgents(storeRef(state.conv, state.session), { gitDir: repo.store }).get(id) ?? []).map((r) => r.id));
-        fresh = fresh.filter((r) => !saved.has(r.id));
-      }
+      const fresh = unseen ? w.records.slice(w.fresh).filter(unseen) : w.records.slice(w.fresh);
       records.push(...fresh);
       st.cursor = w.cursor;
       st.last = fresh.at(-1)?.id ?? st.last;
@@ -3099,13 +3145,13 @@ function setup(opts = {}) {
 import { existsSync as existsSync11, readdirSync as readdirSync3, readFileSync as readFileSync9 } from "node:fs";
 import { join as join12 } from "node:path";
 function readAll(path2, id) {
-  const out = /* @__PURE__ */ new Map();
+  const out = [];
   let cursor = START;
   for (let w = readWindow(path2, cursor, id); w; w = w.more ? readWindow(path2, cursor, id) : void 0) {
-    for (const r of w.records) if (!out.has(r.id)) out.set(r.id, r);
+    out.push(...w.records.slice(w.fresh));
     cursor = w.cursor;
   }
-  return [...out.values()];
+  return out;
 }
 function content(r) {
   const native = r.native?.records?.[0];
@@ -3121,15 +3167,34 @@ function stable2(value) {
   return JSON.stringify(value, (_k, v) => v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
 }
 function compare(what, transcript, stored, elsewhere, problems) {
-  const byId = new Map(stored.map((r) => [r.id, r]));
-  const twice = stored.length - byId.size;
+  const copies = (rs) => {
+    const by = /* @__PURE__ */ new Map();
+    rs.forEach((r, i) => by.set(r.id, [...by.get(r.id) ?? [], i]));
+    return by;
+  };
+  const saved = copies(stored);
+  const lines = copies(transcript);
+  const nth = (rs) => {
+    const seen = /* @__PURE__ */ new Map();
+    return rs.map((r) => {
+      const n = seen.get(r.id) ?? 0;
+      seen.set(r.id, n + 1);
+      return n;
+    });
+  };
+  const twice = [...saved].reduce((sum2, [id, at]) => sum2 + Math.max(0, at.length - Math.max(1, lines.get(id)?.length ?? 0)), 0);
   if (twice) problems.push(`${what}: ${twice} records are saved twice`);
-  const missing = transcript.filter((r) => !byId.has(r.id) && !elsewhere(r.id));
-  const changed = transcript.filter((r) => byId.has(r.id) && content(byId.get(r.id)) !== content(r));
+  const tn = nth(transcript);
+  const savedCopy = (r, i) => {
+    const at = saved.get(r.id)?.[tn[i]];
+    return at === void 0 ? void 0 : stored[at];
+  };
+  const missing = transcript.filter((r, i) => !savedCopy(r, i) && !elsewhere(r.id));
+  const changed = transcript.filter((r, i) => savedCopy(r, i) && content(savedCopy(r, i)) !== content(r));
   if (missing.length) problems.push(`${what}: ${missing.length} records of the transcript are not saved, from: ${which(missing[0])}`);
   if (changed.length) problems.push(`${what}: ${changed.length} saved records differ from the transcript, from: ${which(changed[0])}`);
-  const at = new Map(transcript.map((r, i) => [r.id, i]));
-  const order = stored.map((r) => at.get(r.id)).filter((i) => i !== void 0);
+  const sn = nth(stored);
+  const order = stored.map((r, k) => lines.get(r.id)?.[sn[k]]).filter((i) => i !== void 0);
   const swaps = order.filter((i, k) => k > 0 && i < order[k - 1]).length;
   if (swaps) problems.push(`${what}: ${swaps} saved records are out of the transcript's order`);
   return transcript.length - missing.length;
@@ -3149,7 +3214,8 @@ var blocksOf = (l) => {
   return Array.isArray(c) ? c : [];
 };
 function resumeLines(lines, head, stored, session) {
-  const byUuid = new Map(lines.flatMap((l) => typeof l.uuid === "string" ? [[l.uuid, l]] : []));
+  const byUuid = /* @__PURE__ */ new Map();
+  for (const l of lines) if (typeof l.uuid === "string" && !byUuid.has(l.uuid)) byUuid.set(l.uuid, l);
   const leaf = byUuid.get(head) ?? lines.find((l) => typeof l.uuid === "string" && head.startsWith(`${l.uuid}:`));
   const chain = [];
   const seen = /* @__PURE__ */ new Set();
@@ -3273,7 +3339,7 @@ function verify(repo, session, remote) {
     const onPath = new Set(fork.path.map((r) => r.id));
     const written = fork.records.filter((r) => r.type === "message" && (isNative(r) || onPath.has(r.id)));
     const original = replayedIds(fork.records);
-    const back = new Map(claudeCode.toAtxf(text, { integrity: false }).records.map((r) => [original.get(r.id) ?? r.id, r]));
+    const back = new Map(nativeIds(claudeCode.toAtxf(text, { integrity: false }).records).map((r) => [original.get(r.id) ?? r.id, r]));
     const lost = written.filter((r) => !back.has(r.id) || said(back.get(r.id)) !== said(r));
     if (lost.length) problems.push(`loads: ${lost.length} of the ${written.length} messages a fork writes read back otherwise, from: ${describe(lost[0], 80)}`);
     const since = fork.path[0]?.type === "custom" && String(fork.path[0].name ?? "").includes("compact") ? " since the last compaction" : "";
@@ -3644,11 +3710,11 @@ import { zstdDecompressSync } from "node:zlib";
 // node_modules/@leostera/atxf/dist/formats/pi.js
 var AGENT2 = "pi";
 var FORMAT2 = "pi/session-jsonl";
-function decode2(units, context2) {
+function decode2(units2, context2) {
   const read = reader(context2);
-  const { header: header2, took } = read.start(units[0]);
-  for (let index2 = took ? 1 : 0; index2 < units.length; index2++)
-    read.next(units[index2], index2);
+  const { header: header2, took } = read.start(units2[0]);
+  for (let index2 = took ? 1 : 0; index2 < units2.length; index2++)
+    read.next(units2[index2], index2);
   return { header: header2, records: read.tree.records };
 }
 function reader(context2, retain = true) {
@@ -4181,14 +4247,14 @@ var carrier2 = {
     const [header2, ...rest] = values;
     return [{ ...header2, atxf: { ...header2.atxf, transcript: carriedValue(transcript) } }, ...rest];
   },
-  detach(units) {
-    const index2 = units.findIndex((unit) => isObject(unit.value) && isObject(unit.value.atxf) && isObject(unit.value.atxf.transcript));
+  detach(units2) {
+    const index2 = units2.findIndex((unit) => isObject(unit.value) && isObject(unit.value.atxf) && isObject(unit.value.atxf.transcript));
     if (index2 === -1)
       return void 0;
-    const value = units[index2].value;
+    const value = units2[index2].value;
     const { transcript, ...mark } = value.atxf;
-    const rest = units.slice();
-    rest[index2] = { value: { ...value, atxf: mark }, raw: units[index2].raw };
+    const rest = units2.slice();
+    rest[index2] = { value: { ...value, atxf: mark }, raw: units2[index2].raw };
     return { transcript, units: rest };
   }
 };

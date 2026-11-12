@@ -18,6 +18,8 @@ export interface Cursor {
 
 export interface Window {
   records: Rec[];
+  /** Where the records of lines after the cursor start: those before were read by an earlier save, from the overlap. */
+  fresh: number;
   header: Record<string, unknown>;
   cursor: Cursor;
   /** The window stopped at its size limit, and more of the file may follow. */
@@ -87,6 +89,60 @@ function renumber(records: Rec[], base: number, session: string): Rec[] {
   });
 }
 
+/** Lines in buf[from, to) with something on them: the units the converter reads. */
+function units(buf: Buffer, from: number, to: number): number {
+  let n = 0;
+  let filled = false;
+  for (let i = from; i < to; i++) {
+    const c = buf[i]!;
+    if (c === NL) {
+      if (filled) n++;
+      filled = false;
+    } else if (c !== 32 && c !== 9 && c !== 13) filled = true;
+  }
+  return filled ? n + 1 : n;
+}
+
+/** The index of the first record read from a line after the first `lines` units: each line ends up in one record's `native`. */
+function firstAfter(records: Rec[], lines: number): number {
+  let seen = 0;
+  for (let i = 0; i < records.length; i++) {
+    const native = records[i]!.native as { records?: unknown[]; of?: string } | undefined;
+    const own = native && !native.of ? (native.records?.length ?? 0) : 0;
+    if (own > 0 && seen >= lines) return i;
+    seen += own;
+  }
+  return records.length;
+}
+
+/**
+ * Claude Code can write a line again under the uuid it already has, as it
+ * does for some results after a resume. The converter names the second copy
+ * `<uuid>-2` when both are in the text it reads, and `<uuid>` when the first
+ * is not; every copy keeps the uuid, so a line reads the same in any window.
+ */
+export function nativeIds(records: Rec[]): Rec[] {
+  const rename = new Map<string, string>();
+  for (const r of records) {
+    const uuid = (r.native as { records?: { uuid?: unknown }[]; of?: string } | undefined)?.records?.[0]?.uuid;
+    if (typeof uuid === "string" && r.id !== uuid && r.id.startsWith(`${uuid}-`) && /^\d+$/.test(r.id.slice(uuid.length + 1))) rename.set(r.id, uuid);
+  }
+  if (rename.size === 0) return records;
+  const fix = (v: unknown): unknown => {
+    if (typeof v !== "string") return v;
+    const colon = v.indexOf(":");
+    const head = colon < 0 ? v : v.slice(0, colon);
+    return rename.has(head) ? `${rename.get(head)}${colon < 0 ? "" : v.slice(colon)}` : v;
+  };
+  return records.map((r) => {
+    const out: Rec = { ...r, id: fix(r.id) as string };
+    for (const key of ["parentId", "targetId", "fromId"]) if (key in r) out[key] = fix(r[key]);
+    const native = r.native as { of?: string } | undefined;
+    if (native?.of && rename.has(native.of.split(":")[0]!)) out.native = { ...native, of: fix(native.of) };
+    return out;
+  });
+}
+
 /** The start of the line holding byte `pos`: just after the newline before it. */
 function lineAt(fd: number, pos: number): number {
   const block = 64 * 1024;
@@ -125,8 +181,10 @@ export function readWindow(path: string, cursor: Cursor, session: string, limits
     if (start + used <= cursor.offset) return undefined;
     const base = cursor.lines - newlines(buf, 0, cursor.offset - start);
     const t = claudeCode.toAtxf(buf.toString("utf8", 0, used), { integrity: false });
+    const records = nativeIds(renumber(t.records as unknown as Rec[], base, session));
     return {
-      records: renumber(t.records as unknown as Rec[], base, session),
+      records,
+      fresh: firstAfter(records, units(buf, 0, cursor.offset - start)),
       header: t.header as unknown as Record<string, unknown>,
       cursor: {
         offset: start + used,

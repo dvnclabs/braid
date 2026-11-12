@@ -11,7 +11,7 @@ import { ensureStore, readConfig, SESSION_REFS, storeRef, type Repo } from "./re
 import { replayedIds } from "./replay.ts";
 import { markIfBig } from "./points.ts";
 import { loadState, newState, saveState, withLock, type SessionState } from "./state.ts";
-import { intact, readWindow, START } from "./transcript.ts";
+import { intact, readWindow, START, type Window } from "./transcript.ts";
 import { VERSION } from "./version.ts";
 
 export function actorId(repo: Repo): string {
@@ -70,6 +70,17 @@ function forkSource(repo: Repo, session: string, native: Rec[]): { conv: string;
   return undefined;
 }
 
+/** For a file read again from the start: whether a record is past the copies of its id the store holds already. */
+function unsavedOf(saved: Rec[]): (r: Rec) => boolean {
+  const left = new Map<string, number>();
+  for (const r of saved) left.set(r.id, (left.get(r.id) ?? 0) + 1);
+  return (r) => {
+    const n = left.get(r.id) ?? 0;
+    if (n > 0) left.set(r.id, n - 1);
+    return n === 0;
+  };
+}
+
 /**
  * Saves a session: converts what the harness wrote since the previous save
  * with ATXF's converter and appends it to the session's ref as one chunk, or
@@ -96,26 +107,21 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
     // A rewritten file, or a session saved before braid kept cursors, is read again from the start, keeping only unsaved records.
     const rewritten = state.cursor ? !intact(path, state.cursor) : state.chunks > 0;
     let cursor = rewritten || !state.cursor ? START : state.cursor;
-    let saved: Set<string> | undefined;
-    const savedIds = () => (saved ??= new Set(readRecords(storeRef(state.conv, session), { gitDir: repo.store }).map((r) => r.id)));
+    // A rewritten file is read again from the start: its first copies of each record are the saved ones.
+    const unseen = rewritten ? unsavedOf(readRecords(storeRef(state.conv, session), { gitDir: repo.store })) : undefined;
     let source: ReturnType<typeof forkSource>;
     let added = 0;
 
-    // Records of an earlier window of this save, read again in the next window's overlap, are saved already.
-    const unsaved = (r: Rec) => state.chunks === 0 || !savedIds().has(r.id);
-    const fresh = (native: Rec[]): Rec[] => {
+    // The lines after the cursor: the window's overlap was read by the save before.
+    const fresh = (w: Window): Rec[] => {
+      const native = unseen ? w.records.slice(w.fresh).filter(unseen) : w.records.slice(w.fresh);
       if (replayed) {
         return native
-          .filter((r) => !replayed.has(r.id) && !copied(r) && unsaved(r))
+          .filter((r) => !replayed.has(r.id) && !copied(r))
           .map((r) => (r.parentId && replayed.has(r.parentId) ? { ...r, parentId: replayed.get(r.parentId) } : r));
       }
-      if (source) return native.filter((r) => !source!.known.has(r.id) && unsaved(r));
-      if (state.chunks === 0 && !state.last) return native;
-      if (!rewritten && state.last) {
-        const i = native.findIndex((r) => r.id === state.last);
-        if (i >= 0) return native.slice(i + 1);
-      }
-      return native.filter((r) => !savedIds().has(r.id));
+      if (source) return native.filter((r) => !source!.known.has(r.id));
+      return native;
     };
 
     const agents = collectAgents(repo, state, path);
@@ -131,8 +137,7 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
       if (source) state.conv = source.conv;
     }
     for (;;) {
-      const records = window ? fresh(window.records) : [];
-      for (const r of records) saved?.add(r.id);
+      const records = window ? fresh(window) : [];
       const final = !window?.more;
       state.first ??= window?.records.find((r) => r.type === "message")?.id;
       const pending = final && (state.pendingMerge || (state.commits ?? []).length > 0 || opts.commit !== undefined || agents.size > 0);
@@ -303,16 +308,10 @@ function collectAgents(repo: Repo, state: SessionState, path: string): Map<strin
     const prior = state.agents[id];
     const rescan = !!prior && !intact(fp, prior.cursor);
     const st = rescan || !prior ? { cursor: START, linked: prior?.linked } : prior;
-    let saved: Set<string> | undefined;
+    const unseen = rescan ? unsavedOf(readAgents(storeRef(state.conv, state.session), { gitDir: repo.store }).get(id) ?? []) : undefined;
     const records: Rec[] = [];
     for (let w = readWindow(fp, st.cursor, id); w; w = w.more ? readWindow(fp, st.cursor, id) : undefined) {
-      let fresh = w.records;
-      const i = st.last ? fresh.findIndex((r) => r.id === st.last) : -1;
-      if (i >= 0) fresh = fresh.slice(i + 1);
-      else if (rescan) {
-        saved ??= new Set((readAgents(storeRef(state.conv, state.session), { gitDir: repo.store }).get(id) ?? []).map((r) => r.id));
-        fresh = fresh.filter((r) => !saved!.has(r.id));
-      }
+      const fresh = unseen ? w.records.slice(w.fresh).filter(unseen) : w.records.slice(w.fresh);
       records.push(...fresh);
       st.cursor = w.cursor;
       st.last = fresh.at(-1)?.id ?? st.last;

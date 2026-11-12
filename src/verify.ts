@@ -19,7 +19,7 @@ import { describe, lastTurn, type Rec } from "./records.ts";
 import { forkRecords, forkText, keptUuids, replayedIds, SOURCE_ONLY, type Line } from "./replay.ts";
 import { storeRef, type Repo } from "./repo.ts";
 import { loadState } from "./state.ts";
-import { readWindow, START, type Cursor } from "./transcript.ts";
+import { nativeIds, readWindow, START, type Cursor } from "./transcript.ts";
 
 export interface Verified {
   session: string;
@@ -29,16 +29,15 @@ export interface Verified {
   checked: string[];
 }
 
-/** Every record of a transcript file, read as save reads it. */
+/** Every record of a transcript file, read as save reads it: each window's lines after the one before it. */
 function readAll(path: string, id: string): Rec[] {
-  const out = new Map<string, Rec>();
+  const out: Rec[] = [];
   let cursor: Cursor = START;
   for (let w = readWindow(path, cursor, id); w; w = w.more ? readWindow(path, cursor, id) : undefined) {
-    // A record read again in the next window's overlap keeps its first read, which save keeps: the next window holds less of what came before it.
-    for (const r of w.records) if (!out.has(r.id)) out.set(r.id, r);
+    out.push(...w.records.slice(w.fresh));
     cursor = w.cursor;
   }
-  return [...out.values()];
+  return out;
 }
 
 /**
@@ -66,16 +65,36 @@ function stable(value: unknown): string {
 
 /** Compares a transcript's records with the stored ones. `elsewhere` holds ids saved in other sessions of the conversation. */
 function compare(what: string, transcript: Rec[], stored: Rec[], elsewhere: (id: string) => boolean, problems: string[]): number {
-  const byId = new Map(stored.map((r) => [r.id, r]));
-  const twice = stored.length - byId.size;
+  // A line Claude Code wrote twice under one uuid is two records with that id: the n-th saved copy stands for the n-th line.
+  const copies = (rs: Rec[]) => {
+    const by = new Map<string, number[]>();
+    rs.forEach((r, i) => by.set(r.id, [...(by.get(r.id) ?? []), i]));
+    return by;
+  };
+  const saved = copies(stored);
+  const lines = copies(transcript);
+  const nth = (rs: Rec[]) => {
+    const seen = new Map<string, number>();
+    return rs.map((r) => {
+      const n = seen.get(r.id) ?? 0;
+      seen.set(r.id, n + 1);
+      return n;
+    });
+  };
+  const twice = [...saved].reduce((sum, [id, at]) => sum + Math.max(0, at.length - Math.max(1, lines.get(id)?.length ?? 0)), 0);
   if (twice) problems.push(`${what}: ${twice} records are saved twice`);
-  const missing = transcript.filter((r) => !byId.has(r.id) && !elsewhere(r.id));
-  const changed = transcript.filter((r) => byId.has(r.id) && content(byId.get(r.id)!) !== content(r));
+  const tn = nth(transcript);
+  const savedCopy = (r: Rec, i: number) => {
+    const at = saved.get(r.id)?.[tn[i]!];
+    return at === undefined ? undefined : stored[at]!;
+  };
+  const missing = transcript.filter((r, i) => !savedCopy(r, i) && !elsewhere(r.id));
+  const changed = transcript.filter((r, i) => savedCopy(r, i) && content(savedCopy(r, i)!) !== content(r));
   if (missing.length) problems.push(`${what}: ${missing.length} records of the transcript are not saved, from: ${which(missing[0]!)}`);
   if (changed.length) problems.push(`${what}: ${changed.length} saved records differ from the transcript, from: ${which(changed[0]!)}`);
   // Saved records keep the transcript's order.
-  const at = new Map(transcript.map((r, i) => [r.id, i]));
-  const order = stored.map((r) => at.get(r.id)).filter((i): i is number => i !== undefined);
+  const sn = nth(stored);
+  const order = stored.map((r, k) => lines.get(r.id)?.[sn[k]!]).filter((i): i is number => i !== undefined);
   const swaps = order.filter((i, k) => k > 0 && i < order[k - 1]!).length;
   if (swaps) problems.push(`${what}: ${swaps} saved records are out of the transcript's order`);
   return transcript.length - missing.length;
@@ -109,7 +128,9 @@ const blocksOf = (l: Line): Record<string, unknown>[] => {
  * beside it.
  */
 export function resumeLines(lines: Line[], head: string, stored: Rec[], session: string): Line[] {
-  const byUuid = new Map(lines.flatMap((l) => (typeof l.uuid === "string" ? [[l.uuid, l] as const] : [])));
+  // A line Claude Code wrote again under its uuid holds the same message: the chain goes through the first.
+  const byUuid = new Map<unknown, Line>();
+  for (const l of lines) if (typeof l.uuid === "string" && !byUuid.has(l.uuid)) byUuid.set(l.uuid, l);
   const leaf = byUuid.get(head) ?? lines.find((l) => typeof l.uuid === "string" && head.startsWith(`${l.uuid}:`));
   const chain: Line[] = [];
   const seen = new Set<unknown>();
@@ -251,7 +272,7 @@ export function verify(repo: Repo, session: string, remote: string): Verified {
     const onPath = new Set(fork.path.map((r) => r.id));
     const written = fork.records.filter((r) => r.type === "message" && (isNative(r) || onPath.has(r.id)));
     const original = replayedIds(fork.records);
-    const back = new Map((claudeCode.toAtxf(text, { integrity: false }).records as unknown as Rec[]).map((r) => [original.get(r.id) ?? r.id, r]));
+    const back = new Map(nativeIds(claudeCode.toAtxf(text, { integrity: false }).records as unknown as Rec[]).map((r) => [original.get(r.id) ?? r.id, r]));
     const lost = written.filter((r) => !back.has(r.id) || said(back.get(r.id)!) !== said(r));
     if (lost.length) problems.push(`loads: ${lost.length} of the ${written.length} messages a fork writes read back otherwise, from: ${describe(lost[0]!, 80)}`);
     // Claude Code starts the chain again after a compaction: a fork resumes from its summary, as Claude Code does.

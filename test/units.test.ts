@@ -97,6 +97,10 @@ test("reading a transcript in windows gives the records of reading it whole", ()
     const first = JSON.parse(readFileSync(t.path, "utf8").split("\n")[0]!).uuid;
     if (i === 9) appendFileSync(t.path, JSON.stringify({ type: "last-prompt", lastPrompt: "step 0", leafUuid: first, sessionId: session }) + "\n");
   }
+  // Claude Code writes some lines again under the uuid they have, as after a resume: one from far back, one from close by.
+  const lines = readFileSync(t.path, "utf8").split("\n").filter(Boolean);
+  const again = [lines[0]!, lines.at(-1)!].map((l) => ({ ...JSON.parse(l), cwd: "/work/sub" }));
+  for (const l of again) appendFileSync(t.path, JSON.stringify(l) + "\n");
   const whole = readWindow(t.path, START, session)!;
   assert.equal(whole.more, false);
 
@@ -104,19 +108,20 @@ test("reading a transcript in windows gives the records of reading it whole", ()
   const pieces: Rec[] = [];
   let cursor = START;
   for (let w = readWindow(t.path, cursor, session, { maxBytes: 700, overlap: 300 }); w; w = readWindow(t.path, cursor, session, { maxBytes: 700, overlap: 300 })) {
-    const seen = new Set(pieces.map((r) => r.id));
-    pieces.push(...w.records.filter((r) => !seen.has(r.id)));
+    pieces.push(...w.records.slice(w.fresh));
     cursor = w.cursor;
   }
   const shape = (rs: Rec[]) => rs.map((r) => `${r.type}:${r.id}<${r.parentId ?? ""}${r.targetId ? `>${String(r.targetId)}` : ""}`);
   assert.deepEqual(shape(pieces), shape(whole.records));
+  for (const l of again) assert.equal(whole.records.filter((r) => r.id === l.uuid).length, 2, "a line written twice is two records under its uuid");
   assert.ok(whole.records.some((r) => r.id === `claude-line-36@5b0e2c1a`), "line ids count lines of the whole file");
   assert.equal(cursor.offset, statSync(t.path).size);
   assert.equal(intact(t.path, cursor), true);
 
   // A rewritten file no longer matches the cursor.
   const text = readFileSync(t.path, "utf8");
-  writeFileSync(t.path, text.replace("done 11", "done XI"));
+  const at = text.lastIndexOf("done 11");
+  writeFileSync(t.path, `${text.slice(0, at)}done XI${text.slice(at + "done 11".length)}`);
   assert.equal(intact(t.path, cursor), false);
   writeFileSync(t.path, text.slice(0, 100));
   assert.equal(intact(t.path, cursor), false);

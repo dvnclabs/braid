@@ -65,11 +65,16 @@ export function resolve(repo: Repo, target: string, remote: string): Found[] {
   return sessions.filter((s) => sessionName(readRecords(s.ref, s.opts), s.session) === target);
 }
 
-/** All records of a conversation, preferring your own unredacted copies. */
+/** All records of a conversation, preferring your own unredacted copies, and of a line written twice under one id, the first. */
 export function conversation(repo: Repo, conv: string, remote: string): Map<string, Rec> {
   const byId = new Map<string, Rec>();
+  const own = new Set<string>();
   for (const s of allSessions(repo, remote).filter((s) => s.conv === conv)) {
-    for (const r of readRecords(s.ref, s.opts)) if (!byId.has(r.id) || s.opts.gitDir) byId.set(r.id, r);
+    for (const r of readRecords(s.ref, s.opts)) {
+      if (own.has(r.id) || (byId.has(r.id) && !s.opts.gitDir)) continue;
+      byId.set(r.id, r);
+      if (s.opts.gitDir) own.add(r.id);
+    }
   }
   return byId;
 }
