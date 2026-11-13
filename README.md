@@ -14,7 +14,7 @@ You need Node 22 or later and git. In Claude Code:
 /braid:init
 ```
 
-`/braid:init` installs the `braid` command and braid's part of the status line, and saves the conversation you run it in, from its first turn. From then on braid saves every session on the machine, after each turn. Inside a git repository it also writes `.braid/config.toml` and `.braidignore` there, for the settings below.
+`/braid:init` installs the `braid` command and braid's part of the status line, creates `~/.braid`, the braid repository where every conversation is kept, and saves the conversation you run it in, from its first turn. From then on braid saves every session on the machine, after each turn. Inside a git repository it also writes `.braid/config.toml` and `.braidignore` there, for the settings below.
 
 ## Settings
 

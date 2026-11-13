@@ -312,7 +312,7 @@ The skills and the hooks call the CLI. You rarely need it yourself.
 
 | Command | |
 |---|---|
-| `braid init [--[no-]autopilot] [--[no-]autofork] [--repo <path>\|auto] [--no-git-hooks] [--[no-]autocommit] [--[no-]autopush] [--undo]` | once per machine: a `braid` command in `~/.local/bin`, braid's part of the status line, and `~/.braid`, the braid repository; inside a code repository, `.braid/config.toml`, `.braidignore`, and git hooks unless turned off; later, change the settings. It saves the conversation it runs in. |
+| `braid init [--[no-]autopilot] [--[no-]autofork] [--repo <path>\|auto] [--no-git-hooks] [--[no-]autocommit] [--[no-]autopush] [--undo]` | once per machine: a `braid` command in `~/.local/bin`, braid's part of the status line, and `~/.braid`, the braid repository, with its store; inside a code repository, the braid repository its `repo` setting names, if another, `.braid/config.toml`, `.braidignore`, and git hooks unless turned off; later, change the settings. It saves the conversation it runs in. |
 | `braid status` | where this session stands, and the sessions of its conversation |
 | `braid edit [<n>…] [--rewrite <n>] [--hide <s>] [--last 30m] [--all] [--undo]` | the session as it would be published, and what to withhold, rewrite or hide |
 | `braid commit -m "<message>"` | commit the conversation up to here |
