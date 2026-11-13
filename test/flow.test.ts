@@ -762,6 +762,28 @@ test("on autopilot, braid keeps conversations on this machine, saves the convers
   assert.match(list, new RegExp(`^${BOB.slice(0, 8)} .*\\(yours, in \\S+/erin2\\)$`, "m"));
 });
 
+test("/braid:init saves the conversation it runs in, also one that started before braid was installed", () => {
+  const s = sandbox();
+  const repo = clone(s, "fay", "fay@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  // No session-start hook ran: braid knows neither the session nor its transcript. Claude Code names the session to
+  // the commands it runs, and keeps the transcript in its projects folder.
+  const projects = join(s.env.HOME!, ".claude", "projects", realpathSync(repo).replace(/[^A-Za-z0-9]/g, "-"));
+  mkdirSync(projects, { recursive: true });
+  const t = new Transcript(projects, ALICE);
+  t.user("Install braid.");
+  t.assistant("Installed.");
+  const claude = { CLAUDE_CODE_SESSION_ID: ALICE };
+  const init = braid(s.env, repo, ["init"], undefined, claude);
+  assert.equal(init.status, 0, init.stderr);
+  assert.match(init.stdout, /saved this conversation \(5b0e2c1a\), 3 records/);
+  t.user("Thanks.");
+  t.assistant("You're welcome.");
+  assert.match(braid(s.env, repo, ["save"], undefined, claude).stdout, /saved 2 records/);
+  // BRAID_SESSION set empty names no session, whatever Claude Code names.
+  assert.match(braid(s.env, repo, ["save"], undefined, { ...claude, BRAID_SESSION: "" }).stderr, /no session/);
+});
+
 test("the repo setting names another braid repository; the code's remote still publishes; outside any repository, ~/.braid", () => {
   const s = sandbox();
   const repo = clone(s, "dana", "dana@example.com");

@@ -2,7 +2,7 @@
 
 // src/cli.ts
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { appendFileSync as appendFileSync2, existsSync as existsSync15, mkdirSync as mkdirSync10, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync11, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
+import { appendFileSync as appendFileSync2, existsSync as existsSync15, mkdirSync as mkdirSync10, mkdtempSync as mkdtempSync2, readdirSync as readdirSync6, readFileSync as readFileSync11, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir7, tmpdir as tmpdir2 } from "node:os";
 import { join as join16 } from "node:path";
 import { parseArgs } from "node:util";
@@ -2343,12 +2343,27 @@ function stable(value) {
 }
 
 // src/registry.ts
-import { existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync7, mkdirSync as mkdirSync6, readdirSync as readdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join8 } from "node:path";
 function file(session) {
   if (!/^[A-Za-z0-9-]{8,80}$/.test(session)) return void 0;
   return join8(process.env.XDG_DATA_HOME || join8(homedir4(), ".local", "share"), "braid", "sessions", `${session}.json`);
+}
+function currentSession() {
+  return (process.env.BRAID_SESSION ?? process.env.CLAUDE_CODE_SESSION_ID) || void 0;
+}
+function transcriptOf(session) {
+  const known = readEntry(session)?.transcript;
+  if (known || !/^[A-Za-z0-9-]{8,80}$/.test(session)) return known;
+  const projects = join8(process.env.CLAUDE_CONFIG_DIR || join8(homedir4(), ".claude"), "projects");
+  let dirs;
+  try {
+    dirs = readdirSync2(projects);
+  } catch {
+    return void 0;
+  }
+  return dirs.map((d) => join8(projects, d, `${session}.jsonl`)).find((p) => existsSync7(p));
 }
 function readEntry(session) {
   const path2 = file(session);
@@ -2373,7 +2388,7 @@ function recordSession(session, update2) {
 }
 
 // src/save.ts
-import { existsSync as existsSync8, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync8, readdirSync as readdirSync3, readFileSync as readFileSync6 } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join as join9 } from "node:path";
 import { randomUUID as randomUUID2 } from "node:crypto";
@@ -2589,7 +2604,7 @@ function forkSource(repo, session, native) {
   const firstMessage = native.find((r) => r.type === "message")?.id;
   const dir = join9(repo.dir, "sessions");
   if (!firstMessage || !existsSync8(dir)) return void 0;
-  for (const name2 of readdirSync2(dir)) {
+  for (const name2 of readdirSync3(dir)) {
     if (!name2.endsWith(".json") || name2 === `${session}.json`) continue;
     const other = loadState(repo, name2.slice(0, -".json".length));
     if (!other || other.first !== firstMessage || other.chunks === 0) continue;
@@ -2777,7 +2792,7 @@ function collectAgents(repo, state, path2) {
   const dir = join9(path2.replace(/\.jsonl$/, ""), "subagents");
   if (!existsSync8(dir)) return out;
   state.agents ??= {};
-  for (const file2 of readdirSync2(dir).sort()) {
+  for (const file2 of readdirSync3(dir).sort()) {
     const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file2)?.[1];
     if (!id) continue;
     const fp = join9(dir, file2);
@@ -2889,9 +2904,9 @@ function uninstallHooks(repo) {
 }
 var active = (repo) => isEnabled(repo) && readConfig(repo).gitHooks;
 function agentSession(repo) {
-  const session = process.env.BRAID_SESSION;
+  const session = currentSession();
   if (!session || !active(repo)) return void 0;
-  const transcript = loadState(repo, session) ? void 0 : readEntry(session)?.transcript;
+  const transcript = loadState(repo, session) ? void 0 : transcriptOf(session);
   if (!loadState(repo, session) && !transcript) return void 0;
   if (transcript) register(repo, session, transcript);
   recordSession(session, { repo: repo.top });
@@ -3137,7 +3152,7 @@ function setup(opts = {}) {
 }
 
 // src/verify.ts
-import { existsSync as existsSync11, readdirSync as readdirSync3, readFileSync as readFileSync9 } from "node:fs";
+import { existsSync as existsSync11, readdirSync as readdirSync4, readFileSync as readFileSync9 } from "node:fs";
 import { join as join12 } from "node:path";
 function readAll(path2, id) {
   const out = [];
@@ -3315,7 +3330,7 @@ function verify(repo, session, remote) {
     const n = compare("saved", readAll(state.transcript, session), stored, elsewhere, problems);
     checked.push(`saved: ${n} records of the transcript`);
     const dir = join12(state.transcript.replace(/\.jsonl$/, ""), "subagents");
-    for (const file2 of existsSync11(dir) ? readdirSync3(dir).sort() : []) {
+    for (const file2 of existsSync11(dir) ? readdirSync4(dir).sort() : []) {
       const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file2)?.[1];
       if (!id) continue;
       const mine = agents.get(id);
@@ -3696,7 +3711,7 @@ function setPrivate(repo, session, value) {
 }
 
 // src/openclaw.ts
-import { existsSync as existsSync13, readdirSync as readdirSync4 } from "node:fs";
+import { existsSync as existsSync13, readdirSync as readdirSync5 } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir as homedir6 } from "node:os";
 import { join as join14 } from "node:path";
@@ -4271,7 +4286,7 @@ function openDatabase(path2) {
 function openclawDatabases() {
   const agents = join14(process.env.OPENCLAW_HOME || join14(homedir6(), ".openclaw"), "agents");
   if (!existsSync13(agents)) return [];
-  return readdirSync4(agents).map((a) => join14(agents, a, "agent", "openclaw-agent.sqlite")).filter((p) => existsSync13(p));
+  return readdirSync5(agents).map((a) => join14(agents, a, "agent", "openclaw-agent.sqlite")).filter((p) => existsSync13(p));
 }
 var decode3 = (row) => (row.event_json ?? zstdDecompressSync(Buffer.from(row.event_zstd ?? new Uint8Array())).toString("utf8")).trim();
 function importOpenclaw(repo, dbPath, only) {
@@ -4440,7 +4455,8 @@ ${ours}` : `${prev} \xB7 ${ours}`;
 var HELP = `braid ${VERSION}: efficient session manager
 
 Save, edit, commit, push, fork and merge coding-agent sessions with git. Each command
-works on the session it runs in ($BRAID_SESSION), or the one named with --session <id>.
+works on the session it runs in ($BRAID_SESSION, else Claude Code's $CLAUDE_CODE_SESSION_ID),
+or the one named with --session <id>.
 
 Set up
   braid init                  this machine: the braid command, the status line, and ~/.braid, the
@@ -4505,7 +4521,7 @@ function needRepo() {
   return repo;
 }
 function needSession(flag) {
-  const session = flag ?? process.env.BRAID_SESSION;
+  const session = flag ?? currentSession();
   if (!session) throw new Error("no session: run inside an agent session with braid installed, or pass --session <id>");
   return session;
 }
@@ -4525,7 +4541,7 @@ function agentLines(records, agents) {
   });
 }
 function editSession(repo, remote, flag) {
-  const named = flag ?? process.env.BRAID_SESSION;
+  const named = flag ?? currentSession();
   if (named) {
     const own = resolve2(repo, named, remote).filter((f) => f.opts.gitDir);
     if (own.length === 1) return { id: own[0].session, explicit: true };
@@ -4534,7 +4550,7 @@ function editSession(repo, remote, flag) {
   }
   const dir = join16(repo.dir, "sessions");
   const here = (id) => repo.separate || loadState(repo, id)?.code === repo.top;
-  const newest = (existsSync15(dir) ? readdirSync5(dir) : []).filter((f) => f.endsWith(".json")).map((f) => ({ id: f.slice(0, -".json".length), at: statSync4(join16(dir, f)).mtimeMs })).sort((a, b) => b.at - a.at).find((f) => here(f.id));
+  const newest = (existsSync15(dir) ? readdirSync6(dir) : []).filter((f) => f.endsWith(".json")).map((f) => ({ id: f.slice(0, -".json".length), at: statSync4(join16(dir, f)).mtimeMs })).sort((a, b) => b.at - a.at).find((f) => here(f.id));
   if (!newest) throw new Error("no saved session in this repository");
   return { id: newest.id, explicit: false };
 }
@@ -4665,10 +4681,11 @@ function main(argv) {
         autopush: toggle("autopush")
       };
       for (const note of init(process.cwd(), settings)) out(`braid: ${note}`);
-      const session = str("session") ?? process.env.BRAID_SESSION;
-      const transcript = str("transcript") ?? (session ? readEntry(session)?.transcript : void 0);
+      const session = str("session") ?? currentSession();
+      const transcript = str("transcript") ?? (session ? transcriptOf(session) : void 0);
       const repo = locate(process.cwd());
       if (session && repo && transcript && existsSync15(transcript)) {
+        recordSession(session, { transcript, repo: repo.top });
         const r = save(repo, session, transcript);
         out(`braid: saved this conversation (${session.slice(0, 8)}), ${r.added} records, in ${repo.home}`);
       }
@@ -4676,7 +4693,9 @@ function main(argv) {
     }
     case "save": {
       const repo = needRepo();
-      const r = save(repo, needSession(str("session")), str("transcript"));
+      const session = needSession(str("session"));
+      const known = loadState(repo, session)?.transcript;
+      const r = save(repo, session, str("transcript") ?? (known ? void 0 : transcriptOf(session)));
       out(`braid: saved ${r.added} records`);
       return 0;
     }
@@ -4772,7 +4791,7 @@ function main(argv) {
       const repo = needRepo();
       const remote = str("remote") ?? readConfig(repo).remote;
       if (!args[0]) throw new Error("usage: braid show <id|name|pr:N>");
-      const found = resolve2(repo, args[0], remote).filter((f) => f.session !== process.env.BRAID_SESSION);
+      const found = resolve2(repo, args[0], remote).filter((f) => f.session !== currentSession());
       if (found.length === 0) throw new Error(`no session matches ${args[0]}; try braid fetch --all, then braid sessions`);
       for (const f of found) out(briefing(repo, f, remote).text);
       return 0;
@@ -4780,11 +4799,11 @@ function main(argv) {
     case "fork": {
       const repo = needRepo();
       const remote = str("remote") ?? readConfig(repo).remote;
-      const current = str("session") ?? process.env.BRAID_SESSION;
+      const current = str("session") ?? currentSession();
       const resume = (dir2, id, fork) => `  cd ${shellWord(dir2)} && claude --resume ${id}${fork ? " --fork-session" : ""}`;
       if (!args[0]) {
         if (!current) throw new Error("no session to branch: run inside an agent session, or pass --session <id>");
-        const dir2 = launchDir(loadState(repo, current)?.transcript ?? readEntry(current)?.transcript) ?? process.cwd();
+        const dir2 = launchDir(loadState(repo, current)?.transcript ?? transcriptOf(current)) ?? process.cwd();
         out(["braid: to branch this conversation into a new window, run in a terminal:", resume(dir2, current, true), "or /branch to branch it in this window. braid files the branch in this conversation."].join("\n"));
         return 0;
       }

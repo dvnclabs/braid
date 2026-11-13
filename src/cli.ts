@@ -11,7 +11,7 @@ import { sessionEnd, sessionStart, stop } from "./hooks.ts";
 import { allSessions, briefing, markFork, resolve } from "./load.ts";
 import { context, pick, record } from "./merge.ts";
 import { launchDir, replay, shellWord } from "./replay.ts";
-import { readEntry } from "./registry.ts";
+import { currentSession, recordSession, transcriptOf } from "./registry.ts";
 import { editRecord, hide, lineText, pickLines, renderEdit, editLines, setPrivate, withhold, withholdRecent } from "./edit.ts";
 import { importOpenclaw, openclawDatabases } from "./openclaw.ts";
 import { points } from "./points.ts";
@@ -29,7 +29,8 @@ import { VERSION } from "./version.ts";
 const HELP = `braid ${VERSION}: efficient session manager
 
 Save, edit, commit, push, fork and merge coding-agent sessions with git. Each command
-works on the session it runs in ($BRAID_SESSION), or the one named with --session <id>.
+works on the session it runs in ($BRAID_SESSION, else Claude Code's $CLAUDE_CODE_SESSION_ID),
+or the one named with --session <id>.
 
 Set up
   braid init                  this machine: the braid command, the status line, and ~/.braid, the
@@ -99,7 +100,7 @@ function needRepo(): Repo {
 }
 
 function needSession(flag: string | undefined): string {
-  const session = flag ?? process.env.BRAID_SESSION;
+  const session = flag ?? currentSession();
   if (!session) throw new Error("no session: run inside an agent session with braid installed, or pass --session <id>");
   return session;
 }
@@ -128,7 +129,7 @@ function agentLines(records: Rec[], agents: Map<string, Rec[]>): string[] {
 
 /** The session to edit: named, the agent's own, or else the newest saved here (for reading only). */
 function editSession(repo: Repo, remote: string, flag: string | undefined): { id: string; explicit: boolean } {
-  const named = flag ?? process.env.BRAID_SESSION;
+  const named = flag ?? currentSession();
   if (named) {
     const own = resolve(repo, named, remote).filter((f) => f.opts.gitDir);
     if (own.length === 1) return { id: own[0]!.session, explicit: true };
@@ -277,10 +278,12 @@ function main(argv: string[]): number {
       };
       for (const note of init(process.cwd(), settings)) out(`braid: ${note}`);
       // The conversation braid init runs in is saved now, from its first turn.
-      const session = str("session") ?? process.env.BRAID_SESSION;
-      const transcript = str("transcript") ?? (session ? readEntry(session)?.transcript : undefined);
+      // A session that started before braid was installed has no BRAID_SESSION and no entry: Claude Code names it.
+      const session = str("session") ?? currentSession();
+      const transcript = str("transcript") ?? (session ? transcriptOf(session) : undefined);
       const repo = locate(process.cwd());
       if (session && repo && transcript && existsSync(transcript)) {
+        recordSession(session, { transcript, repo: repo.top });
         const r = save(repo, session, transcript);
         out(`braid: saved this conversation (${session.slice(0, 8)}), ${r.added} records, in ${repo.home}`);
       }
@@ -288,7 +291,9 @@ function main(argv: string[]): number {
     }
     case "save": {
       const repo = needRepo();
-      const r = save(repo, needSession(str("session")), str("transcript"));
+      const session = needSession(str("session"));
+      const known = loadState(repo, session)?.transcript;
+      const r = save(repo, session, str("transcript") ?? (known ? undefined : transcriptOf(session)));
       out(`braid: saved ${r.added} records`);
       return 0;
     }
@@ -384,7 +389,7 @@ function main(argv: string[]): number {
       const repo = needRepo();
       const remote = str("remote") ?? readConfig(repo).remote;
       if (!args[0]) throw new Error("usage: braid show <id|name|pr:N>");
-      const found = resolve(repo, args[0], remote).filter((f) => f.session !== process.env.BRAID_SESSION);
+      const found = resolve(repo, args[0], remote).filter((f) => f.session !== currentSession());
       if (found.length === 0) throw new Error(`no session matches ${args[0]}; try braid fetch --all, then braid sessions`);
       for (const f of found) out(briefing(repo, f, remote).text);
       return 0;
@@ -392,11 +397,11 @@ function main(argv: string[]): number {
     case "fork": {
       const repo = needRepo();
       const remote = str("remote") ?? readConfig(repo).remote;
-      const current = str("session") ?? process.env.BRAID_SESSION;
+      const current = str("session") ?? currentSession();
       const resume = (dir: string, id: string, fork: boolean) => `  cd ${shellWord(dir)} && claude --resume ${id}${fork ? " --fork-session" : ""}`;
       if (!args[0]) {
         if (!current) throw new Error("no session to branch: run inside an agent session, or pass --session <id>");
-        const dir = launchDir(loadState(repo, current)?.transcript ?? readEntry(current)?.transcript) ?? process.cwd();
+        const dir = launchDir(loadState(repo, current)?.transcript ?? transcriptOf(current)) ?? process.cwd();
         out(["braid: to branch this conversation into a new window, run in a terminal:", resume(dir, current, true), "or /branch to branch it in this window. braid files the branch in this conversation."].join("\n"));
         return 0;
       }

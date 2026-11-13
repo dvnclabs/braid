@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { config, git, gitMaybe } from "./git.ts";
 import { publish, type PublishResult } from "./publish.ts";
 import { commitIndex, commitsOf, sessionsFor, trailerSessions } from "./links.ts";
-import { readEntry, recordSession } from "./registry.ts";
+import { currentSession, recordSession, transcriptOf } from "./registry.ts";
 import { register, save } from "./save.ts";
 import { isEnabled, readConfig, type Repo } from "./repo.ts";
 import { loadState, saveState, withLock } from "./state.ts";
@@ -91,9 +91,9 @@ const active = (repo: Repo) => isEnabled(repo) && readConfig(repo).gitHooks;
  * repository's remote publishes it too.
  */
 function agentSession(repo: Repo): string | undefined {
-  const session = process.env.BRAID_SESSION;
+  const session = currentSession();
   if (!session || !active(repo)) return undefined;
-  const transcript = loadState(repo, session) ? undefined : readEntry(session)?.transcript;
+  const transcript = loadState(repo, session) ? undefined : transcriptOf(session);
   if (!loadState(repo, session) && !transcript) return undefined;
   if (transcript) register(repo, session, transcript);
   recordSession(session, { repo: repo.top });

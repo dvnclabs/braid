@@ -92,7 +92,7 @@ Braid-Session: 5b0e2c1a-7f3d-4c2e-9a61-0d8e4b2f6c13
 
 How the hook knows which session made a commit:
 
-- **The agent ran `git commit`.** At session start, braid puts `BRAID_SESSION=<id>` into the environment of the agent's shell commands. Claude Code's `SessionStart` hook does this through `CLAUDE_ENV_FILE`. The hook links that session.
+- **The agent ran `git commit`.** At session start, braid puts `BRAID_SESSION=<id>` into the environment of the agent's shell commands. Claude Code's `SessionStart` hook does this through `CLAUDE_ENV_FILE`. In a session that started before braid was installed, braid takes the id Claude Code gives its commands, `CLAUDE_CODE_SESSION_ID`. The hook links that session.
 - **The agent committed in another repository.** Agents often start in one repository and commit in another: a nested repository, or a worktree. braid keeps a list of the sessions running on the machine, with their transcripts, in `~/.local/share/braid/sessions/`. The first time a session commits in another repository where braid is set up, the hooks there register it, and from then on each turn is saved there too, and that repository's `git push` publishes it. Each repository's `.braid/config.toml` still decides whether it publishes.
 - **You ran `git commit` yourself.** *Planned*; in v0.1 these commits get no trailer. The hook will link each session in this worktree whose edits since the previous commit touch the committed files. Sessions that did not edit those files stay unlinked.
 
@@ -328,7 +328,7 @@ The skills and the hooks call the CLI. You rarely need it yourself.
 
 *Planned:* merging from a terminal with a configured provider, `braid save <dir>`, `braid export --atif`, `braid check` for CI (built on `braid verify`), `braid prune`, and `braid mcp`.
 
-A session is addressed by its id or a unique prefix, by its name, or as `pr:128` for the sessions behind pull request 128. Inside an agent, commands act on the current session, which braid takes from `BRAID_SESSION`.
+A session is addressed by its id or a unique prefix, by its name, or as `pr:128` for the sessions behind pull request 128. Inside an agent, commands act on the current session, which braid takes from `BRAID_SESSION`, else from Claude Code's `CLAUDE_CODE_SESSION_ID`, and its transcript from where Claude Code keeps it.
 
 ## Prior art
 
