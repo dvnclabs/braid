@@ -2,14 +2,12 @@
 // transcript under a new session id, so `claude --resume` continues it here,
 // on another machine, or as a second direction from the same point. Paths from
 // the source checkout are rewritten to this one.
-import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { closeSync, existsSync, openSync, readSync, realpathSync } from "node:fs";
 import { claudeCode, uuidFor } from "@leostera/atxf/claude-code";
 import { readRecords } from "./chunks.ts";
 import { conversation, type Found } from "./load.ts";
-import { braidOf, contextPath, lastTurn, type Rec } from "./records.ts";
+import { braidOf, contextPath, forModel, lastTurn, type Rec } from "./records.ts";
+import type { Harness } from "./harness.ts";
 import { userConfig, type Repo } from "./repo.ts";
 import { loadState, newState, saveState } from "./state.ts";
 
@@ -38,14 +36,8 @@ export function launchDir(transcript: string | undefined): string | undefined {
 /** A word for sh: as is when safe, else single-quoted. */
 export const shellWord = (s: string): string => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
-/** Where Claude Code keeps the sessions of a working directory. */
-function projectDir(cwd: string): string {
-  const root = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
-  return join(root, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
-}
-
 /** Replaces path prefixes in every string, except in reasoning, which its signature covers, and in images. */
-function rewrite<T>(value: T, pairs: [string, string][]): T {
+export function rewrite<T>(value: T, pairs: [string, string][]): T {
   if (typeof value === "string") {
     let s: string = value;
     for (const [from, to] of pairs) if (from && from !== to) s = s.split(from).join(to);
@@ -124,7 +116,7 @@ export function forkText(fork: ForkRecords, session: string, cwd: string, pairs:
   const { records, path } = fork;
   const header = { type: "transcript", atxf: "0.1", id: session, time: path[0]?.time ?? new Date().toISOString(), source: { agent: "braid", sessionId: session }, workspace: { cwd } };
   const encoded = claudeCode
-    .fromAtxf({ header, records: rewrite(path, pairs) } as never, { carry: false, sessionId: session })
+    .fromAtxf({ header, records: forModel(rewrite(path, pairs), "anthropic") } as never, { carry: false, sessionId: session })
     .split("\n")
     .filter(Boolean)
     .map((l) => JSON.parse(l) as Line);
@@ -184,7 +176,8 @@ export interface Replayed {
   records: number;
 }
 
-export function replay(repo: Repo, found: Found, remote: string, opts: { cwd?: string } = {}): Replayed {
+/** Writes a fork of a saved session as a new session of `to`'s, which continues it there. */
+export function replay(repo: Repo, found: Found, remote: string, to: Harness, opts: { cwd?: string } = {}): Replayed {
   const all = conversation(repo, found.conv, remote);
   const own = readRecords(found.ref, found.opts);
   const head = lastTurn(own) ?? own.at(-1)?.id;
@@ -196,20 +189,16 @@ export function replay(repo: Repo, found: Found, remote: string, opts: { cwd?: s
   // Paths move to another checkout; within the same tree (a subdirectory of it, say) they stay as they are.
   const within = !!from && (from === cwd || cwd.startsWith(`${from}/`) || from.startsWith(`${cwd}/`));
   const pairs: [string, string][] = [...(from && !within ? [[from, cwd] as [string, string]] : []), ...userConfig().paths];
-  const session = randomUUID();
-  const text = forkText(fork, session, cwd, pairs);
+  const { session, file, lines } = to.write(fork, all, cwd, pairs);
 
-  const dir = projectDir(cwd);
-  mkdirSync(dir, { recursive: true });
-  const file = join(dir, `${session}.jsonl`);
-  writeFileSync(file, text);
-
-  // The new session continues the source: its first save keeps only what is added after the copy.
-  const state = loadState(repo, session) ?? newState(session, file);
-  const first = own.find((r) => braidOf(r).actor);
-  const lines = text.split("\n").filter(Boolean).length;
-  state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : undefined, replayed: true, lines };
-  saveState(repo, state);
+  // The new session continues the source: its first save keeps only what is added after the copy. braid saves
+  // Claude Code's sessions, which are written from the source's own lines.
+  if (to.agent === "claude-code") {
+    const state = loadState(repo, session) ?? newState(session, file);
+    const first = own.find((r) => braidOf(r).actor);
+    state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : undefined, replayed: true, lines };
+    saveState(repo, state);
+  }
   return { session, file, cwd, records: lines };
 }
 

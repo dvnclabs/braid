@@ -3,7 +3,7 @@
 // merged (↓).
 import { readRecords } from "./chunks.ts";
 import { forEachRef } from "./git.ts";
-import { braidOf, committedLength, isTurn, type Rec } from "./records.ts";
+import { braidOf, committedLength, isTurn, lastTurn, type Rec } from "./records.ts";
 import { isEnabled, remoteRefs, SESSION_REFS, storeRef, type Repo } from "./repo.ts";
 import { spread } from "./publish.ts";
 import { loadState } from "./state.ts";
@@ -108,7 +108,7 @@ export function computeStatus(repo: Repo, session: string, remote = "origin"): S
     if (!fork) continue;
     const open = uncovered(mine, theirs, pending);
     if (open.length === 0) continue;
-    const head = [...theirs].reverse().find(isTurn)?.id ?? open.at(-1)!.id;
+    const head = lastTurn(theirs) ?? open.at(-1)!.id;
     status.waiting.push({ session: other, name: sessionName(theirs, other), count: open.length, head, base: fork.parentId ?? null });
   }
   return status;

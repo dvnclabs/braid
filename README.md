@@ -2,7 +2,7 @@
 
 **Efficient session manager.** braid saves every coding-agent session as it happens, in git, on your machine. You can go back to any point of a conversation, fork it into a new window, edit it before anyone else sees it, and, when you choose, share it with your team next to the code it produced.
 
-> **v0.1, for Claude Code.** Codex support is next. See [Status of v0.1](docs/design.md#status-of-v01) for what is built and what is planned.
+> **v0.1, for Claude Code.** Any saved session also continues in Codex (`braid fork --to codex`); saving Codex sessions is next. See [Status of v0.1](docs/design.md#status-of-v01) for what is built and what is planned.
 
 ## Install
 
@@ -50,6 +50,8 @@ Work with Claude Code as usual. The status line shows where your session stands:
 
 **Go back.** `braid log` lists the fork points autofork marked, and `/braid:fork @2` gives you the command to continue the conversation as it was before that turn, in a new window. `/braid:fork` alone branches the conversation as it is now.
 
+**Continue in Codex.** A session is braid's own, whichever agent wrote it. `braid fork --to codex` writes this conversation, or `braid fork <session> --to codex` another, as a new Codex session, and gives you `cd <dir> && codex resume <id>`. Codex gets the conversation as Claude's model read it: messages, tool calls and their results. Claude's reasoning stays behind, since only Anthropic's models can read it back.
+
 **Edit before sharing.** `braid edit`, in a terminal or through `/braid:edit`, lists the session as it would be published, one numbered line per record, after redaction:
 
 ```
@@ -96,7 +98,7 @@ $ git push                             # with autopush, publishes the conversati
 | `/braid:edit` | the session as it would be published; remove, rewrite or hide parts of it |
 | `/braid:commit [message]` | commit the conversation; publishing goes up to the last commit |
 | `/braid:push` | publish the committed part of this session now |
-| `/braid:fork [session \| @N]` | the command to continue this session, another one, or a fork point, in a new window |
+| `/braid:fork [session \| @N] [--to codex]` | the command to continue this session, another one, or a fork point, in a new window, in Claude Code or Codex |
 | `/braid:merge [session] [instruction]` | merge another conversation into this one, or `skip` it |
 | `/braid:review <N>` | review pull request N with the sessions behind it |
 
@@ -118,7 +120,7 @@ braid verify 9e36aa15: ok
   ✓ store: 1 chunks, git fsck
 ```
 
-`npm run check:resume -- <transcript.jsonl>...` goes one step further: Claude Code resumes the session and a fork braid writes from its store, against a local server that records the request Claude Code would send to the model, and the two requests are compared byte for byte. No model is called and nothing leaves the machine.
+`npm run check:resume -- <transcript.jsonl>...` goes one step further: Claude Code resumes the session and a fork braid writes from its store, against a local server that records the request Claude Code would send to the model, and the two requests are compared byte for byte. With `--to codex`, Codex resumes the fork instead, and the conversation in its request is compared with Claude Code's, item by item. No model is called and nothing leaves the machine.
 
 ## Privacy
 
@@ -134,6 +136,7 @@ A conversation belongs to no code repository: a session can start in one reposit
 npm install
 npm run check                                  # typecheck, tests, and the bundle in dist/
 npm run check:resume -- ~/.claude/projects/*/*.jsonl   # forks resume in Claude Code as the originals do
+npm run check:resume -- --to codex ~/.claude/projects/*/*.jsonl   # and Codex gets the conversation Claude's model read
 ```
 
 `dist/braid.mjs` is committed, because the plugin runs it straight from the repository. `npm run check` rebuilds it, so commit it together with the change to `src/`.

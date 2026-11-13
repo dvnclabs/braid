@@ -1,7 +1,7 @@
 // End to end: two people, one remote. Alice works and pushes, Bob reviews,
 // Alice merges the review. Every step goes through the CLI and real git.
 import assert from "node:assert/strict";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { braid, clone, must, run, sandbox, storeOf, Transcript } from "./helpers.ts";
@@ -884,6 +884,130 @@ test("braid verify: sessions are saved as they happened and load back the same, 
   const all = braid(s.env, repo, ["verify", "--all"]);
   assert.equal(all.status, 0, all.stdout);
   assert.doesNotMatch(all.stdout, /written since the last save/);
+});
+
+test("a session continues in Codex: braid fork --to codex writes what the model saw as a Codex session", () => {
+  const s = sandbox();
+  const repo = clone(s, "hal", "hal@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, repo, ["init"]);
+  const path = join(s.root, `${ALICE}.jsonl`);
+  let n = 0;
+  const uuid = () => `5b0e2c1a-0000-4000-8000-${String(++n).padStart(12, "0")}`;
+  const put = (fields: Record<string, unknown>) => {
+    appendFileSync(path, JSON.stringify({ isSidechain: false, timestamp: new Date(Date.UTC(2026, 10, 9, 10, 0, n)).toISOString(), cwd: repo, sessionId: ALICE, version: "2.1.316", ...fields }) + "\n");
+    return fields.uuid as string;
+  };
+  const say = (parentUuid: string | null, role: "user" | "assistant", content: unknown, id?: string) =>
+    put({ parentUuid, type: role, uuid: uuid(), message: role === "user" ? { role, content } : { id: id ?? `msg_${n}`, type: "message", role, model: "claude-sonnet-5-5", content } });
+
+  const start = say(null, "user", "Start.");
+  const kept = say(start, "assistant", [{ type: "text", text: "Earlier answer, kept by the compaction." }]);
+  const boundary = uuid();
+  const summary = uuid();
+  put({ parentUuid: null, logicalParentUuid: kept, type: "system", subtype: "compact_boundary", uuid: boundary, content: "Conversation compacted", compactMetadata: { trigger: "auto", preservedMessages: { anchorUuid: summary, uuids: [kept], allUuids: [kept] } } });
+  put({ parentUuid: boundary, type: "user", uuid: summary, isCompactSummary: true, message: { role: "user", content: "Summary: we started." } });
+  const ask = say(summary, "user", `Read ${repo}/a.ts and ${repo}/b.ts.`);
+  // Reasoning signed for Claude, then one response in two lines with two calls; each result hangs from its call.
+  const think = say(ask, "assistant", [{ type: "thinking", thinking: "Both at once.", signature: "c2lnbmVkIGJ5IEFudGhyb3BpYw==" }], "msg_par");
+  const callA = say(think, "assistant", [{ type: "tool_use", id: "toolu_a", name: "Read", input: { file_path: `${repo}/a.ts` } }], "msg_par");
+  const callB = say(callA, "assistant", [{ type: "tool_use", id: "toolu_b", name: "Read", input: { file_path: `${repo}/b.ts` } }], "msg_par");
+  // A failed call, with a note Claude Code wrote for its model below the result; a message the user typed while the
+  // agent worked; a notice that a background task finished, in the user's place.
+  const resultB = say(callB, "user", [{ type: "tool_result", tool_use_id: "toolu_b", content: "Error: b.ts is locked", is_error: true }]);
+  put({ parentUuid: resultB, type: "user", uuid: uuid(), isMeta: true, message: { role: "user", content: [{ type: "text", text: "Base directory for this skill: /skills/locks" }] } });
+  const resultA = say(callA, "user", [{ type: "tool_result", tool_use_id: "toolu_a", content: "export const a = 1;" }]);
+  const typed = put({ parentUuid: resultA, type: "attachment", uuid: uuid(), attachment: { type: "queued_command", prompt: "Also check the README.", commandMode: "prompt", origin: { kind: "human" } } });
+  const answer = say(typed, "assistant", [{ type: "text", text: "a is 1, and b is locked." }]);
+  const notice = put({ parentUuid: answer, type: "user", uuid: uuid(), origin: { kind: "task-notification" }, message: { role: "user", content: "<task-notification>build finished</task-notification>" } });
+  say(notice, "assistant", [{ type: "text", text: "The build finished." }]);
+  const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: path, cwd: repo });
+  braid(s.env, repo, ["hook", "session-start"], hookIn);
+  braid(s.env, repo, ["hook", "stop"], hookIn);
+
+  // Codex keeps sessions under CODEX_HOME as sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl, and resumes one by its id.
+  const codexHome = join(s.root, "codex");
+  const elsewhere = join(s.root, "elsewhere");
+  mkdirSync(elsewhere);
+  const r = braid(s.env, repo, ["fork", "5b0e2c1a", "--to", "codex", "--cwd", elsewhere], undefined, { CODEX_HOME: codexHome });
+  assert.equal(r.status, 0, r.stderr);
+  const id = /codex resume (\S+)$/m.exec(r.stdout)![1]!;
+  assert.match(r.stdout, /^braid: wrote 5b0e2c1a as a new Codex session\. To continue it in a new window, run in a terminal:\n {2}cd \S+\/elsewhere && codex resume [0-9a-f-]{36}\n$/);
+  const files = readdirSync(join(codexHome, "sessions"), { recursive: true }).map(String).filter((f) => f.endsWith(".jsonl"));
+  assert.equal(files.length, 1);
+  assert.match(files[0]!, new RegExp(`^\\d{4}/\\d{2}/\\d{2}/rollout-\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-${id}\\.jsonl$`));
+  const lines = readFileSync(join(codexHome, "sessions", files[0]!), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines[0].type, "session_meta");
+  assert.deepEqual([lines[0].payload.id, lines[0].payload.cwd], [id, realpathSync(elsewhere)]);
+  // One line of history, as the model read it: what the compaction kept after its summary, both calls, then both
+  // results, a failed one as its text, then the note on it, with paths moved to the new directory. The typed message
+  // is the user's, and the notice a note for the model. Reasoning signed for Claude is left out.
+  const there = realpathSync(elsewhere);
+  const said = lines.slice(1).map(({ type, payload: p }) =>
+    type === "compacted" ? `compacted: ${p.message}`
+    : type !== "response_item" ? type
+    : p.type === "message" ? `${p.role}: ${p.content.map((c: { text: string }) => c.text).join("")}`
+    : p.type === "function_call" ? `call ${p.call_id} ${p.name} ${p.arguments}`
+    : p.type === "function_call_output" ? `result ${p.call_id}: ${p.output}`
+    : p.type,
+  );
+  assert.deepEqual(said, [
+    "compacted: Summary: we started.",
+    "assistant: Earlier answer, kept by the compaction.",
+    `user: Read ${there}/a.ts and ${there}/b.ts.`,
+    `call toolu_a Read {"file_path":"${there}/a.ts"}`,
+    `call toolu_b Read {"file_path":"${there}/b.ts"}`,
+    "result toolu_b: Error: b.ts is locked",
+    "result toolu_a: export const a = 1;",
+    "developer: Base directory for this skill: /skills/locks",
+    "user: Also check the README.",
+    "assistant: a is 1, and b is locked.",
+    "developer: <task-notification>build finished</task-notification>",
+    "assistant: The build finished.",
+  ]);
+
+  // From inside the session, the conversation as it is now, with the turn since the last save.
+  say(null, "user", "One more question.");
+  const now = braid(s.env, repo, ["fork", "--to", "codex", "--cwd", elsewhere], undefined, { CODEX_HOME: codexHome, BRAID_SESSION: ALICE });
+  assert.equal(now.status, 0, now.stderr);
+  assert.match(now.stdout, /^braid: wrote this conversation as a new Codex session/);
+  assert.match(braid(s.env, repo, ["fork", "5b0e2c1a", "--to", "gemini"]).stderr, /braid writes sessions for claude-code and codex, not gemini/);
+});
+
+test("a session that ended right after compacting continues from the compaction, in Claude Code and in Codex", () => {
+  const s = sandbox();
+  const repo = clone(s, "ivy", "ivy@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, repo, ["init"]);
+  const path = join(s.root, `${ALICE}.jsonl`);
+  let n = 0;
+  const uuid = () => `5b0e2c1a-0000-4000-8000-${String(++n).padStart(12, "0")}`;
+  const put = (fields: Record<string, unknown>) => {
+    appendFileSync(path, JSON.stringify({ isSidechain: false, timestamp: new Date(Date.UTC(2026, 10, 9, 10, 0, n)).toISOString(), cwd: repo, sessionId: ALICE, version: "2.1.316", ...fields }) + "\n");
+    return fields.uuid as string;
+  };
+  const say = (parentUuid: string | null, role: "user" | "assistant", content: unknown) =>
+    put({ parentUuid, type: role, uuid: uuid(), message: role === "user" ? { role, content } : { id: `msg_${n}`, type: "message", role, model: "claude-sonnet-5-5", content } });
+  const first = say(null, "user", "Plan the migration.");
+  const kept = say(first, "assistant", [{ type: "text", text: "Step one is the schema." }]);
+  const boundary = uuid();
+  const summary = uuid();
+  put({ parentUuid: null, logicalParentUuid: kept, type: "system", subtype: "compact_boundary", uuid: boundary, content: "Conversation compacted", compactMetadata: { trigger: "auto", preservedMessages: { anchorUuid: summary, uuids: [kept], allUuids: [kept] } } });
+  put({ parentUuid: boundary, type: "user", uuid: summary, isCompactSummary: true, message: { role: "user", content: "Summary: planning a migration." } });
+  const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: path, cwd: repo });
+  braid(s.env, repo, ["hook", "session-start"], hookIn);
+  braid(s.env, repo, ["hook", "stop"], hookIn);
+  const ok = braid(s.env, repo, ["verify", "--session", ALICE]);
+  assert.equal(ok.status, 0, ok.stdout);
+  assert.match(ok.stdout, /✓ loads: \d+ lines since the last compaction, the same in a fork as in the transcript/);
+
+  const codexHome = join(s.root, "codex");
+  const r = braid(s.env, repo, ["fork", "5b0e2c1a", "--to", "codex", "--cwd", repo], undefined, { CODEX_HOME: codexHome });
+  assert.equal(r.status, 0, r.stderr);
+  const file = readdirSync(join(codexHome, "sessions"), { recursive: true }).map(String).find((f) => f.endsWith(".jsonl"))!;
+  const lines = readFileSync(join(codexHome, "sessions", file), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const said = lines.slice(1).map(({ type, payload: p }) => (type === "compacted" ? `compacted: ${p.message}` : `${p.role}: ${p.content.map((c: { text: string }) => c.text).join("")}`));
+  assert.deepEqual(said, ["compacted: Summary: planning a migration.", "assistant: Step one is the schema."]);
 });
 
 test("a fork holds what Claude Code reads to resume: what a compaction kept, parallel calls beside the chain, notes, messages typed mid-turn, and the session's settings", () => {

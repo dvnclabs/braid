@@ -43,6 +43,27 @@ export interface Rec {
 
 export const braidOf = (r: Rec): BraidExt => r.ext?.braid ?? {};
 
+/**
+ * The records a model of `provider` can take back. Reasoning carries a
+ * signature or an encrypted form that only the provider that wrote it reads,
+ * so another provider's is left out, and so is a model setting naming another
+ * provider's model. A message left with nothing in it is left out too.
+ */
+export function forModel(records: Rec[], provider: string): Rec[] {
+  return records.flatMap((r) => {
+    if (r.type === "settings" && (r.model as { provider?: string } | undefined)?.provider !== undefined && (r.model as { provider: string }).provider !== provider) {
+      const { model: _model, ...rest } = r;
+      return [rest as Rec];
+    }
+    if (r.type !== "message" || !Array.isArray(r.content)) return [r];
+    const content = (r.content as { type?: string; replay?: { provider?: string }[] }[]).filter(
+      (b) => b?.type !== "reasoning" || !!b.replay?.some((x) => x.provider === provider),
+    );
+    if (content.length === r.content.length) return [r];
+    return content.length ? [{ ...r, content }] : [];
+  });
+}
+
 /** Messages and merges: what the ↑ and ↓ counts count. */
 export const isTurn = (r: Rec): boolean => r.type === "message" || r.type === "branch_summary";
 
@@ -104,9 +125,13 @@ export function describe(r: Rec, max = 400): string {
   return parts.filter(Boolean).join("\n");
 }
 
-/** The id of the newest turn in a list, in file order. */
+/**
+ * The id of the newest point in a list, in file order, that the conversation
+ * continues from: a turn, or a compaction, whose summary stands for what came
+ * before it, as when a session ends right after compacting.
+ */
 export function lastTurn(records: Rec[]): string | undefined {
-  for (let i = records.length - 1; i >= 0; i--) if (isTurn(records[i]!)) return records[i]!.id;
+  for (let i = records.length - 1; i >= 0; i--) if (isTurn(records[i]!) || records[i]!.type === "compaction") return records[i]!.id;
   return undefined;
 }
 
@@ -123,8 +148,11 @@ export function ancestry(head: string, parents: Map<string, string | null | unde
   return out;
 }
 
-/** A note the harness attached to the conversation: a reminder, hook output, a file the user named. */
-const isAttachment = (r: Rec): boolean => r.type === "custom" && String(r.name ?? "").startsWith("attachment");
+/**
+ * A note the harness attached to the conversation: a reminder, hook output, a file the user named, or a message it
+ * wrote for its model and did not show, such as the text of a skill the agent loaded.
+ */
+const isNote = (r: Rec): boolean => (r.type === "custom" && String(r.name ?? "").startsWith("attachment")) || (r.type === "message" && r.role === "user" && r.display === false);
 
 const callIds = (r: Rec): string[] =>
   r.type === "message" && r.role === "assistant" && Array.isArray(r.content)
@@ -162,7 +190,7 @@ export function contextPath(head: string, all: Map<string, Rec>): Rec[] {
   const bring = (r: Rec) => {
     taken.add(r.id);
     waiting.push(r);
-    for (const c of children.get(r.id) ?? []) if (isAttachment(c) && !taken.has(c.id)) bring(c);
+    for (const c of children.get(r.id) ?? []) if (isNote(c) && !taken.has(c.id)) bring(c);
   };
   // What comes back hangs from what is already there: the rest of a response from its line before, a result from its call.
   const linked = (r: Rec) => !taken.has(r.id) && !!r.parentId && taken.has(r.parentId);

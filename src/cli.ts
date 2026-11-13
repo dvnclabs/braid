@@ -10,6 +10,7 @@ import { postCommit, postRewrite, prePush, prepareCommitMsg } from "./githooks.t
 import { sessionEnd, sessionStart, stop } from "./hooks.ts";
 import { allSessions, briefing, markFork, resolve } from "./load.ts";
 import { context, pick, record } from "./merge.ts";
+import { harness } from "./harness.ts";
 import { launchDir, replay, shellWord } from "./replay.ts";
 import { currentSession, recordSession, transcriptOf } from "./registry.ts";
 import { editRecord, hide, lineText, pickLines, renderEdit, editLines, setPrivate, withhold, withholdRecent } from "./edit.ts";
@@ -56,6 +57,7 @@ Everyday
   braid commit -m "<message>" commit the conversation: publishing goes up to the last commit
   braid push [--dry-run]      publish the committed part now (git push does this with autopush)
   braid fork [<session>|@N]   the command to continue a session, or fork point N, in a new window; with none, this one
+    --to codex                as a new Codex session (claude-code by default)
   braid fork <session> --here continue from another session in this one, before its first turn is saved
   braid merge [<session>]     show what another session has that this one lacks, for the agent to merge
   braid merge --record <id> --instruction "<text>"   record a merge; summary on stdin
@@ -192,6 +194,7 @@ function main(argv: string[]): number {
       "git-hooks": { type: "boolean" },
       "no-git-hooks": { type: "boolean" },
       transcript: { type: "string" },
+      to: { type: "string" },
       remote: { type: "string" },
       record: { type: "string" },
       skip: { type: "string" },
@@ -398,11 +401,22 @@ function main(argv: string[]): number {
       const repo = needRepo();
       const remote = str("remote") ?? readConfig(repo).remote;
       const current = str("session") ?? currentSession();
+      const to = harness(str("to"));
       const resume = (dir: string, id: string, fork: boolean) => `  cd ${shellWord(dir)} && claude --resume ${id}${fork ? " --fork-session" : ""}`;
+      const wrote = (what: string, r: { cwd: string; session: string }) => `braid: wrote ${what} as a new ${to.title} session. To continue it in a new window, run in a terminal:\n  ${to.resume(r.cwd, r.session)}`;
       if (!args[0]) {
         if (!current) throw new Error("no session to branch: run inside an agent session, or pass --session <id>");
-        const dir = launchDir(loadState(repo, current)?.transcript ?? transcriptOf(current)) ?? process.cwd();
-        out(["braid: to branch this conversation into a new window, run in a terminal:", resume(dir, current, true), "or /branch to branch it in this window. braid files the branch in this conversation."].join("\n"));
+        const transcript = loadState(repo, current)?.transcript ?? transcriptOf(current);
+        if (to.agent === "claude-code") {
+          const dir = launchDir(transcript) ?? process.cwd();
+          out(["braid: to branch this conversation into a new window, run in a terminal:", resume(dir, current, true), "or /branch to branch it in this window. braid files the branch in this conversation."].join("\n"));
+          return 0;
+        }
+        // Into another agent: written from the store, with the turns since the last save.
+        if (transcript && existsSync(transcript)) save(repo, current, transcript);
+        const own = resolve(repo, current, remote).filter((f) => f.opts.gitDir);
+        if (own.length !== 1) throw new Error(`this session (${current.slice(0, 8)}) is not saved yet`);
+        out(wrote("this conversation", replay(repo, own[0]!, remote, to, { cwd: str("cwd") })));
         return 0;
       }
       const at = /^(.*)@(\d+)$/.exec(args[0]);
@@ -414,8 +428,7 @@ function main(argv: string[]): number {
         if (own.length !== 1) throw new Error(own.length ? `${name} matches ${own.length} sessions; name one` : `no session of yours matches ${name}`);
         const point = points(repo, own[0]!.session).find((p) => p.n === Number(at[2]));
         if (!point) throw new Error(`${own[0]!.session.slice(0, 8)} has no fork point @${at[2]}; braid log lists them`);
-        const r = replay(repo, { ...own[0]!, ref: point.commit }, remote, { cwd: str("cwd") });
-        out([`braid: wrote the conversation as it was ${point.what} as a new Claude Code session. To continue it in a new window, run in a terminal:`, resume(r.cwd, r.session, false)].join("\n"));
+        out(wrote(`the conversation as it was ${point.what}`, replay(repo, { ...own[0]!, ref: point.commit }, remote, to, { cwd: str("cwd") })));
         return 0;
       }
       const found = resolve(repo, args[0], remote).filter((f) => f.session !== current);
@@ -438,13 +451,12 @@ function main(argv: string[]): number {
       const others = found.length > 1 ? [`braid: ${args[0]} has ${found.length} sessions; this is the newest. To fork another, name it: ${found.filter((f) => f !== from).map((f) => f.session.slice(0, 8)).join(", ")}`] : [];
       // Your own session, with its transcript on this machine: Claude Code forks it, with everything it holds.
       const own = from.opts.gitDir ? loadState(repo, from.session) : undefined;
-      const dir = own?.harness === "claude-code" ? launchDir(own.transcript) : undefined;
+      const dir = own?.harness === "claude-code" && to.agent === "claude-code" ? launchDir(own.transcript) : undefined;
       if (dir) {
         out([`braid: to fork ${name} into a new window, run in a terminal:`, resume(dir, from.session, true), ...others].join("\n"));
         return 0;
       }
-      const r = replay(repo, from, remote, { cwd: str("cwd") });
-      out([`braid: wrote ${name} as a new Claude Code session. To continue it in a new window, run in a terminal:`, resume(r.cwd, r.session, false), ...others].join("\n"));
+      out([wrote(name, replay(repo, from, remote, to, { cwd: str("cwd") })), ...others].join("\n"));
       return 0;
     }
     case "import": {

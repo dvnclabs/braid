@@ -120,6 +120,20 @@ function config(key, opts) {
 
 // src/records.ts
 var braidOf = (r) => r.ext?.braid ?? {};
+function forModel(records, provider) {
+  return records.flatMap((r) => {
+    if (r.type === "settings" && r.model?.provider !== void 0 && r.model.provider !== provider) {
+      const { model: _model, ...rest } = r;
+      return [rest];
+    }
+    if (r.type !== "message" || !Array.isArray(r.content)) return [r];
+    const content2 = r.content.filter(
+      (b) => b?.type !== "reasoning" || !!b.replay?.some((x) => x.provider === provider)
+    );
+    if (content2.length === r.content.length) return [r];
+    return content2.length ? [{ ...r, content: content2 }] : [];
+  });
+}
 var isTurn = (r) => r.type === "message" || r.type === "branch_summary";
 var isCommit = (r) => r.type === "label" && !!braidOf(r).commit;
 function committedLength(records) {
@@ -165,7 +179,7 @@ function describe(r, max = 400) {
   return parts.filter(Boolean).join("\n");
 }
 function lastTurn(records) {
-  for (let i = records.length - 1; i >= 0; i--) if (isTurn(records[i])) return records[i].id;
+  for (let i = records.length - 1; i >= 0; i--) if (isTurn(records[i]) || records[i].type === "compaction") return records[i].id;
   return void 0;
 }
 function ancestry(head, parents) {
@@ -179,7 +193,7 @@ function ancestry(head, parents) {
   }
   return out;
 }
-var isAttachment = (r) => r.type === "custom" && String(r.name ?? "").startsWith("attachment");
+var isNote = (r) => r.type === "custom" && String(r.name ?? "").startsWith("attachment") || r.type === "message" && r.role === "user" && r.display === false;
 var callIds = (r) => r.type === "message" && r.role === "assistant" && Array.isArray(r.content) ? r.content.flatMap((b) => b?.type === "tool_call" && typeof b.id === "string" ? [b.id] : []) : [];
 function contextPath(head, all) {
   const parents = new Map([...all.values()].map((r) => [r.id, r.parentId ?? null]));
@@ -200,7 +214,7 @@ function contextPath(head, all) {
   const bring = (r) => {
     taken.add(r.id);
     waiting.push(r);
-    for (const c of children.get(r.id) ?? []) if (isAttachment(c) && !taken.has(c.id)) bring(c);
+    for (const c of children.get(r.id) ?? []) if (isNote(c) && !taken.has(c.id)) bring(c);
   };
   const linked = (r) => !taken.has(r.id) && !!r.parentId && taken.has(r.parentId);
   const answer = (r) => {
@@ -573,8 +587,8 @@ function fetchInBackground(repo, remote, minutes = 3) {
 }
 
 // src/githooks.ts
-import { chmodSync, existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync7, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync7 } from "node:fs";
-import { isAbsolute as isAbsolute3, join as join10 } from "node:path";
+import { chmodSync, existsSync as existsSync9, mkdirSync as mkdirSync6, readFileSync as readFileSync7, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync6 } from "node:fs";
+import { isAbsolute as isAbsolute3, join as join9 } from "node:path";
 
 // src/publish.ts
 import { existsSync as existsSync6 } from "node:fs";
@@ -807,10 +821,7 @@ function pathWithheld(records, rules, top) {
 }
 
 // src/replay.ts
-import { randomUUID } from "node:crypto";
-import { closeSync, existsSync as existsSync5, mkdirSync as mkdirSync5, openSync, readSync, realpathSync as realpathSync3, writeFileSync as writeFileSync5 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join7 } from "node:path";
+import { closeSync, existsSync as existsSync5, openSync, readSync, realpathSync as realpathSync3 } from "node:fs";
 
 // node_modules/@leostera/atxf/dist/types.js
 var TREE_TYPES = /* @__PURE__ */ new Set([
@@ -1855,7 +1866,7 @@ function computeStatus(repo, session, remote = "origin") {
     if (!fork) continue;
     const open = uncovered(mine, theirs, pending);
     if (open.length === 0) continue;
-    const head = [...theirs].reverse().find(isTurn)?.id ?? open.at(-1).id;
+    const head = lastTurn(theirs) ?? open.at(-1).id;
     status.waiting.push({ session: other, name: sessionName(theirs, other), count: open.length, head, base: fork.parentId ?? null });
   }
   return status;
@@ -1967,7 +1978,7 @@ function quote(title, records, budget = 6e4) {
 function briefing(repo, found, remote) {
   const records = conversation(repo, found.conv, remote);
   const own = readRecords(found.ref, found.opts);
-  const head = [...own].reverse().find(isTurn)?.id ?? own.at(-1)?.id ?? "";
+  const head = lastTurn(own) ?? own.at(-1)?.id ?? "";
   const path2 = contextPath(head, records);
   const first = own.find((r) => braidOf(r).actor);
   const actor = first ? braidOf(first).actor : void 0;
@@ -2008,10 +2019,6 @@ function launchDir(transcript) {
   return void 0;
 }
 var shellWord = (s) => /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
-function projectDir(cwd) {
-  const root = process.env.CLAUDE_CONFIG_DIR || join7(homedir3(), ".claude");
-  return join7(root, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
-}
 function rewrite(value, pairs) {
   if (typeof value === "string") {
     let s = value;
@@ -2053,7 +2060,7 @@ function forkRecords(all, own, head) {
 function forkText(fork, session, cwd, pairs = []) {
   const { records, path: path2 } = fork;
   const header2 = { type: "transcript", atxf: "0.1", id: session, time: path2[0]?.time ?? (/* @__PURE__ */ new Date()).toISOString(), source: { agent: "braid", sessionId: session }, workspace: { cwd } };
-  const encoded = claudeCode.fromAtxf({ header: header2, records: rewrite(path2, pairs) }, { carry: false, sessionId: session }).split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const encoded = claudeCode.fromAtxf({ header: header2, records: forModel(rewrite(path2, pairs), "anthropic") }, { carry: false, sessionId: session }).split("\n").filter(Boolean).map((l) => JSON.parse(l));
   const byUuid = new Map(encoded.map((l) => [l.uuid, l]));
   const lines = [];
   const lineOf = /* @__PURE__ */ new Map();
@@ -2096,7 +2103,7 @@ function sourceCwd(records) {
   }
   return void 0;
 }
-function replay(repo, found, remote, opts = {}) {
+function replay(repo, found, remote, to, opts = {}) {
   const all = conversation(repo, found.conv, remote);
   const own = readRecords(found.ref, found.opts);
   const head = lastTurn(own) ?? own.at(-1)?.id;
@@ -2106,17 +2113,13 @@ function replay(repo, found, remote, opts = {}) {
   const from = sourceCwd([...all.values()]);
   const within = !!from && (from === cwd || cwd.startsWith(`${from}/`) || from.startsWith(`${cwd}/`));
   const pairs = [...from && !within ? [[from, cwd]] : [], ...userConfig().paths];
-  const session = randomUUID();
-  const text = forkText(fork, session, cwd, pairs);
-  const dir = projectDir(cwd);
-  mkdirSync5(dir, { recursive: true });
-  const file2 = join7(dir, `${session}.jsonl`);
-  writeFileSync5(file2, text);
-  const state = loadState(repo, session) ?? newState(session, file2);
-  const first = own.find((r) => braidOf(r).actor);
-  const lines = text.split("\n").filter(Boolean).length;
-  state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : void 0, replayed: true, lines };
-  saveState(repo, state);
+  const { session, file: file2, lines } = to.write(fork, all, cwd, pairs);
+  if (to.agent === "claude-code") {
+    const state = loadState(repo, session) ?? newState(session, file2);
+    const first = own.find((r) => braidOf(r).actor);
+    state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : void 0, replayed: true, lines };
+    saveState(repo, state);
+  }
   return { session, file: file2, cwd, records: lines };
 }
 function replayedIds(records) {
@@ -2343,12 +2346,12 @@ function stable(value) {
 }
 
 // src/registry.ts
-import { existsSync as existsSync7, mkdirSync as mkdirSync6, readdirSync as readdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync6 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { join as join8 } from "node:path";
+import { existsSync as existsSync7, mkdirSync as mkdirSync5, readdirSync as readdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join7 } from "node:path";
 function file(session) {
   if (!/^[A-Za-z0-9-]{8,80}$/.test(session)) return void 0;
-  return join8(process.env.XDG_DATA_HOME || join8(homedir4(), ".local", "share"), "braid", "sessions", `${session}.json`);
+  return join7(process.env.XDG_DATA_HOME || join7(homedir3(), ".local", "share"), "braid", "sessions", `${session}.json`);
 }
 function currentSession() {
   return (process.env.BRAID_SESSION ?? process.env.CLAUDE_CODE_SESSION_ID) || void 0;
@@ -2356,14 +2359,14 @@ function currentSession() {
 function transcriptOf(session) {
   const known = readEntry(session)?.transcript;
   if (known || !/^[A-Za-z0-9-]{8,80}$/.test(session)) return known;
-  const projects = join8(process.env.CLAUDE_CONFIG_DIR || join8(homedir4(), ".claude"), "projects");
+  const projects = join7(process.env.CLAUDE_CONFIG_DIR || join7(homedir3(), ".claude"), "projects");
   let dirs;
   try {
     dirs = readdirSync2(projects);
   } catch {
     return void 0;
   }
-  return dirs.map((d) => join8(projects, d, `${session}.jsonl`)).find((p) => existsSync7(p));
+  return dirs.map((d) => join7(projects, d, `${session}.jsonl`)).find((p) => existsSync7(p));
 }
 function readEntry(session) {
   const path2 = file(session);
@@ -2381,17 +2384,17 @@ function recordSession(session, update2) {
   const entry = readEntry(session) ?? { repos: [] };
   if (update2.transcript) entry.transcript = update2.transcript;
   if (update2.repo && !entry.repos.includes(update2.repo)) entry.repos.push(update2.repo);
-  mkdirSync6(join8(path2, ".."), { recursive: true });
+  mkdirSync5(join7(path2, ".."), { recursive: true });
   const tmp = `${path2}.${process.pid}.tmp`;
-  writeFileSync6(tmp, JSON.stringify(entry, null, 2) + "\n");
+  writeFileSync5(tmp, JSON.stringify(entry, null, 2) + "\n");
   renameSync2(tmp, path2);
 }
 
 // src/save.ts
 import { existsSync as existsSync8, readdirSync as readdirSync3, readFileSync as readFileSync6 } from "node:fs";
 import { hostname, userInfo } from "node:os";
-import { join as join9 } from "node:path";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { join as join8 } from "node:path";
+import { randomUUID } from "node:crypto";
 
 // src/points.ts
 var BIG = { files: 5, calls: 30 };
@@ -2603,7 +2606,7 @@ function header(h, session) {
 }
 function forkSource(repo, session, native) {
   const firstMessage = native.find((r) => r.type === "message")?.id;
-  const dir = join9(repo.dir, "sessions");
+  const dir = join8(repo.dir, "sessions");
   if (!firstMessage || !existsSync8(dir)) return void 0;
   for (const name2 of readdirSync3(dir)) {
     if (!name2.endsWith(".json") || name2 === `${session}.json`) continue;
@@ -2705,7 +2708,7 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
     if (target) {
       out.push({
         type: "label",
-        id: `braid-label-${randomUUID2()}`,
+        id: `braid-label-${randomUUID()}`,
         time: now,
         targetId: target,
         label: `review/${actor.actorId.split("@")[0]}`,
@@ -2770,7 +2773,7 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
       const kind = !c.sha ? { commit: {} } : autocommit ? { commit: { sha: c.sha } } : { code: { sha: c.sha } };
       out.push({
         type: "label",
-        id: `braid-commit-${randomUUID2()}`,
+        id: `braid-commit-${randomUUID()}`,
         time: now,
         targetId: target,
         label: c.message || "commit",
@@ -2790,13 +2793,13 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
 }
 function collectAgents(repo, state, path2) {
   const out = /* @__PURE__ */ new Map();
-  const dir = join9(path2.replace(/\.jsonl$/, ""), "subagents");
+  const dir = join8(path2.replace(/\.jsonl$/, ""), "subagents");
   if (!existsSync8(dir)) return out;
   state.agents ??= {};
   for (const file2 of readdirSync3(dir).sort()) {
     const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file2)?.[1];
     if (!id) continue;
-    const fp = join9(dir, file2);
+    const fp = join8(dir, file2);
     const prior = state.agents[id];
     const rescan = !!prior && !intact(fp, prior.cursor);
     const st = rescan || !prior ? { cursor: START, linked: prior?.linked } : prior;
@@ -2814,7 +2817,7 @@ function collectAgents(repo, state, path2) {
     if (!st.linked) {
       st.linked = true;
       try {
-        const meta = JSON.parse(readFileSync6(join9(dir, `agent-${id}.meta.json`), "utf8"));
+        const meta = JSON.parse(readFileSync6(join8(dir, `agent-${id}.meta.json`), "utf8"));
         const str = (k) => typeof meta[k] === "string" ? meta[k] : void 0;
         link = { toolUseId: str("toolUseId"), description: str("description"), agentType: str("agentType") };
       } catch {
@@ -2859,12 +2862,12 @@ ${stdin ? `printf '%s\\n' "$input" | "$@"` : '"$@" || true'}
 }
 function hooksDir(repo) {
   const custom = config("core.hooksPath", { cwd: repo.top });
-  if (custom) return { dir: isAbsolute3(custom) ? custom : join10(repo.top, custom), managed: true };
-  return { dir: join10(repo.common, "hooks"), managed: false };
+  if (custom) return { dir: isAbsolute3(custom) ? custom : join9(repo.top, custom), managed: true };
+  return { dir: join9(repo.common, "hooks"), managed: false };
 }
 function hooksInstalled(repo) {
   const { dir } = hooksDir(repo);
-  return HOOKS.every((h) => existsSync9(join10(dir, h)) && readFileSync7(join10(dir, h), "utf8").includes(MARK));
+  return HOOKS.every((h) => existsSync9(join9(dir, h)) && readFileSync7(join9(dir, h), "utf8").includes(MARK));
 }
 function installHooks(repo) {
   const { dir, managed } = hooksDir(repo);
@@ -2875,17 +2878,17 @@ function installHooks(repo) {
       ...HOOKS.map((h) => `  ${h}: braid git-hook ${h} "$@"${h === "pre-push" || h === "post-rewrite" ? "   (pass stdin through)" : ""}`)
     ];
   }
-  mkdirSync7(dir, { recursive: true });
+  mkdirSync6(dir, { recursive: true });
   const notes = [];
   for (const hook of HOOKS) {
-    const path2 = join10(dir, hook);
+    const path2 = join9(dir, hook);
     if (existsSync9(path2) && !readFileSync7(path2, "utf8").includes(MARK)) {
       if (!existsSync9(`${path2}.local`)) {
         renameSync3(path2, `${path2}.local`);
         notes.push(`kept your ${hook} hook as ${hook}.local; braid runs it first`);
       }
     }
-    writeFileSync7(path2, script(hook));
+    writeFileSync6(path2, script(hook));
     chmodSync(path2, 493);
   }
   return notes;
@@ -2895,7 +2898,7 @@ function uninstallHooks(repo) {
   if (managed) return [`core.hooksPath is set to ${dir}: remove the braid git-hook lines from your hook manager`];
   const notes = [];
   for (const hook of HOOKS) {
-    const path2 = join10(dir, hook);
+    const path2 = join9(dir, hook);
     if (!existsSync9(path2) || !readFileSync7(path2, "utf8").includes(MARK)) continue;
     rmSync3(path2);
     if (existsSync9(`${path2}.local`)) renameSync3(`${path2}.local`, path2);
@@ -2970,20 +2973,20 @@ function prePush(repo, remote, stdin) {
 
 // src/hooks.ts
 import { appendFileSync, existsSync as existsSync12 } from "node:fs";
-import { dirname as dirname3, join as join13 } from "node:path";
+import { dirname as dirname3, join as join12 } from "node:path";
 
 // src/setup.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { chmodSync as chmodSync2, existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync8, writeFileSync as writeFileSync8 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { dirname as dirname2, join as join11, resolve as resolve3 } from "node:path";
+import { chmodSync as chmodSync2, existsSync as existsSync10, mkdirSync as mkdirSync7, readFileSync as readFileSync8, writeFileSync as writeFileSync7 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { dirname as dirname2, join as join10, resolve as resolve3 } from "node:path";
 import { fileURLToPath } from "node:url";
 function cliPath() {
   return resolve3(process.argv[1] ?? fileURLToPath(import.meta.url));
 }
 function writePointer() {
-  mkdirSync8(configDir(), { recursive: true });
-  writeFileSync8(join11(configDir(), "cli"), cliPath());
+  mkdirSync7(configDir(), { recursive: true });
+  writeFileSync7(join10(configDir(), "cli"), cliPath());
 }
 function visibility(repo) {
   const r = spawnSync3("gh", ["repo", "view", "--json", "visibility", "-q", ".visibility"], { cwd: repo.top, encoding: "utf8" });
@@ -3046,7 +3049,7 @@ function init(cwd, opts = {}) {
   return notes;
 }
 function setUserKey(key, value) {
-  const file2 = join11(configDir(), "config.toml");
+  const file2 = join10(configDir(), "config.toml");
   let text = existsSync10(file2) ? readFileSync8(file2, "utf8") : "";
   const line = `${key} = ${tomlValue(value)}`;
   const re = new RegExp(`^${key}\\s*=.*$`, "m");
@@ -3057,15 +3060,15 @@ function setUserKey(key, value) {
 ` : `${text.slice(0, at)}${line}
 ${text.slice(at)}`;
   }
-  mkdirSync8(configDir(), { recursive: true });
-  writeFileSync8(file2, text);
-  const notes = [`set ${line} in ${file2.replace(homedir5(), "~")}`];
-  if (key === "repo" && typeof value === "string" && value !== "auto") notes.push(`conversations are kept in ${homeRepo(expandPath(value, homedir5()), true).top}`);
+  mkdirSync7(configDir(), { recursive: true });
+  writeFileSync7(file2, text);
+  const notes = [`set ${line} in ${file2.replace(homedir4(), "~")}`];
+  if (key === "repo" && typeof value === "string" && value !== "auto") notes.push(`conversations are kept in ${homeRepo(expandPath(value, homedir4()), true).top}`);
   return notes;
 }
 function initRepo(repo, opts) {
   const notes = [];
-  const file2 = join11(repo.top, ".braid", "config.toml");
+  const file2 = join10(repo.top, ".braid", "config.toml");
   const autopilot = opts.autopilot ?? (existsSync10(file2) ? readConfig(repo).autopilot : userConfig().autopilot ?? true);
   const pushDefault = () => {
     if (opts.autopush !== void 0) return [opts.autopush, "as asked"];
@@ -3077,8 +3080,8 @@ function initRepo(repo, opts) {
   };
   if (!existsSync10(file2)) {
     const [autopush, why] = pushDefault();
-    mkdirSync8(dirname2(file2), { recursive: true });
-    writeFileSync8(
+    mkdirSync7(dirname2(file2), { recursive: true });
+    writeFileSync7(
       file2,
       TEMPLATE({ autopilot, autofork: opts.autofork ?? true, repo: opts.repo ?? "auto", "git-hooks": opts["git-hooks"] ?? true, autocommit: opts.autocommit ?? false, autopush })
     );
@@ -3099,11 +3102,11 @@ ${line}
 `;
       notes.push(`set ${line} in .braid/config.toml`);
     }
-    if (changes.length) writeFileSync8(file2, text);
+    if (changes.length) writeFileSync7(file2, text);
   }
-  const ignore = join11(repo.top, ".braidignore");
+  const ignore = join10(repo.top, ".braidignore");
   if (!existsSync10(ignore)) {
-    writeFileSync8(ignore, IGNORE_TEMPLATE);
+    writeFileSync7(ignore, IGNORE_TEMPLATE);
     notes.push("wrote .braidignore: tool calls on .env files and keys are never published; add your own paths");
   }
   const config2 = readConfig(repo);
@@ -3112,7 +3115,7 @@ ${line}
   return notes;
 }
 function settingsPath() {
-  return join11(process.env.CLAUDE_CONFIG_DIR || join11(homedir5(), ".claude"), "settings.json");
+  return join10(process.env.CLAUDE_CONFIG_DIR || join10(homedir4(), ".claude"), "settings.json");
 }
 var SHIM = `#!/bin/sh
 # braid: runs the braid CLI wherever the Claude Code plugin installed it.
@@ -3123,30 +3126,30 @@ exec node "$(cat "$cli")" "$@"
 function setup(opts = {}) {
   const notes = [];
   const settingsFile = settingsPath();
-  const saved = join11(configDir(), "statusline.json");
+  const saved = join10(configDir(), "statusline.json");
   const settings = existsSync10(settingsFile) ? JSON.parse(readFileSync8(settingsFile, "utf8")) : {};
   const current = settings.statusLine;
   if (opts.undo) {
     const prev = existsSync10(saved) ? JSON.parse(readFileSync8(saved, "utf8")) : {};
     if (prev.previous) settings.statusLine = { type: "command", command: prev.previous, ...prev.refreshInterval ? { refreshInterval: prev.refreshInterval } : {} };
     else delete settings.statusLine;
-    writeFileSync8(settingsFile, JSON.stringify(settings, null, 2) + "\n");
+    writeFileSync7(settingsFile, JSON.stringify(settings, null, 2) + "\n");
     return [`restored the previous status line in ${settingsFile}`];
   }
   writePointer();
-  const bin = join11(homedir5(), ".local", "bin");
-  mkdirSync8(bin, { recursive: true });
-  writeFileSync8(join11(bin, "braid"), SHIM);
-  chmodSync2(join11(bin, "braid"), 493);
-  notes.push(`installed ${join11(bin, "braid")}`);
+  const bin = join10(homedir4(), ".local", "bin");
+  mkdirSync7(bin, { recursive: true });
+  writeFileSync7(join10(bin, "braid"), SHIM);
+  chmodSync2(join10(bin, "braid"), 493);
+  notes.push(`installed ${join10(bin, "braid")}`);
   if (!(process.env.PATH ?? "").split(":").includes(bin)) notes.push(`add ${bin} to your PATH to run braid from a terminal`);
-  const command = `${join11(bin, "braid")} statusline`;
+  const command = `${join10(bin, "braid")} statusline`;
   if (current?.command !== command) {
-    mkdirSync8(configDir(), { recursive: true });
-    writeFileSync8(saved, JSON.stringify({ previous: current?.command ?? "", refreshInterval: current?.refreshInterval }, null, 2) + "\n");
+    mkdirSync7(configDir(), { recursive: true });
+    writeFileSync7(saved, JSON.stringify({ previous: current?.command ?? "", refreshInterval: current?.refreshInterval }, null, 2) + "\n");
     settings.statusLine = { type: "command", command, refreshInterval: 30 };
-    mkdirSync8(dirname2(settingsFile), { recursive: true });
-    writeFileSync8(settingsFile, JSON.stringify(settings, null, 2) + "\n");
+    mkdirSync7(dirname2(settingsFile), { recursive: true });
+    writeFileSync7(settingsFile, JSON.stringify(settings, null, 2) + "\n");
     notes.push(`status line set in ${settingsFile}${current?.command ? "; braid runs your previous one first" : ""}`);
   }
   return notes;
@@ -3154,7 +3157,7 @@ function setup(opts = {}) {
 
 // src/verify.ts
 import { existsSync as existsSync11, readdirSync as readdirSync4, readFileSync as readFileSync9 } from "node:fs";
-import { join as join12 } from "node:path";
+import { join as join11 } from "node:path";
 function readAll(path2, id, until) {
   const saved = [];
   const since = [];
@@ -3337,11 +3340,11 @@ function verify(repo, session, remote) {
     const n = compare("saved", saved, stored, elsewhere, problems);
     checked.push(`saved: ${n} records of the transcript`);
     let pending = since.length;
-    const dir = join12(state.transcript.replace(/\.jsonl$/, ""), "subagents");
+    const dir = join11(state.transcript.replace(/\.jsonl$/, ""), "subagents");
     for (const file2 of existsSync11(dir) ? readdirSync4(dir).sort() : []) {
       const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file2)?.[1];
       if (!id) continue;
-      const read = readAll(join12(dir, file2), id, state.agents?.[id]?.cursor.offset ?? 0);
+      const read = readAll(join11(dir, file2), id, state.agents?.[id]?.cursor.offset ?? 0);
       pending += read.since.length;
       const mine = agents.get(id);
       if (!read.saved.length) continue;
@@ -3417,7 +3420,7 @@ function sessionStart(input) {
   recordSession(session, { transcript: input.transcript_path });
   const envFile = process.env.CLAUDE_ENV_FILE;
   if (envFile) {
-    const bin = join13(dirname3(dirname3(cliPath())), "bin");
+    const bin = join12(dirname3(dirname3(cliPath())), "bin");
     appendFileSync(envFile, `export BRAID_SESSION=${session}
 export PATH="${bin}:$PATH"
 `);
@@ -3469,7 +3472,7 @@ function sessionEnd(input) {
 }
 
 // src/merge.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 function incoming(repo, session, remote, found) {
   const state = loadState(repo, session);
   const conv = state?.conv ?? session;
@@ -3520,7 +3523,7 @@ function record(repo, session, chosen, opts) {
   const state = loadState(repo, session);
   if (!state || state.chunks === 0) throw new Error("this session is not saved yet");
   state.pendingMerge = {
-    id: `braid-merge-${randomUUID3()}`,
+    id: `braid-merge-${randomUUID2()}`,
     from: chosen.session,
     fromHead: chosen.head,
     base: chosen.base,
@@ -3529,6 +3532,456 @@ function record(repo, session, chosen, opts) {
     summary: opts.summary.trim()
   };
   saveState(repo, state);
+}
+
+// src/harness.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { mkdirSync as mkdirSync8, writeFileSync as writeFileSync8 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { join as join13 } from "node:path";
+
+// node_modules/@leostera/atxf/dist/formats/codex.js
+var AGENT2 = "codex";
+var FORMAT2 = "codex/rollout-jsonl";
+function decode2(units2, context2) {
+  const tree = new TreeBuilder(context2);
+  const native = (unit) => nativeOf([unit], AGENT2, FORMAT2);
+  let start = 0;
+  let header2;
+  const first = units2[0]?.value;
+  if (isObject(first) && first.type === "session_meta" && isObject(first.payload) && !context2.known.has(0)) {
+    header2 = sessionHeader2(first, native(units2[0]));
+    start = 1;
+  } else {
+    header2 = sessionHeader2({}, void 0);
+  }
+  let provider = isObject(first) && isObject(first.payload) && typeof first.payload.model_provider === "string" ? first.payload.model_provider : "openai";
+  let turns = 0;
+  for (let index2 = start; index2 < units2.length; index2++) {
+    const unit = units2[index2];
+    if (context2.known.has(index2)) {
+      const known = context2.known.get(index2);
+      if (known)
+        tree.last = known;
+      continue;
+    }
+    const line = isObject(unit.value) ? unit.value : {};
+    const payload = isObject(line.payload) ? line.payload : {};
+    const id = context2.ids.take(`codex-${index2 + 1}`);
+    const node = { id, parentId: tree.last, time: isoTime(line.timestamp, header2.time) };
+    const push = (record2) => tree.push(record2, native(unit));
+    const custom = (name2) => push({ type: "custom", ...node, namespace: AGENT2, name: name2 });
+    switch (line.type) {
+      case "response_item": {
+        const body = responseItem(payload, tree);
+        if (!body) {
+          custom(`response_item:${typeof payload.type === "string" ? payload.type : "unknown"}`);
+          break;
+        }
+        push({ type: "message", ...node, ...body });
+        break;
+      }
+      case "turn_context":
+        if (typeof payload.model === "string")
+          provider = typeof payload.model_provider === "string" ? payload.model_provider : provider;
+        push(compact({
+          type: "settings",
+          ...node,
+          model: typeof payload.model === "string" ? { provider, id: payload.model } : void 0,
+          reasoningEffort: typeof payload.effort === "string" ? payload.effort : void 0,
+          cwd: typeof payload.cwd === "string" ? payload.cwd : void 0,
+          policy: payload.approval_policy !== void 0 || payload.sandbox_policy !== void 0 ? compact({ approval: payload.approval_policy, sandbox: payload.sandbox_policy }) : void 0
+        }));
+        break;
+      case "compacted": {
+        const replacement = Array.isArray(payload.replacement_history) ? payload.replacement_history.flatMap((item) => {
+          const body = isObject(item) ? responseItem(isObject(item.item) ? item.item : item, void 0) : void 0;
+          return body && body.role !== "tool" ? [body] : [];
+        }) : void 0;
+        if (replacement && replacement.length > 0)
+          push({ type: "compaction", ...node, strategy: "replace", replacement });
+        else if (typeof payload.message === "string")
+          push({ type: "compaction", ...node, strategy: "summary", summary: payload.message, firstKeptId: null });
+        else
+          custom("compacted");
+        break;
+      }
+      case "event_msg": {
+        const event = typeof payload.type === "string" ? payload.type : "unknown";
+        if (event === "task_started" || event === "turn_started") {
+          push({ type: "turn", ...node, phase: "start", turnId: typeof payload.turn_id === "string" ? payload.turn_id : `turn-${++turns}` });
+        } else if (event === "task_complete" || event === "turn_complete" || event === "turn_aborted") {
+          push({
+            type: "turn",
+            ...node,
+            phase: "end",
+            turnId: typeof payload.turn_id === "string" ? payload.turn_id : `turn-${turns}`,
+            outcome: event === "turn_aborted" ? "interrupted" : "succeeded"
+          });
+        } else if (event === "token_count" && isObject(payload.info) && tokenUsage(payload.info.total_token_usage)) {
+          push({ type: "usage", ...node, kind: "token_count", usage: tokenUsage(payload.info.total_token_usage), cumulative: true });
+        } else {
+          custom(`event_msg:${event}`);
+        }
+        break;
+      }
+      case "token_usage_record": {
+        const usage = tokenUsage(payload.total_token_usage ?? payload.usage ?? payload);
+        if (usage)
+          push({ type: "usage", ...node, kind: "token_usage_record", usage, cumulative: true });
+        else
+          custom("token_usage_record");
+        break;
+      }
+      default:
+        custom(typeof line.type === "string" ? line.type : "unparsed");
+    }
+  }
+  return { header: header2, records: tree.records };
+}
+function sessionHeader2(line, native) {
+  const meta = isObject(line.payload) ? line.payload : {};
+  const git2 = isObject(meta.git) ? meta.git : {};
+  const parent = typeof meta.forked_from_id === "string" ? meta.forked_from_id : typeof meta.parent_thread_id === "string" ? meta.parent_thread_id : void 0;
+  return compact({
+    type: "transcript",
+    atxf: ATXF_VERSION,
+    id: typeof meta.id === "string" && meta.id !== "" ? meta.id : "codex-session",
+    time: isoTime(meta.timestamp, isoTime(line.timestamp, EPOCH)),
+    source: compact({
+      agent: AGENT2,
+      format: FORMAT2,
+      version: typeof meta.cli_version === "string" ? meta.cli_version : void 0,
+      sessionId: typeof meta.id === "string" ? meta.id : void 0
+    }),
+    workspace: typeof meta.cwd === "string" || typeof git2.branch === "string" ? compact({
+      cwd: typeof meta.cwd === "string" ? meta.cwd : void 0,
+      vcs: typeof git2.branch === "string" || typeof git2.commit_hash === "string" ? compact({
+        type: "git",
+        branch: typeof git2.branch === "string" ? git2.branch : void 0,
+        commit: typeof git2.commit_hash === "string" ? git2.commit_hash : void 0,
+        remote: typeof git2.repository_url === "string" ? git2.repository_url : void 0
+      }) : void 0
+    }) : void 0,
+    parent: parent ? { transcriptId: parent, relation: typeof meta.forked_from_id === "string" ? "fork" : "subagent" } : void 0,
+    fidelity: {
+      topology: "linear",
+      instructions: "partial",
+      turns: true,
+      usage: "aggregate",
+      native: "all",
+      ids: "synthetic"
+    },
+    native
+  });
+}
+function responseItem(item, tree) {
+  switch (item.type) {
+    case "message": {
+      if (!Array.isArray(item.content))
+        return void 0;
+      if (item.role === "assistant") {
+        const content3 = item.content.flatMap((part) => isObject(part) && typeof part.text === "string" ? [{ type: "text", text: part.text }] : []);
+        return { role: "assistant", content: content3 };
+      }
+      const content2 = userContent(item.content);
+      if (item.role === "developer" || item.role === "system")
+        return { role: "system", content: content2 };
+      return { role: "user", content: content2 };
+    }
+    case "reasoning": {
+      const summary = Array.isArray(item.summary) ? item.summary.flatMap((s) => isObject(s) && typeof s.text === "string" ? [s.text] : []) : [];
+      const text = Array.isArray(item.content) ? item.content.flatMap((c) => isObject(c) && typeof c.text === "string" ? [c.text] : []).join("\n") : void 0;
+      const replay3 = typeof item.encrypted_content === "string" ? [{ provider: "openai", api: "responses", kind: "encrypted_content", data: item.encrypted_content }] : void 0;
+      return {
+        role: "assistant",
+        content: [compact({ type: "reasoning", text, summary: summary.length || text === void 0 && !replay3 ? summary : void 0, replay: replay3 })]
+      };
+    }
+    case "function_call":
+    case "custom_tool_call":
+    case "local_shell_call":
+    case "web_search_call": {
+      if (!tree)
+        return void 0;
+      const id = typeof item.call_id === "string" ? item.call_id : typeof item.id === "string" ? item.id : void 0;
+      if (id === void 0 || tree.hasToolCall(id))
+        return void 0;
+      return { role: "assistant", content: [toolCall(item, id)] };
+    }
+    case "function_call_output":
+    case "custom_tool_call_output": {
+      if (typeof item.call_id !== "string" || !tree)
+        return void 0;
+      const output = item.output;
+      const isError = isObject(output) && output.success === false ? true : void 0;
+      const content2 = typeof output === "string" ? output : isObject(output) && typeof output.content === "string" ? output.content : Array.isArray(output) ? userContent(output) : "";
+      return compact({ role: "tool", toolCallId: item.call_id, content: content2, isError });
+    }
+    default:
+      return void 0;
+  }
+}
+function toolCall(item, id) {
+  switch (item.type) {
+    case "function_call": {
+      let args;
+      try {
+        args = JSON.parse(item.arguments);
+      } catch {
+        args = void 0;
+      }
+      return isObject(args) ? compact({ type: "tool_call", id, name: String(item.name ?? ""), kind: "function", namespace: typeof item.namespace === "string" ? item.namespace : void 0, arguments: args }) : { type: "tool_call", id, name: String(item.name ?? ""), kind: "function", input: typeof item.arguments === "string" ? item.arguments : "" };
+    }
+    case "custom_tool_call":
+      return { type: "tool_call", id, name: String(item.name ?? ""), kind: "custom", input: typeof item.input === "string" ? item.input : "" };
+    case "local_shell_call":
+      return { type: "tool_call", id, name: "local_shell", kind: "builtin", arguments: isObject(item.action) ? item.action : {} };
+    default:
+      return { type: "tool_call", id, name: "web_search", kind: "builtin", arguments: isObject(item.action) ? item.action : {} };
+  }
+}
+function userContent(parts) {
+  const blocks = [];
+  for (const part of parts) {
+    if (!isObject(part))
+      continue;
+    if (typeof part.text === "string")
+      blocks.push({ type: "text", text: part.text });
+    else if (part.type === "input_image" && typeof part.image_url === "string") {
+      const match = /^data:([^;]+);base64,(.*)$/s.exec(part.image_url);
+      blocks.push(match ? { type: "image", mediaType: match[1], data: match[2] } : { type: "image", mediaType: "image/*", uri: part.image_url });
+    }
+  }
+  return blocks;
+}
+function tokenUsage(value) {
+  if (!isObject(value))
+    return void 0;
+  const n = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : void 0;
+  const input = n(value.input_tokens);
+  const output = n(value.output_tokens);
+  if (input === void 0 || output === void 0)
+    return void 0;
+  return compact({
+    input,
+    output,
+    cacheRead: n(value.cached_input_tokens),
+    cacheWrite: n(value.cache_write_input_tokens),
+    reasoning: n(value.reasoning_output_tokens),
+    total: n(value.total_tokens)
+  });
+}
+function encode2(transcript) {
+  const context2 = buildContext(transcript);
+  const times = new Map(transcript.records.map((record2) => [record2.id, record2.time]));
+  const out = [];
+  let time = transcript.header.time;
+  const line = (type, payload, source) => {
+    if (source)
+      time = times.get(source) ?? time;
+    out.push({ value: { timestamp: time, type, payload }, source });
+  };
+  const instructions = context2.instructions.filter((s) => s.text !== null).map((s) => s.text).join("\n\n");
+  line("session_meta", compact({
+    id: transcript.header.source.sessionId ?? transcript.header.id,
+    timestamp: transcript.header.time,
+    cwd: transcript.header.workspace?.cwd ?? context2.settings.cwd ?? "/",
+    originator: "atxf",
+    cli_version: "0.0.0",
+    source: "cli",
+    model_provider: context2.settings.model?.provider,
+    base_instructions: instructions ? { text: instructions } : void 0
+  }), null);
+  if (context2.settings.model || context2.settings.reasoningEffort || context2.settings.cwd) {
+    line("turn_context", compact({ cwd: context2.settings.cwd ?? transcript.header.workspace?.cwd ?? "/", model: context2.settings.model?.id, effort: context2.settings.reasoningEffort }), null);
+  }
+  context2.messages.forEach((message, index2) => {
+    const body = message.body;
+    const source = message.sourceId;
+    if (message.kind === "compaction_summary" || message.kind === "branch_summary") {
+      if (index2 === 0)
+        line("compacted", { message: textOf2(body.content) }, source);
+      else
+        line("response_item", { type: "message", role: "user", content: codexContent(body.content) }, source);
+      return;
+    }
+    switch (body.role) {
+      case "system":
+      case "user": {
+        const hidden = body.role === "system" || body.display === false || body.origin !== void 0 && body.origin.kind !== "human";
+        line("response_item", { type: "message", role: hidden ? "developer" : "user", content: codexContent(body.content) }, source);
+        break;
+      }
+      case "tool":
+        line("response_item", { type: "function_call_output", call_id: body.toolCallId, output: body.isError ? { content: textOf2(body.content), success: false } : textOf2(body.content) }, source);
+        break;
+      case "assistant":
+        if (body.content.length === 0)
+          line("response_item", { type: "message", role: "assistant", content: [] }, source);
+        for (const block of body.content) {
+          if (block.type === "reasoning") {
+            const encrypted = block.replay?.find((r) => r.provider === "openai" && r.kind === "encrypted_content")?.data;
+            line("response_item", compact({
+              type: "reasoning",
+              summary: (block.summary ?? []).map((text) => ({ type: "summary_text", text })),
+              content: block.text !== void 0 ? [{ type: "reasoning_text", text: block.text }] : void 0,
+              encrypted_content: typeof encrypted === "string" ? encrypted : null
+            }), source);
+          } else if (block.type === "text") {
+            line("response_item", { type: "message", role: "assistant", content: [{ type: "output_text", text: block.text }] }, source);
+          } else if (block.type === "tool_call") {
+            if (block.kind === "custom" || block.arguments === void 0 && block.input !== void 0) {
+              line("response_item", { type: block.kind === "custom" ? "custom_tool_call" : "function_call", call_id: block.id, name: block.name, ...block.kind === "custom" ? { input: block.input ?? "" } : { arguments: block.input ?? "" } }, source);
+            } else {
+              line("response_item", compact({ type: "function_call", name: block.name, namespace: block.namespace, arguments: JSON.stringify(block.arguments ?? {}), call_id: block.id }), source);
+            }
+          }
+        }
+        break;
+    }
+  });
+  return out;
+}
+function codexContent(content2) {
+  if (typeof content2 === "string")
+    return [{ type: "input_text", text: content2 }];
+  return content2.map((block) => {
+    if (block.type === "text")
+      return { type: "input_text", text: block.text };
+    if (block.type === "image")
+      return { type: "input_image", image_url: block.data !== void 0 ? `data:${block.mediaType};base64,${block.data}` : block.uri ?? "" };
+    return { type: "input_text", text: block.text ?? `[${block.uri}]` };
+  });
+}
+function textOf2(content2) {
+  if (typeof content2 === "string")
+    return content2;
+  return content2.map((block) => block.type === "text" ? block.text : block.type === "image" ? "[image]" : block.text ?? `[${block.uri}]`).join("\n");
+}
+var carrier2 = {
+  mark(value, source) {
+    return { ...value, atxf: { id: source } };
+  },
+  markOf(value) {
+    return isObject(value) && isObject(value.atxf) && "id" in value.atxf ? value.atxf.id : void 0;
+  },
+  attach(values, transcript) {
+    const [meta, ...rest] = values;
+    return [meta, { timestamp: meta.timestamp, type: "atxf", payload: { transcript: carriedValue(transcript) } }, ...rest];
+  },
+  detach(units2) {
+    const index2 = units2.findIndex((unit) => isObject(unit.value) && unit.value.type === "atxf" && isObject(unit.value.payload) && isObject(unit.value.payload.transcript));
+    if (index2 === -1)
+      return void 0;
+    return { transcript: units2[index2].value.payload.transcript, units: units2.filter((_, i) => i !== index2) };
+  }
+};
+var codex = defineConverter({ agent: AGENT2, format: FORMAT2, framing: jsonl, decode: decode2, encode: encode2, carrier: carrier2 });
+
+// src/harness.ts
+var linear = (records) => records.map((r, i) => ({ ...r, parentId: i ? records[i - 1].id : null }));
+function asClaudeCodeShowed(records) {
+  return records.map((r) => {
+    const line = ownLine(r);
+    const origin = line?.origin?.kind;
+    if (r.type === "message" && r.role === "user" && origin && origin !== "human") return { ...r, display: false };
+    const a = line?.attachment;
+    if (r.type !== "custom" || a?.type !== "queued_command" || a.commandMode !== "prompt" || typeof a.prompt !== "string") return r;
+    if (a.prompt.trimStart().startsWith("<task-notification>")) return r;
+    const own = !a.origin || a.origin.kind === "human";
+    return { type: "message", id: r.id, parentId: r.parentId, time: r.time, role: "user", content: a.prompt, ...own ? {} : { display: false } };
+  });
+}
+var responseOf = (r) => r.type === "message" && r.role === "assistant" && typeof r.responseId === "string" ? r.responseId : void 0;
+function batched(records) {
+  const last = /* @__PURE__ */ new Map();
+  records.forEach((r, i) => {
+    const id = responseOf(r);
+    if (id) last.set(id, i);
+  });
+  const out = [];
+  let held = [];
+  let until = -1;
+  records.forEach((r, i) => {
+    const id = responseOf(r);
+    if (id) {
+      out.push(r);
+      until = Math.max(until, last.get(id));
+    } else if (i < until) held.push(r);
+    else out.push(r);
+    if (i >= until && held.length) {
+      out.push(...held);
+      held = [];
+    }
+  });
+  return [...out, ...held];
+}
+function resultsFirst(records) {
+  const isResult = (r) => r.role === "tool";
+  const isNote2 = (r) => r.type === "custom" || r.type === "message" && r.role === "user" && r.display === false;
+  const out = [];
+  let run2 = [];
+  const flush = () => {
+    out.push(...run2.filter(isResult), ...run2.filter((r) => !isResult(r)));
+    run2 = [];
+  };
+  for (const r of records) {
+    if (isResult(r) || run2.length && isNote2(r)) run2.push(r);
+    else {
+      flush();
+      out.push(r);
+    }
+  }
+  flush();
+  return out;
+}
+var asText = (r) => r.role === "tool" && r.isError ? { ...r, isError: void 0 } : r;
+var claudeHome = () => process.env.CLAUDE_CONFIG_DIR || join13(homedir5(), ".claude");
+var codexHome = () => process.env.CODEX_HOME || join13(homedir5(), ".codex");
+var pad = (n) => String(n).padStart(2, "0");
+var CLAUDE_CODE = {
+  agent: "claude-code",
+  title: "Claude Code",
+  provider: "anthropic",
+  write(fork, _all, cwd, pairs) {
+    const session = randomUUID3();
+    const text = forkText(fork, session, cwd, pairs);
+    const dir = join13(claudeHome(), "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
+    mkdirSync8(dir, { recursive: true });
+    const file2 = join13(dir, `${session}.jsonl`);
+    writeFileSync8(file2, text);
+    return { session, file: file2, lines: text.split("\n").filter(Boolean).length };
+  },
+  resume: (dir, session) => `cd ${shellWord(dir)} && claude --resume ${session}`
+};
+var CODEX = {
+  agent: "codex",
+  title: "Codex",
+  provider: "openai",
+  write(fork, all, cwd, pairs) {
+    const session = randomUUID3();
+    const now = /* @__PURE__ */ new Date();
+    const kept = fork.path[0] ? keptUuids(ownLine(fork.path[0])).flatMap((u) => all.has(u) ? [all.get(u)] : []) : [];
+    const path2 = kept.length ? [...fork.path.slice(0, 2), ...kept, ...fork.path.slice(2)] : fork.path;
+    const records = linear(resultsFirst(batched(forModel(rewrite(asClaudeCodeShowed(path2), pairs), CODEX.provider).map(asText))));
+    const header2 = { type: "transcript", atxf: "0.1", id: session, time: now.toISOString(), source: { agent: "braid", sessionId: session }, workspace: { cwd } };
+    const text = codex.fromAtxf({ header: header2, records }, { carry: false });
+    const dir = join13(codexHome(), "sessions", String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()));
+    mkdirSync8(dir, { recursive: true });
+    const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+    const file2 = join13(dir, `rollout-${stamp}-${session}.jsonl`);
+    writeFileSync8(file2, text);
+    return { session, file: file2, lines: text.split("\n").filter(Boolean).length };
+  },
+  resume: (dir, session) => `cd ${shellWord(dir)} && codex resume ${session}`
+};
+var HARNESSES = { "claude-code": CLAUDE_CODE, claude: CLAUDE_CODE, codex: CODEX };
+function harness(name2) {
+  if (name2 === void 0) return CLAUDE_CODE;
+  const h = HARNESSES[name2.toLowerCase()];
+  if (!h) throw new Error(`braid writes sessions for claude-code and codex, not ${name2}`);
+  return h;
 }
 
 // src/edit.ts
@@ -3727,9 +4180,9 @@ import { join as join14 } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 
 // node_modules/@leostera/atxf/dist/formats/pi.js
-var AGENT2 = "pi";
-var FORMAT2 = "pi/session-jsonl";
-function decode2(units2, context2) {
+var AGENT3 = "pi";
+var FORMAT3 = "pi/session-jsonl";
+function decode3(units2, context2) {
   const read = reader(context2);
   const { header: header2, took } = read.start(units2[0]);
   for (let index2 = took ? 1 : 0; index2 < units2.length; index2++)
@@ -3738,7 +4191,7 @@ function decode2(units2, context2) {
 }
 function reader(context2, retain = true) {
   const tree = new TreeBuilder(context2, retain);
-  const native = (unit) => nativeOf([unit], AGENT2, FORMAT2);
+  const native = (unit) => nativeOf([unit], AGENT3, FORMAT3);
   let header2;
   let hasContext = context2.base?.records.some((record2) => record2.type === "context") ?? false;
   return {
@@ -3746,10 +4199,10 @@ function reader(context2, retain = true) {
     start(first) {
       const value = first?.value;
       if (isObject(value) && value.type === "session" && !context2.known.has(0)) {
-        header2 = sessionHeader2(value, native(first));
+        header2 = sessionHeader3(value, native(first));
         return { header: header2, took: true };
       }
-      header2 = sessionHeader2({}, void 0);
+      header2 = sessionHeader3({}, void 0);
       return { header: header2, took: false };
     },
     next(unit, index2) {
@@ -3767,7 +4220,7 @@ function reader(context2, retain = true) {
     }
   };
 }
-function sessionHeader2(session, native) {
+function sessionHeader3(session, native) {
   const id = typeof session.id === "string" && session.id !== "" ? session.id : "pi-session";
   return compact({
     type: "transcript",
@@ -3775,8 +4228,8 @@ function sessionHeader2(session, native) {
     id,
     time: isoTime(session.timestamp, EPOCH),
     source: compact({
-      agent: AGENT2,
-      format: FORMAT2,
+      agent: AGENT3,
+      format: FORMAT3,
       version: session.version === void 0 ? void 0 : String(session.version),
       sessionId: typeof session.id === "string" ? session.id : void 0
     }),
@@ -3794,7 +4247,7 @@ function entryRecord(entry, index2, tree, context2, fallbackTime, hasContext) {
   const node = { id, parentId, time };
   const custom = () => {
     tree.alias(e.id, id);
-    return { type: "custom", ...node, namespace: AGENT2, name: typeof e.type === "string" ? e.type : "unparsed" };
+    return { type: "custom", ...node, namespace: AGENT3, name: typeof e.type === "string" ? e.type : "unparsed" };
   };
   const annotation = (record2) => {
     tree.alias(e.id, parentId);
@@ -3871,12 +4324,12 @@ function entryRecord(entry, index2, tree, context2, fallbackTime, hasContext) {
       return compact({
         type: "custom",
         ...node,
-        namespace: AGENT2,
+        namespace: AGENT3,
         name: typeof e.customType === "string" && e.customType !== "" ? e.customType : "custom",
         data: e.data
       });
     case "custom_message": {
-      const content2 = userContent(e.content);
+      const content2 = userContent2(e.content);
       if (content2 === void 0)
         return custom();
       return treeRecord(compact({
@@ -3909,7 +4362,7 @@ function messageBody2(message, tree) {
     case "system":
       return "context";
     case "user": {
-      const content2 = userContent(message.content);
+      const content2 = userContent2(message.content);
       return content2 === void 0 ? void 0 : { role: "user", content: content2 };
     }
     case "assistant": {
@@ -3959,7 +4412,7 @@ function messageBody2(message, tree) {
     case "toolResult": {
       if (typeof message.toolCallId !== "string")
         return void 0;
-      const content2 = userContent(message.content);
+      const content2 = userContent2(message.content);
       if (content2 === void 0)
         return void 0;
       return compact({
@@ -3972,7 +4425,7 @@ function messageBody2(message, tree) {
       });
     }
     case "custom": {
-      const content2 = userContent(message.content);
+      const content2 = userContent2(message.content);
       if (content2 === void 0)
         return void 0;
       return compact({
@@ -4012,7 +4465,7 @@ function promptOf(message) {
         instructions.push({ name: name2, text: text2 });
     }
   }
-  const text = textOf2(message.content);
+  const text = textOf3(message.content);
   if (text)
     instructions.push({ name: "system", text });
   const tools = [];
@@ -4032,14 +4485,14 @@ function promptOf(message) {
   }
   return { instructions, tools, removed };
 }
-function textOf2(content2) {
+function textOf3(content2) {
   if (typeof content2 === "string")
     return content2;
   if (!Array.isArray(content2))
     return "";
   return content2.flatMap((block) => isObject(block) && block.type === "text" && typeof block.text === "string" ? [block.text] : []).join("\n");
 }
-function userContent(content2) {
+function userContent2(content2) {
   if (typeof content2 === "string")
     return content2;
   if (!Array.isArray(content2))
@@ -4057,7 +4510,7 @@ function userContent(content2) {
   return blocks;
 }
 function replacementOf(value) {
-  return userContent(value);
+  return userContent2(value);
 }
 function replay2(base, kind, data) {
   return typeof data === "string" && data !== "" ? [compact({ ...base, kind, data })] : void 0;
@@ -4094,7 +4547,7 @@ function usageOf2(value) {
     }) : void 0
   });
 }
-function encode2(transcript) {
+function encode3(transcript) {
   const context2 = buildContext(transcript);
   const times = new Map(transcript.records.map((record2) => [record2.id, record2.time]));
   const out = [];
@@ -4141,14 +4594,14 @@ function encode2(transcript) {
       const id = ids.take(message.sourceId);
       time = times.get(message.sourceId) ?? time;
       out.push({
-        value: { type: "compaction", id, parentId, timestamp: time, summary: textOf2(message.body.content), firstKeptEntryId: id, tokensBefore: 0 },
+        value: { type: "compaction", id, parentId, timestamp: time, summary: textOf3(message.body.content), firstKeptEntryId: id, tokensBefore: 0 },
         source: message.sourceId
       });
       parentId = id;
       continue;
     }
     if (summary) {
-      entry({ type: "branch_summary", fromId: parentId, summary: textOf2(message.body.content) }, message.sourceId);
+      entry({ type: "branch_summary", fromId: parentId, summary: textOf3(message.body.content) }, message.sourceId);
       continue;
     }
     const body = message.body;
@@ -4173,7 +4626,7 @@ var PI_STOPS = {
 function piMessage(body, timestamp) {
   switch (body.role) {
     case "system":
-      return { role: "system", content: typeof body.content === "string" ? body.content : textOf2(body.content), timestamp };
+      return { role: "system", content: typeof body.content === "string" ? body.content : textOf3(body.content), timestamp };
     case "user":
       return { role: "user", content: piUserContent(body.content), timestamp };
     case "tool":
@@ -4255,7 +4708,7 @@ function piUserContent(content2) {
     return { type: "text", text: block.text ?? `[${block.uri}]` };
   });
 }
-var carrier2 = {
+var carrier3 = {
   mark(value, source) {
     return { ...value, atxf: { id: source } };
   },
@@ -4277,7 +4730,7 @@ var carrier2 = {
     return { transcript, units: rest };
   }
 };
-var pi = defineConverter({ agent: AGENT2, format: FORMAT2, framing: jsonl, decode: decode2, encode: encode2, carrier: carrier2, reader: (context2) => reader(context2, false) });
+var pi = defineConverter({ agent: AGENT3, format: FORMAT3, framing: jsonl, decode: decode3, encode: encode3, carrier: carrier3, reader: (context2) => reader(context2, false) });
 
 // src/openclaw.ts
 var BATCH_EVENTS = 2e3;
@@ -4297,7 +4750,7 @@ function openclawDatabases() {
   if (!existsSync13(agents)) return [];
   return readdirSync5(agents).map((a) => join14(agents, a, "agent", "openclaw-agent.sqlite")).filter((p) => existsSync13(p));
 }
-var decode3 = (row) => (row.event_json ?? zstdDecompressSync(Buffer.from(row.event_zstd ?? new Uint8Array())).toString("utf8")).trim();
+var decode4 = (row) => (row.event_json ?? zstdDecompressSync(Buffer.from(row.event_zstd ?? new Uint8Array())).toString("utf8")).trim();
 function importOpenclaw(repo, dbPath, only) {
   ensureStore(repo);
   const db = openDatabase(dbPath);
@@ -4325,7 +4778,7 @@ function importOpenclaw(repo, dbPath, only) {
         if (state.chunks === 0 && parent) state.conv = loadState(repo, parent)?.conv ?? parent;
         const head = first.get(id);
         if (!head) return 0;
-        const headerLine = decode3(head);
+        const headerLine = decode4(head);
         const hasHeader = JSON.parse(headerLine).type === "session";
         let last = state.importedSeq ?? (hasHeader ? head.seq : head.seq - 1);
         let total = 0;
@@ -4338,7 +4791,7 @@ function importOpenclaw(repo, dbPath, only) {
             if (bytes > BATCH_BYTES) break;
           }
           if (rows.length === 0) break;
-          const t = pi.toAtxf([...hasHeader ? [headerLine] : [], ...rows.map(decode3)].join("\n"), { integrity: false });
+          const t = pi.toAtxf([...hasHeader ? [headerLine] : [], ...rows.map(decode4)].join("\n"), { integrity: false });
           const records = t.records.map((r) => {
             const parentId = r.native?.records?.[0]?.parentId;
             return r.parentId == null && typeof parentId === "string" ? { ...r, parentId } : r;
@@ -4359,7 +4812,7 @@ function importOpenclaw(repo, dbPath, only) {
           appendChunk(storeRef(state.conv, id), chunk, { time: (/* @__PURE__ */ new Date()).toISOString(), source: `openclaw:${dbPath}`, seq: last }, { gitDir: repo.store });
           state.chunks += 1;
           state.importedSeq = last;
-          state.head = [...records].reverse().find(isTurn)?.id ?? state.head;
+          state.head = lastTurn(records) ?? state.head;
           total += records.length;
           if (rows.length < BATCH_EVENTS && bytes <= BATCH_BYTES) break;
         }
@@ -4491,6 +4944,7 @@ Everyday
   braid commit -m "<message>" commit the conversation: publishing goes up to the last commit
   braid push [--dry-run]      publish the committed part now (git push does this with autopush)
   braid fork [<session>|@N]   the command to continue a session, or fork point N, in a new window; with none, this one
+    --to codex                as a new Codex session (claude-code by default)
   braid fork <session> --here continue from another session in this one, before its first turn is saved
   braid merge [<session>]     show what another session has that this one lacks, for the agent to merge
   braid merge --record <id> --instruction "<text>"   record a merge; summary on stdin
@@ -4603,6 +5057,7 @@ function main(argv) {
       "git-hooks": { type: "boolean" },
       "no-git-hooks": { type: "boolean" },
       transcript: { type: "string" },
+      to: { type: "string" },
       remote: { type: "string" },
       record: { type: "string" },
       skip: { type: "string" },
@@ -4809,11 +5264,22 @@ function main(argv) {
       const repo = needRepo();
       const remote = str("remote") ?? readConfig(repo).remote;
       const current = str("session") ?? currentSession();
+      const to = harness(str("to"));
       const resume = (dir2, id, fork) => `  cd ${shellWord(dir2)} && claude --resume ${id}${fork ? " --fork-session" : ""}`;
+      const wrote = (what, r) => `braid: wrote ${what} as a new ${to.title} session. To continue it in a new window, run in a terminal:
+  ${to.resume(r.cwd, r.session)}`;
       if (!args[0]) {
         if (!current) throw new Error("no session to branch: run inside an agent session, or pass --session <id>");
-        const dir2 = launchDir(loadState(repo, current)?.transcript ?? transcriptOf(current)) ?? process.cwd();
-        out(["braid: to branch this conversation into a new window, run in a terminal:", resume(dir2, current, true), "or /branch to branch it in this window. braid files the branch in this conversation."].join("\n"));
+        const transcript = loadState(repo, current)?.transcript ?? transcriptOf(current);
+        if (to.agent === "claude-code") {
+          const dir2 = launchDir(transcript) ?? process.cwd();
+          out(["braid: to branch this conversation into a new window, run in a terminal:", resume(dir2, current, true), "or /branch to branch it in this window. braid files the branch in this conversation."].join("\n"));
+          return 0;
+        }
+        if (transcript && existsSync15(transcript)) save(repo, current, transcript);
+        const own2 = resolve2(repo, current, remote).filter((f) => f.opts.gitDir);
+        if (own2.length !== 1) throw new Error(`this session (${current.slice(0, 8)}) is not saved yet`);
+        out(wrote("this conversation", replay(repo, own2[0], remote, to, { cwd: str("cwd") })));
         return 0;
       }
       const at = /^(.*)@(\d+)$/.exec(args[0]);
@@ -4824,8 +5290,7 @@ function main(argv) {
         if (own2.length !== 1) throw new Error(own2.length ? `${name3} matches ${own2.length} sessions; name one` : `no session of yours matches ${name3}`);
         const point = points(repo, own2[0].session).find((p) => p.n === Number(at[2]));
         if (!point) throw new Error(`${own2[0].session.slice(0, 8)} has no fork point @${at[2]}; braid log lists them`);
-        const r2 = replay(repo, { ...own2[0], ref: point.commit }, remote, { cwd: str("cwd") });
-        out([`braid: wrote the conversation as it was ${point.what} as a new Claude Code session. To continue it in a new window, run in a terminal:`, resume(r2.cwd, r2.session, false)].join("\n"));
+        out(wrote(`the conversation as it was ${point.what}`, replay(repo, { ...own2[0], ref: point.commit }, remote, to, { cwd: str("cwd") })));
         return 0;
       }
       const found = resolve2(repo, args[0], remote).filter((f) => f.session !== current);
@@ -4846,13 +5311,12 @@ function main(argv) {
       const name2 = sessionTitle(newest.records, from.session);
       const others = found.length > 1 ? [`braid: ${args[0]} has ${found.length} sessions; this is the newest. To fork another, name it: ${found.filter((f) => f !== from).map((f) => f.session.slice(0, 8)).join(", ")}`] : [];
       const own = from.opts.gitDir ? loadState(repo, from.session) : void 0;
-      const dir = own?.harness === "claude-code" ? launchDir(own.transcript) : void 0;
+      const dir = own?.harness === "claude-code" && to.agent === "claude-code" ? launchDir(own.transcript) : void 0;
       if (dir) {
         out([`braid: to fork ${name2} into a new window, run in a terminal:`, resume(dir, from.session, true), ...others].join("\n"));
         return 0;
       }
-      const r = replay(repo, from, remote, { cwd: str("cwd") });
-      out([`braid: wrote ${name2} as a new Claude Code session. To continue it in a new window, run in a terminal:`, resume(r.cwd, r.session, false), ...others].join("\n"));
+      out([wrote(name2, replay(repo, from, remote, to, { cwd: str("cwd") })), ...others].join("\n"));
       return 0;
     }
     case "import": {
