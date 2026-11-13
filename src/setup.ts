@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installHooks, uninstallHooks } from "./githooks.ts";
-import { configDir, ensureStore, expandPath, findRepo, homeFor, homeRepo, readConfig, userConfig, type Repo } from "./repo.ts";
+import { configDir, ensureStore, expandPath, findRepo, homeFor, homeRepo, isRepo, readConfig, userConfig, type Repo } from "./repo.ts";
 
 export { configDir };
 
@@ -84,14 +84,16 @@ export function init(cwd: string, opts: Partial<Settings> = {}): string[] {
     // Outside a code repository, settings go to the user's own config, for every repository.
     for (const [key, value] of Object.entries(opts)) if (value !== undefined) notes.push(...setUserKey(key, value));
   }
-  // The machine's braid repository, and the one this code repository's `repo` setting names, if another.
-  const homes = new Set([homeFor(undefined), ...(code && !code.separate ? [findRepo(code.top)!.home] : [])]);
-  for (const home of homes) {
-    if (!homeRepo(home, false)) {
-      homeRepo(home, true);
-      notes.push(`created ${home}, the braid repository: every conversation is kept there, apart from the code`);
-    }
-    ensureStore(findRepo(home)!);
+  // The machine's braid repository, and the one this code repository's `repo` setting names, if another; read
+  // again, as initRepo may just have set it. Each keeps its store where the sessions it is named for save.
+  const named = code && !code.separate ? findRepo(code.top) : undefined;
+  const homes = new Map<string, Repo | undefined>([[homeFor(undefined), undefined]]);
+  if (named) homes.set(named.home, named);
+  for (const [home, repo] of homes) {
+    if (!isRepo(home)) notes.push(`created ${home}, the braid repository: every conversation is kept there, apart from the code`);
+    const target = repo ?? homeRepo(home, true);
+    if (!target) throw new Error(`${home} is set as the braid repository, and its own .braid/config.toml names another`);
+    ensureStore(target);
   }
   return notes;
 }

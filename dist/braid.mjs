@@ -2,7 +2,7 @@
 
 // src/cli.ts
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { appendFileSync as appendFileSync2, existsSync as existsSync15, mkdirSync as mkdirSync10, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync11, rmSync as rmSync4, statSync as statSync5, writeFileSync as writeFileSync10 } from "node:fs";
+import { appendFileSync as appendFileSync2, existsSync as existsSync15, mkdirSync as mkdirSync10, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync11, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir7, tmpdir as tmpdir2 } from "node:os";
 import { join as join16 } from "node:path";
 import { parseArgs } from "node:util";
@@ -306,7 +306,7 @@ function writeChunks(chunks, parent, message, opts, agents = /* @__PURE__ */ new
 
 // src/fetch.ts
 import { spawn } from "node:child_process";
-import { mkdirSync as mkdirSync4, statSync as statSync3, utimesSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync4, statSync as statSync2, utimesSync, writeFileSync as writeFileSync4 } from "node:fs";
 import { join as join5 } from "node:path";
 
 // src/links.ts
@@ -314,7 +314,7 @@ import { existsSync as existsSync3, mkdirSync as mkdirSync3, readdirSync, readFi
 import { join as join4 } from "node:path";
 
 // src/repo.ts
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join as join2, resolve } from "node:path";
 var real = (path2) => existsSync(path2) ? realpathSync(path2) : path2;
@@ -341,13 +341,7 @@ function expandPath(path2, base) {
   if (path2 === "~" || path2.startsWith("~/")) return join2(homedir(), path2.slice(1));
   return isAbsolute(path2) ? path2 : resolve(base, path2);
 }
-var isRepo = (path2) => {
-  try {
-    return statSync(join2(path2, ".git")).isDirectory();
-  } catch {
-    return false;
-  }
-};
+var isRepo = (path2) => existsSync(join2(path2, ".git", "HEAD"));
 function homeRepo(path2, create) {
   if (!isRepo(path2)) {
     if (!create) return void 0;
@@ -436,7 +430,7 @@ function storeRef(conv, session) {
 }
 
 // src/state.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, rmSync as rmSync2, statSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join3 } from "node:path";
 function path(repo, session) {
   return join3(repo.dir, "sessions", `${session}.json`);
@@ -468,7 +462,7 @@ function withLock(repo, name2, fn) {
     } catch {
       let stale = false;
       try {
-        stale = Date.now() - statSync2(lock).mtimeMs > 3e4;
+        stale = Date.now() - statSync(lock).mtimeMs > 3e4;
       } catch {
         continue;
       }
@@ -566,7 +560,7 @@ function fetchInBackground(repo, remote, minutes = 3) {
   if (repo.separate && !gitMaybe(["remote", "get-url", remote], { cwd: repo.top })) return;
   const stamp = join5(repo.cache, "fetch");
   try {
-    if (Date.now() - statSync3(stamp).mtimeMs < minutes * 6e4) return;
+    if (Date.now() - statSync2(stamp).mtimeMs < minutes * 6e4) return;
   } catch {
   }
   mkdirSync4(repo.cache, { recursive: true });
@@ -3024,13 +3018,14 @@ function init(cwd, opts = {}) {
   } else {
     for (const [key, value] of Object.entries(opts)) if (value !== void 0) notes.push(...setUserKey(key, value));
   }
-  const homes = /* @__PURE__ */ new Set([homeFor(void 0), ...code && !code.separate ? [findRepo(code.top).home] : []]);
-  for (const home of homes) {
-    if (!homeRepo(home, false)) {
-      homeRepo(home, true);
-      notes.push(`created ${home}, the braid repository: every conversation is kept there, apart from the code`);
-    }
-    ensureStore(findRepo(home));
+  const named = code && !code.separate ? findRepo(code.top) : void 0;
+  const homes = /* @__PURE__ */ new Map([[homeFor(void 0), void 0]]);
+  if (named) homes.set(named.home, named);
+  for (const [home, repo] of homes) {
+    if (!isRepo(home)) notes.push(`created ${home}, the braid repository: every conversation is kept there, apart from the code`);
+    const target = repo ?? homeRepo(home, true);
+    if (!target) throw new Error(`${home} is set as the braid repository, and its own .braid/config.toml names another`);
+    ensureStore(target);
   }
   return notes;
 }
@@ -4358,7 +4353,7 @@ function importOpenclaw(repo, dbPath, only) {
 // src/statusline.ts
 import { spawn as spawn2, spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync14, mkdirSync as mkdirSync9, readFileSync as readFileSync10, statSync as statSync4, writeFileSync as writeFileSync9 } from "node:fs";
+import { existsSync as existsSync14, mkdirSync as mkdirSync9, readFileSync as readFileSync10, statSync as statSync3, writeFileSync as writeFileSync9 } from "node:fs";
 import { join as join15 } from "node:path";
 var hash2 = (s) => createHash3("sha1").update(s).digest("hex").slice(0, 16);
 function previous(stdin) {
@@ -4377,7 +4372,7 @@ function pullRequest(repo) {
   const file2 = join15(repo.cache, `pr-${hash2(branch)}`);
   let fresh = false;
   try {
-    fresh = Date.now() - statSync4(file2).mtimeMs < 5 * 6e4;
+    fresh = Date.now() - statSync3(file2).mtimeMs < 5 * 6e4;
   } catch {
   }
   if (!fresh) {
@@ -4404,7 +4399,7 @@ function braidPart(repo, session, remote) {
       ...forEachRef([`${SESSION_REFS}/${conv ?? "-"}/`], { gitDir: repo.store }).map((r) => r.sha + r.ref),
       ...forEachRef([`${remoteRefs(remote)}/${conv ?? "-"}/`], { cwd: repo.top }).map((r) => r.sha + r.ref),
       gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim(),
-      existsSync14(statePath) ? statSync4(statePath).mtimeMs : 0
+      existsSync14(statePath) ? statSync3(statePath).mtimeMs : 0
     ].join("\n")
   );
   const file2 = join15(repo.cache, `status-${key}`);
@@ -4539,7 +4534,7 @@ function editSession(repo, remote, flag) {
   }
   const dir = join16(repo.dir, "sessions");
   const here = (id) => repo.separate || loadState(repo, id)?.code === repo.top;
-  const newest = (existsSync15(dir) ? readdirSync5(dir) : []).filter((f) => f.endsWith(".json")).map((f) => ({ id: f.slice(0, -".json".length), at: statSync5(join16(dir, f)).mtimeMs })).sort((a, b) => b.at - a.at).find((f) => here(f.id));
+  const newest = (existsSync15(dir) ? readdirSync5(dir) : []).filter((f) => f.endsWith(".json")).map((f) => ({ id: f.slice(0, -".json".length), at: statSync4(join16(dir, f)).mtimeMs })).sort((a, b) => b.at - a.at).find((f) => here(f.id));
   if (!newest) throw new Error("no saved session in this repository");
   return { id: newest.id, explicit: false };
 }

@@ -691,7 +691,9 @@ test("on autopilot, braid keeps conversations on this machine, saves the convers
   must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
   must(s.env, repo, "git", ["push", "--quiet", "origin", "HEAD:main"]);
 
-  // A session that started before braid was set up: nothing is saved yet.
+  // A session that started before braid was set up: nothing is saved yet, not even where a cache left a .git folder
+  // in the braid repository's place.
+  mkdirSync(join(s.env.HOME!, ".braid", ".git", "braid", "cache", "erin"), { recursive: true });
   const t = new Transcript(s.root, ALICE);
   const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo });
   braid(s.env, repo, ["hook", "session-start"], hookIn);
@@ -770,6 +772,10 @@ test("the repo setting names another braid repository; the code's remote still p
   assert.match(init.stdout, /conversations here are kept in \S+\/convos, apart from the code/);
   assert.match(readFileSync(join(repo, ".braid", "config.toml"), "utf8"), /^repo = "~\/convos"$/m);
   assert.ok(existsSync(join(repo, ".git", "hooks", "pre-push")), "the code repository's git hooks still publish");
+  assert.ok(existsSync(join(s.env.HOME!, "convos", ".git", "braid", "store", "HEAD")), "init makes the store there");
+  const again = braid(s.env, repo, ["init"]);
+  assert.equal(again.status, 0, again.stderr);
+  assert.doesNotMatch(again.stdout, /created/);
 
   const t = new Transcript(s.root, ALICE);
   const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo });

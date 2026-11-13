@@ -5,7 +5,7 @@
 // repository. The `repo` setting can name another braid repository. With
 // autopilot (the default) braid works on this machine only: it never pushes,
 // fetches or asks GitHub anything.
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { git, gitMaybe } from "./git.ts";
@@ -65,13 +65,12 @@ export function expandPath(path: string, base: string): string {
   return isAbsolute(path) ? path : resolve(base, path);
 }
 
-const isRepo = (path: string) => {
-  try {
-    return statSync(join(path, ".git")).isDirectory();
-  } catch {
-    return false;
-  }
-};
+/**
+ * A git repository made at `path`: its .git directory holds a HEAD. A .git
+ * folder without one is none, such as one a cache or a lock made before the
+ * braid repository was; making the repository there keeps what it holds.
+ */
+export const isRepo = (path: string): boolean => existsSync(join(path, ".git", "HEAD"));
 
 /** The braid repository at `path`, created when `create` is set; undefined when there is none. */
 export function homeRepo(path: string, create: boolean): Repo | undefined {
