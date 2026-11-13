@@ -220,9 +220,17 @@ export function readWindow(
     let records: Rec[];
     let fresh: number;
     if (format === "codex") {
-      // A rollout's first line is the session's metadata, which goes in the header and holds no record.
       const t = codex.toAtxf(text, { integrity: false });
       records = renumber(t.records as unknown as Rec[], base, session, format);
+      // The converter reads a rollout's first line, the session's metadata, into the header: it is kept as a record
+      // too, as any other line is, the root the rest hangs from.
+      const meta = (t.header as { native?: { records?: { timestamp?: unknown }[] } }).native;
+      if (start === 0 && meta?.records?.length) {
+        const id = `codex-1@${session.slice(0, 8)}`;
+        const at = meta.records[0]!.timestamp;
+        const time = typeof at === "string" ? at : String((t.header as { time?: unknown }).time);
+        records = [{ type: "custom", id, parentId: null, time, namespace: "codex", name: "session_meta", native: meta }, ...records.map((r, i) => (i === 0 && r.parentId == null ? { ...r, parentId: id } : r))];
+      }
       const at = records.findIndex((r) => codexLine(r.id) > base + before);
       fresh = at < 0 ? records.length : at;
       header = t.header as unknown as Record<string, unknown>;

@@ -1183,7 +1183,7 @@ test("Codex sessions save as they happen, from braid's hooks in Codex, and conti
   ]);
   const verified = braid(env, repo, ["verify", "--session", ID]);
   assert.equal(verified.status, 0, verified.stdout);
-  assert.match(verified.stdout, /✓ loads: 14 items, the same in a fork as in the rollout/);
+  assert.match(verified.stdout, /✓ loads: 26 lines as Codex wrote them, and 14 items, the same in a fork as in the rollout/);
 
   // From inside Codex, braid finds the session by CODEX_THREAD_ID, which Codex gives the commands it runs, and the
   // rollout under CODEX_HOME. A commit the agent makes is noted in its conversation.
@@ -1230,6 +1230,36 @@ test("Codex sessions save as they happen, from braid's hooks in Codex, and conti
   assert.notEqual(lines[2].message.id, lines[5].message.id);
   assert.deepEqual(lines.map((l, i) => l.parentUuid === (i ? lines[i - 1].uuid : null)), lines.map(() => true));
   assert.equal(lines.find((l) => l.message.content[0]?.tool_use_id === "call_t").message.content[0].is_error, true);
+
+  // Into Codex again, Codex's own lines go out as it wrote them, its reasoning and bookkeeping too; only the
+  // session_meta line names the new session and directory.
+  const rollout = readFileSync(r.path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const again = braid(env, repo, ["fork", "01a1d58a", "--to", "codex", "--cwd", there]);
+  const againId = /codex resume (\S+)$/m.exec(again.stdout)![1]!;
+  const rolloutOf = (id: string) =>
+    readFileSync(join(codexHome, "sessions", readdirSync(join(codexHome, "sessions"), { recursive: true }).map(String).find((f) => f.endsWith(`${id}.jsonl`))!), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+  const copy = rolloutOf(againId);
+  // Paths move to the new directory, as in any fork.
+  const moved = (l: unknown) => JSON.parse(JSON.stringify(l).split(repo).join(realpathSync(there)));
+  assert.deepEqual(copy.slice(1), rollout.slice(1).map(moved));
+  assert.deepEqual([copy[0].payload.id, copy[0].payload.cwd, copy[0].payload.cli_version], [againId, realpathSync(there), "0.169.0"]);
+
+  // Continued in Claude Code and back into Codex: Codex's lines as it wrote them, then Claude's turn converted.
+  const last = lines.at(-1);
+  appendFileSync(file, JSON.stringify({ ...last, parentUuid: last.uuid, uuid: "c1aude00-0000-4000-8000-000000000001", type: "user", isMeta: undefined, message: { role: "user", content: "And in Claude?" }, timestamp: "2026-11-09T12:00:00.000Z" }) + "\n");
+  appendFileSync(file, JSON.stringify({ ...last, parentUuid: "c1aude00-0000-4000-8000-000000000001", uuid: "c1aude00-0000-4000-8000-000000000002", type: "assistant", isMeta: undefined, message: { id: "msg_c1", type: "message", role: "assistant", model: "claude-sonnet-5-5", content: [{ type: "thinking", thinking: "Signed.", signature: "c2ln" }, { type: "text", text: "Here too." }] }, timestamp: "2026-11-09T12:00:01.000Z" }) + "\n");
+  braid(env, repo, ["hook", "stop"], JSON.stringify({ session_id: fork, transcript_path: file, cwd: there }));
+  const hop = /codex resume (\S+)$/m.exec(braid(env, repo, ["fork", fork.slice(0, 8), "--to", "codex", "--cwd", there]).stdout)![1]!;
+  const hopped = rolloutOf(hop);
+  const said = (l: { type: string; payload: { type?: string; role?: string; content?: { text: string }[] } }) => `${l.payload.role}: ${l.payload.content?.map((c) => c.text).join("")}`;
+  // The Claude session continued from "Thanks.", the Codex session's head when it was forked.
+  const thanks = rollout.findIndex((l) => l.payload?.content?.[0]?.text === "Thanks.");
+  assert.deepEqual(hopped.slice(1, thanks + 1), rollout.slice(1, thanks + 1).map(moved));
+  assert.deepEqual(hopped.slice(thanks + 1).filter((l) => l.type === "response_item").map(said), ["user: And in Claude?", "assistant: Here too."]);
+  assert.equal(hopped[0].payload.id, hop);
 
   // SessionEnd: Codex gives it three seconds, so braid saves and checks the session after the hook returns.
   r.assistant("You're welcome.");

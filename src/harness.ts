@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { codex } from "@leostera/atxf/codex";
 import { asCodexShowed, forModel, type Rec } from "./records.ts";
-import { forkText, keptUuids, linear, ownLine, rewrite, shellWord, type ForkRecords } from "./replay.ts";
+import { forkText, keptUuids, linear, ownLine, rewrite, shellWord, type ForkRecords, type Line } from "./replay.ts";
 
 export interface Written {
   /** The new session's id, as the agent knows it. */
@@ -162,13 +162,64 @@ function outputsAnswerCalls(text: string): string {
     .join("\n");
 }
 
-/** A fork as a Codex rollout of session `session`, written at `now`. */
+/** The Codex line a record was read from, as braid keeps it. */
+export function codexLineOf(r: Rec): Line | undefined {
+  const n = r.native as { source?: string; records?: unknown[] } | undefined;
+  const line = n?.source === "codex" && n.records?.length === 1 ? n.records[0] : undefined;
+  return line && typeof line === "object" ? (line as Line) : undefined;
+}
+
+/** Records of other agents as Codex lines: the conversation as their model read it, converted by ATXF. The first line is a session_meta. */
+function converted(records: Rec[], cwd: string, pairs: [string, string][], session: string, now: Date): Line[] {
+  const prepared = linear(resultsFirst(batched(forModel(rewrite(asCodexShowed(asClaudeCodeShowed(records), "codex"), pairs), CODEX.provider).map(asText))));
+  const header = { type: "transcript", atxf: "0.1", id: session, time: now.toISOString(), source: { agent: "braid", sessionId: session }, workspace: { cwd } };
+  return codex
+    .fromAtxf({ header, records: prepared } as never, { carry: false })
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as Line);
+}
+
+/**
+ * A fork as a Codex rollout of session `session`, written at `now`. Each line
+ * Codex wrote goes out as it wrote it, its bookkeeping too (turn settings,
+ * token counts, events, what it knew of the environment), so Codex resumes the
+ * fork as it resumes the rollout itself: the lines on the context path, and
+ * those it wrote after the fork's head. Records of other agents between them
+ * are converted. The session_meta line is the newest session's, under the new
+ * id, time and directory.
+ */
 export function codexText(fork: ForkRecords, all: Map<string, Rec>, cwd: string, pairs: [string, string][], session: string, now: Date): string {
   const kept = fork.path[0] ? keptUuids(ownLine(fork.path[0])).flatMap((u) => (all.has(u) ? [all.get(u)!] : [])) : [];
   const path = kept.length ? [...fork.path.slice(0, 2), ...kept, ...fork.path.slice(2)] : fork.path;
-  const records = linear(resultsFirst(batched(forModel(rewrite(asCodexShowed(asClaudeCodeShowed(path), "codex"), pairs), CODEX.provider).map(asText))));
-  const header = { type: "transcript", atxf: "0.1", id: session, time: now.toISOString(), source: { agent: "braid", sessionId: session }, workspace: { cwd } };
-  return outputsAnswerCalls(codex.fromAtxf({ header, records } as never, { carry: false }));
+  const onPath = new Set(path.map((r) => r.id));
+  const sequence = [...path, ...fork.records.filter((r) => codexLineOf(r) && !onPath.has(r.id))];
+  if (!sequence.some((r) => codexLineOf(r))) return outputsAnswerCalls(converted(path, cwd, pairs, session, now).map((l) => JSON.stringify(l)).join("\n") + "\n");
+  const out: Line[] = [];
+  let meta: Line | undefined;
+  let made: Line | undefined;
+  let run: Rec[] = [];
+  const flush = () => {
+    if (!run.length) return;
+    const [first, ...lines] = converted(run, cwd, pairs, session, now);
+    made ??= first;
+    out.push(...lines);
+    run = [];
+  };
+  for (const r of sequence) {
+    const line = codexLineOf(r);
+    if (!line) run.push(r);
+    else if (line.type === "session_meta") meta = line;
+    else {
+      flush();
+      out.push(rewrite(line, pairs));
+    }
+  }
+  flush();
+  const stamp = now.toISOString();
+  const payload = meta ? { ...rewrite(meta.payload as Line, pairs), id: session, ...((meta.payload as Line).session_id ? { session_id: session } : {}), timestamp: stamp, cwd } : undefined;
+  const head = meta ? { ...meta, timestamp: stamp, payload } : (made ?? { timestamp: stamp, type: "session_meta", payload: { id: session, timestamp: stamp, cwd, originator: "atxf", cli_version: "0.0.0", source: "cli" } });
+  return outputsAnswerCalls([head, ...out].map((l) => JSON.stringify(l)).join("\n") + "\n");
 }
 
 export const CODEX: Harness = {

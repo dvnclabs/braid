@@ -26,7 +26,9 @@
 // A Codex rollout given (rollout-…-<id>.jsonl) goes the other way: braid saves
 // it, Codex resumes the original, Claude Code resumes the fork braid writes
 // for it, and the conversation is compared the same way. With --to codex, a
-// rollout is forked into Codex, and Codex resumes both.
+// rollout is forked into Codex, Codex resumes both, and the two requests are
+// compared byte for byte, input and tools, but for the ids Codex gives the
+// messages it adds to each request, which it derives from the session's id.
 //
 // Usage: node scripts/resume-check.mjs [--to codex] <transcript.jsonl>...
 // Needs `claude` on PATH (and `codex`, or CODEX=<path>, for --to codex and for rollouts), and dist/braid.mjs built (npm run build).
@@ -255,8 +257,14 @@ function compareConversation(a, b, rollouts) {
   return { ok: false, text: `conversation: ${x.length} items in the original's request, ${y.length} in the fork's; they differ at item ${i + 1}\n      ${na} …${(x[i] ?? "(none)").slice(0, 200)}\n      ${nb} …${(y[i] ?? "(none)").slice(0, 200)}` };
 }
 
-function compare(a, b) {
-  return ["messages", "system", "tools"].map((k) => {
+/** Codex names a message it adds to each request, such as its base instructions, after the session: an id no rollout holds. */
+function madeIds(req, rollout) {
+  const known = new Set(rollout.flatMap((l) => (typeof l.payload?.id === "string" ? [l.payload.id] : [])));
+  return { ...req, input: req.input.map((i) => (typeof i.id === "string" && !known.has(i.id) ? { ...i, id: "(made for this session)" } : i)) };
+}
+
+function compare(a, b, keys = ["messages", "system", "tools"]) {
+  return keys.map((k) => {
     const x = JSON.stringify(a?.[k]);
     const y = JSON.stringify(b?.[k]);
     if (x === y) return { ok: true, text: `${k}: identical (${x?.length ?? 0} bytes)` };
@@ -317,8 +325,9 @@ for (const file of files) {
     if (process.env.RESUME_CHECK_KEEP) {
       for (const [name, req] of [["original", a], ["fork", b], ["rollout", rollouts.a.length ? rollouts.a : rollouts.b]]) writeFileSync(join(process.env.RESUME_CHECK_KEEP, `${session}.${name}.json`), JSON.stringify(req));
     }
-    const across = fromCodexSession || to === "codex";
-    const results = across ? [compareConversation(a, b, rollouts)] : compare(a, b);
+    // Within one agent, the requests are compared byte for byte; across two, the conversation in them.
+    const across = fromCodexSession !== (to === "codex");
+    const results = across ? [compareConversation(a, b, rollouts)] : fromCodexSession ? compare(madeIds(a, rollouts.a), madeIds(b, rollouts.b), ["input", "tools"]) : compare(a, b);
     const size = (r) => (r.messages ? `${r.messages.length} messages` : `${r.input.length} items`);
     const who = (agent) => (agent === "codex" ? "Codex" : "Claude Code");
     console.log(`  ${who(fromCodexSession ? "codex" : "claude-code")} resumes the original with ${size(a)}, ${who(to)} the fork with ${size(b)}:`);

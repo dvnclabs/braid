@@ -344,16 +344,23 @@ export function verify(repo: Repo, session: string, remote: string): Verified {
   // Loads.
   const head = lastTurn(stored) ?? stored.at(-1)?.id;
   if (head && format === "codex") {
-    // What Codex rebuilds to resume the rollout itself, against what it rebuilds from a fork.
     const fork = forkRecords(all, stored, head);
-    const forked = codexHistory(codexText(fork, all, "/", [], session, new Date()).split("\n").filter(Boolean).map((l) => JSON.parse(l) as Line));
+    const lines = codexText(fork, all, "/", [], session, new Date()).split("\n").filter(Boolean).map((l) => JSON.parse(l) as Line);
+    const forked = codexHistory(lines);
     if (state.transcript && existsSync(state.transcript)) {
-      const resumed = codexHistory(readLines(state.transcript, state.cursor?.offset));
-      const at = resumed.findIndex((l, i) => l !== forked[i]);
-      if (at >= 0 || resumed.length !== forked.length) {
-        const i = at >= 0 ? at : Math.min(resumed.length, forked.length);
-        problems.push(`loads: Codex rebuilds ${resumed.length} items to resume the rollout and ${forked.length} from a fork; they differ from item ${i + 1}: ${(resumed[i] ?? forked[i] ?? "").slice(0, 120)}`);
-      } else checked.push(`loads: ${resumed.length} items, the same in a fork as in the rollout`);
+      const rollout = readLines(state.transcript, state.cursor?.offset);
+      // The lines Codex wrote for this session, after its session_meta or the copies braid wrote, end the fork as they are.
+      const own = rollout.slice(state.copied || 1).map(stable);
+      const tail = lines.slice(-own.length).map(stable);
+      const at = own.findIndex((l, i) => l !== tail[i]);
+      if (lines.length <= own.length || at >= 0) problems.push(`loads: a fork holds the rollout's lines otherwise, from line ${(at < 0 ? 0 : at) + 1 + (state.copied || 1)}: ${(own[at] ?? "").slice(0, 120)}`);
+      // What Codex rebuilds to resume the rollout itself, against what it rebuilds from a fork.
+      const resumed = codexHistory(rollout);
+      const i = resumed.findIndex((l, n) => l !== forked[n]);
+      if (i >= 0 || resumed.length !== forked.length) {
+        const j = i >= 0 ? i : Math.min(resumed.length, forked.length);
+        problems.push(`loads: Codex rebuilds ${resumed.length} items to resume the rollout and ${forked.length} from a fork; they differ from item ${j + 1}: ${(resumed[j] ?? forked[j] ?? "").slice(0, 120)}`);
+      } else checked.push(`loads: ${own.length} lines as Codex wrote them, and ${resumed.length} items, the same in a fork as in the rollout`);
     } else checked.push(`loads: ${forked.length} items in a fork`);
   } else if (head) {
     const fork = forkRecords(all, stored, head);

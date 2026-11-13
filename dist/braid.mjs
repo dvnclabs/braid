@@ -1611,9 +1611,9 @@ function userRecords(entry, node, tree) {
       }));
       parentId = id;
     } else {
-      const converted = userBlock(block);
-      if (converted)
-        blocks.push(converted);
+      const converted2 = userBlock(block);
+      if (converted2)
+        blocks.push(converted2);
     }
   }
   if (blocks.length > 0) {
@@ -2978,6 +2978,13 @@ function readWindow(path2, cursor, session, limits = {}, format = "claude-code")
     if (format === "codex") {
       const t = codex.toAtxf(text, { integrity: false });
       records = renumber(t.records, base, session, format);
+      const meta = t.header.native;
+      if (start === 0 && meta?.records?.length) {
+        const id = `codex-1@${session.slice(0, 8)}`;
+        const at2 = meta.records[0].timestamp;
+        const time = typeof at2 === "string" ? at2 : String(t.header.time);
+        records = [{ type: "custom", id, parentId: null, time, namespace: "codex", name: "session_meta", native: meta }, ...records.map((r, i) => i === 0 && r.parentId == null ? { ...r, parentId: id } : r)];
+      }
       const at = records.findIndex((r) => codexLine(r.id) > base + before);
       fresh = at < 0 ? records.length : at;
       header2 = t.header;
@@ -3729,12 +3736,47 @@ function outputsAnswerCalls(text) {
     return JSON.stringify({ ...line, payload: { ...p, type: "custom_tool_call_output" } });
   }).join("\n");
 }
+function codexLineOf(r) {
+  const n = r.native;
+  const line = n?.source === "codex" && n.records?.length === 1 ? n.records[0] : void 0;
+  return line && typeof line === "object" ? line : void 0;
+}
+function converted(records, cwd, pairs, session, now) {
+  const prepared = linear(resultsFirst(batched(forModel(rewrite(asCodexShowed(asClaudeCodeShowed(records), "codex"), pairs), CODEX.provider).map(asText))));
+  const header2 = { type: "transcript", atxf: "0.1", id: session, time: now.toISOString(), source: { agent: "braid", sessionId: session }, workspace: { cwd } };
+  return codex.fromAtxf({ header: header2, records: prepared }, { carry: false }).split("\n").filter(Boolean).map((l) => JSON.parse(l));
+}
 function codexText(fork, all, cwd, pairs, session, now) {
   const kept = fork.path[0] ? keptUuids(ownLine(fork.path[0])).flatMap((u) => all.has(u) ? [all.get(u)] : []) : [];
   const path2 = kept.length ? [...fork.path.slice(0, 2), ...kept, ...fork.path.slice(2)] : fork.path;
-  const records = linear(resultsFirst(batched(forModel(rewrite(asCodexShowed(asClaudeCodeShowed(path2), "codex"), pairs), CODEX.provider).map(asText))));
-  const header2 = { type: "transcript", atxf: "0.1", id: session, time: now.toISOString(), source: { agent: "braid", sessionId: session }, workspace: { cwd } };
-  return outputsAnswerCalls(codex.fromAtxf({ header: header2, records }, { carry: false }));
+  const onPath = new Set(path2.map((r) => r.id));
+  const sequence = [...path2, ...fork.records.filter((r) => codexLineOf(r) && !onPath.has(r.id))];
+  if (!sequence.some((r) => codexLineOf(r))) return outputsAnswerCalls(converted(path2, cwd, pairs, session, now).map((l) => JSON.stringify(l)).join("\n") + "\n");
+  const out = [];
+  let meta;
+  let made;
+  let run2 = [];
+  const flush = () => {
+    if (!run2.length) return;
+    const [first, ...lines] = converted(run2, cwd, pairs, session, now);
+    made ??= first;
+    out.push(...lines);
+    run2 = [];
+  };
+  for (const r of sequence) {
+    const line = codexLineOf(r);
+    if (!line) run2.push(r);
+    else if (line.type === "session_meta") meta = line;
+    else {
+      flush();
+      out.push(rewrite(line, pairs));
+    }
+  }
+  flush();
+  const stamp = now.toISOString();
+  const payload = meta ? { ...rewrite(meta.payload, pairs), id: session, ...meta.payload.session_id ? { session_id: session } : {}, timestamp: stamp, cwd } : void 0;
+  const head = meta ? { ...meta, timestamp: stamp, payload } : made ?? { timestamp: stamp, type: "session_meta", payload: { id: session, timestamp: stamp, cwd, originator: "atxf", cli_version: "0.0.0", source: "cli" } };
+  return outputsAnswerCalls([head, ...out].map((l) => JSON.stringify(l)).join("\n") + "\n");
 }
 var CODEX = {
   agent: "codex",
@@ -4003,14 +4045,20 @@ function verify(repo, session, remote) {
   const head = lastTurn(stored) ?? stored.at(-1)?.id;
   if (head && format === "codex") {
     const fork = forkRecords(all, stored, head);
-    const forked = codexHistory(codexText(fork, all, "/", [], session, /* @__PURE__ */ new Date()).split("\n").filter(Boolean).map((l) => JSON.parse(l)));
+    const lines = codexText(fork, all, "/", [], session, /* @__PURE__ */ new Date()).split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const forked = codexHistory(lines);
     if (state.transcript && existsSync12(state.transcript)) {
-      const resumed = codexHistory(readLines(state.transcript, state.cursor?.offset));
-      const at = resumed.findIndex((l, i) => l !== forked[i]);
-      if (at >= 0 || resumed.length !== forked.length) {
-        const i = at >= 0 ? at : Math.min(resumed.length, forked.length);
-        problems.push(`loads: Codex rebuilds ${resumed.length} items to resume the rollout and ${forked.length} from a fork; they differ from item ${i + 1}: ${(resumed[i] ?? forked[i] ?? "").slice(0, 120)}`);
-      } else checked.push(`loads: ${resumed.length} items, the same in a fork as in the rollout`);
+      const rollout = readLines(state.transcript, state.cursor?.offset);
+      const own = rollout.slice(state.copied || 1).map(stable2);
+      const tail = lines.slice(-own.length).map(stable2);
+      const at = own.findIndex((l, i2) => l !== tail[i2]);
+      if (lines.length <= own.length || at >= 0) problems.push(`loads: a fork holds the rollout's lines otherwise, from line ${(at < 0 ? 0 : at) + 1 + (state.copied || 1)}: ${(own[at] ?? "").slice(0, 120)}`);
+      const resumed = codexHistory(rollout);
+      const i = resumed.findIndex((l, n) => l !== forked[n]);
+      if (i >= 0 || resumed.length !== forked.length) {
+        const j = i >= 0 ? i : Math.min(resumed.length, forked.length);
+        problems.push(`loads: Codex rebuilds ${resumed.length} items to resume the rollout and ${forked.length} from a fork; they differ from item ${j + 1}: ${(resumed[j] ?? forked[j] ?? "").slice(0, 120)}`);
+      } else checked.push(`loads: ${own.length} lines as Codex wrote them, and ${resumed.length} items, the same in a fork as in the rollout`);
     } else checked.push(`loads: ${forked.length} items in a fork`);
   } else if (head) {
     const fork = forkRecords(all, stored, head);
