@@ -2538,16 +2538,17 @@ function lineAt(fd, pos) {
 function lastLine(buf, end) {
   return end < 2 ? 0 : buf.lastIndexOf(NL, end - 2) + 1;
 }
-function readWindow(path2, cursor, session, limits = { maxBytes: MAX_WINDOW, overlap: OVERLAP }) {
+function readWindow(path2, cursor, session, limits = {}) {
+  const { maxBytes = MAX_WINDOW, overlap = OVERLAP, until = Infinity } = limits;
   const fd = openSync2(path2, "r");
   try {
-    const size = fstatSync(fd).size;
+    const size = Math.min(fstatSync(fd).size, until);
     if (size <= cursor.offset) return void 0;
-    const start = lineAt(fd, Math.max(0, cursor.offset - Math.max(1, limits.overlap)));
-    let end = Math.min(size, cursor.offset + limits.maxBytes);
+    const start = lineAt(fd, Math.max(0, cursor.offset - Math.max(1, overlap)));
+    let end = Math.min(size, cursor.offset + maxBytes);
     let buf = readAt(fd, start, end - start);
     while (start + buf.lastIndexOf(NL) + 1 <= cursor.offset && end < size) {
-      end = Math.min(size, end + limits.maxBytes);
+      end = Math.min(size, end + maxBytes);
       buf = readAt(fd, start, end - start);
     }
     const used = buf.lastIndexOf(NL) + 1;
@@ -3154,14 +3155,17 @@ function setup(opts = {}) {
 // src/verify.ts
 import { existsSync as existsSync11, readdirSync as readdirSync4, readFileSync as readFileSync9 } from "node:fs";
 import { join as join12 } from "node:path";
-function readAll(path2, id) {
-  const out = [];
+function readAll(path2, id, until) {
+  const saved = [];
+  const since = [];
   let cursor = START;
-  for (let w = readWindow(path2, cursor, id); w; w = w.more ? readWindow(path2, cursor, id) : void 0) {
-    out.push(...w.records.slice(w.fresh));
-    cursor = w.cursor;
+  for (const [out, limit] of [[saved, until], [since, void 0]]) {
+    for (let w = readWindow(path2, cursor, id, { until: limit }); w; w = w.more ? readWindow(path2, cursor, id, { until: limit }) : void 0) {
+      out.push(...w.records.slice(w.fresh));
+      cursor = w.cursor;
+    }
   }
-  return out;
+  return { saved, since };
 }
 function content(r) {
   const native = r.native?.records?.[0];
@@ -3209,8 +3213,9 @@ function compare(what, transcript, stored, elsewhere, problems) {
   if (swaps) problems.push(`${what}: ${swaps} saved records are out of the transcript's order`);
   return transcript.length - missing.length;
 }
-function readLines(path2) {
-  return readFileSync9(path2, "utf8").split("\n").flatMap((l) => {
+function readLines(path2, until) {
+  const buf = readFileSync9(path2);
+  return buf.toString("utf8", 0, Math.min(buf.length, until ?? buf.length)).split("\n").flatMap((l) => {
     try {
       const v = JSON.parse(l);
       return v && typeof v === "object" ? [v] : [];
@@ -3318,8 +3323,9 @@ function said(r) {
 function verify(repo, session, remote) {
   const problems = [];
   const checked = [];
+  const notes = [];
   const state = loadState(repo, session);
-  if (!state || state.chunks === 0) return { session, problems: ["not saved yet"], checked };
+  if (!state || state.chunks === 0) return { session, problems: ["not saved yet"], checked, notes };
   const ref = storeRef(state.conv, session);
   const stored = readRecords(ref, { gitDir: repo.store });
   const agents = readAgents(ref, { gitDir: repo.store });
@@ -3327,20 +3333,23 @@ function verify(repo, session, remote) {
   const replayed = replayedIds(all.values());
   const elsewhere = (id) => all.has(id) || replayed.has(id);
   if (state.transcript && existsSync11(state.transcript)) {
-    const n = compare("saved", readAll(state.transcript, session), stored, elsewhere, problems);
+    const { saved, since } = readAll(state.transcript, session, state.cursor?.offset);
+    const n = compare("saved", saved, stored, elsewhere, problems);
     checked.push(`saved: ${n} records of the transcript`);
+    let pending = since.length;
     const dir = join12(state.transcript.replace(/\.jsonl$/, ""), "subagents");
     for (const file2 of existsSync11(dir) ? readdirSync4(dir).sort() : []) {
       const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file2)?.[1];
       if (!id) continue;
+      const read = readAll(join12(dir, file2), id, state.agents?.[id]?.cursor.offset ?? 0);
+      pending += read.since.length;
       const mine = agents.get(id);
-      if (!mine) {
-        problems.push(`saved: subagent ${id.slice(0, 8)} is not saved`);
-        continue;
-      }
-      compare(`subagent ${id.slice(0, 8)}`, readAll(join12(dir, file2), id), mine, () => false, problems);
+      if (!read.saved.length) continue;
+      if (!mine) problems.push(`saved: subagent ${id.slice(0, 8)} is not saved`);
+      else compare(`subagent ${id.slice(0, 8)}`, read.saved, mine, () => false, problems);
     }
     if (agents.size) checked.push(`saved: ${agents.size} subagents`);
+    if (pending) notes.push(`${pending} records written since the last save, which the next save takes in`);
   } else checked.push("saved: the transcript is gone, so only the store is checked");
   const head = lastTurn(stored) ?? stored.at(-1)?.id;
   if (head) {
@@ -3354,7 +3363,7 @@ function verify(repo, session, remote) {
     if (lost.length) problems.push(`loads: ${lost.length} of the ${written.length} messages a fork writes read back otherwise, from: ${describe(lost[0], 80)}`);
     const since = fork.path[0]?.type === "custom" && String(fork.path[0].name ?? "").includes("compact") ? " since the last compaction" : "";
     if (state.transcript && existsSync11(state.transcript)) {
-      const resumed = canonical(resumeLines(readLines(state.transcript), head, stored, session));
+      const resumed = canonical(resumeLines(readLines(state.transcript, state.cursor?.offset), head, stored, session));
       const forked = canonical(text.split("\n").filter(Boolean).map((l) => JSON.parse(l)));
       const at = resumed.findIndex((l, i) => l !== forked[i]);
       if (at >= 0 || resumed.length !== forked.length) {
@@ -3369,7 +3378,7 @@ function verify(repo, session, remote) {
   const orphans = [...stored, ...[...agents.values()].flat()].filter((r) => typeof r.parentId === "string" && !ids.has(r.parentId));
   if (orphans.length) problems.push(`store: ${orphans.length} records have a parent that is not saved, from: ${describe(orphans[0], 80)}`);
   checked.push(`store: ${state.chunks} chunks, git fsck`);
-  return { session, problems, checked };
+  return { session, problems, checked, notes };
 }
 
 // src/hooks.ts
@@ -4967,6 +4976,7 @@ function main(argv) {
         out(`braid verify ${id.slice(0, 8)}: ${v.problems.length ? `${v.problems.length} problems` : "ok"}`);
         for (const p of v.problems) out(`  \u2717 ${p}`);
         for (const c of v.checked) out(`  \u2713 ${c}`);
+        for (const n of v.notes) out(`  \xB7 ${n}`);
       }
       return bad ? 1 : 0;
     }

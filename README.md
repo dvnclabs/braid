@@ -106,7 +106,7 @@ Asking in plain language works too: "pull in Bob's review but keep my jitter".
 
 `braid verify` checks a session the way `git fsck` checks a repository, and braid runs it by itself when each session ends:
 
-- **saved**: every record of the transcript, and of each subagent's, is in the store with the same content and in the same order
+- **saved**: every record of the transcript, and of each subagent's, up to where the last save stopped, is in the store with the same content and in the same order. Lines written since, as in a session still running, are noted for the next save.
 - **loads**: a fork written from the store holds, line for line, what Claude Code reads to resume the transcript: the messages and tool calls, the results of parallel calls, notes and files attached to them, messages typed while the agent worked, what a compaction kept, and the session's settings
 - **store**: `git fsck` finds nothing wrong, and every record's parent is saved
 

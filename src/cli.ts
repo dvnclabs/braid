@@ -568,6 +568,7 @@ function main(argv: string[]): number {
         out(`braid verify ${id.slice(0, 8)}: ${v.problems.length ? `${v.problems.length} problems` : "ok"}`);
         for (const p of v.problems) out(`  ✗ ${p}`);
         for (const c of v.checked) out(`  ✓ ${c}`);
+        for (const n of v.notes) out(`  · ${n}`);
       }
       return bad ? 1 : 0;
     }

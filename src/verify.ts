@@ -1,9 +1,11 @@
 // braid verify: checks that a session was saved as it happened, and that it
 // loads back as it was saved. Three checks, like git fsck for conversations:
 //
-// - saved: every record of the transcript, and of each subagent's, is in the
-//   store with the same content, in the same order. Records a fork shares with
-//   the session it came from live there, and count as saved.
+// - saved: every record of the transcript, and of each subagent's, up to
+//   where the last save stopped, is in the store with the same content, in the
+//   same order. Records a fork shares with the session it came from live
+//   there, and count as saved. Lines written since, as in a session still
+//   running, wait for the next save: they are noted, and are no problem.
 // - loads: the lines Claude Code reads to resume the transcript are the lines
 //   `braid fork` writes from the store, and the fork reads back as the same
 //   messages.
@@ -27,17 +29,26 @@ export interface Verified {
   problems: string[];
   /** What was checked, for the report. */
   checked: string[];
+  /** What is worth knowing and is no problem: lines written since the last save. */
+  notes: string[];
 }
 
-/** Every record of a transcript file, read as save reads it: each window's lines after the one before it. */
-function readAll(path: string, id: string): Rec[] {
-  const out: Rec[] = [];
+/**
+ * The records of a transcript file, read as save reads it, each window's lines
+ * after the one before it: those of the lines before `until`, where the last
+ * save stopped, and those of the lines written since.
+ */
+function readAll(path: string, id: string, until?: number): { saved: Rec[]; since: Rec[] } {
+  const saved: Rec[] = [];
+  const since: Rec[] = [];
   let cursor: Cursor = START;
-  for (let w = readWindow(path, cursor, id); w; w = w.more ? readWindow(path, cursor, id) : undefined) {
-    out.push(...w.records.slice(w.fresh));
-    cursor = w.cursor;
+  for (const [out, limit] of [[saved, until], [since, undefined]] as const) {
+    for (let w = readWindow(path, cursor, id, { until: limit }); w; w = w.more ? readWindow(path, cursor, id, { until: limit }) : undefined) {
+      out.push(...w.records.slice(w.fresh));
+      cursor = w.cursor;
+    }
   }
-  return out;
+  return { saved, since };
 }
 
 /**
@@ -100,8 +111,11 @@ function compare(what: string, transcript: Rec[], stored: Rec[], elsewhere: (id:
   return transcript.length - missing.length;
 }
 
-function readLines(path: string): Line[] {
-  return readFileSync(path, "utf8")
+/** The lines of a transcript file before byte `until`. */
+function readLines(path: string, until?: number): Line[] {
+  const buf = readFileSync(path);
+  return buf
+    .toString("utf8", 0, Math.min(buf.length, until ?? buf.length))
     .split("\n")
     .flatMap((l) => {
       try {
@@ -236,8 +250,9 @@ function said(r: Rec): string {
 export function verify(repo: Repo, session: string, remote: string): Verified {
   const problems: string[] = [];
   const checked: string[] = [];
+  const notes: string[] = [];
   const state = loadState(repo, session);
-  if (!state || state.chunks === 0) return { session, problems: ["not saved yet"], checked };
+  if (!state || state.chunks === 0) return { session, problems: ["not saved yet"], checked, notes };
   const ref = storeRef(state.conv, session);
   const stored = readRecords(ref, { gitDir: repo.store });
   const agents = readAgents(ref, { gitDir: repo.store });
@@ -247,20 +262,24 @@ export function verify(repo: Repo, session: string, remote: string): Verified {
 
   // Saved.
   if (state.transcript && existsSync(state.transcript)) {
-    const n = compare("saved", readAll(state.transcript, session), stored, elsewhere, problems);
+    const { saved, since } = readAll(state.transcript, session, state.cursor?.offset);
+    const n = compare("saved", saved, stored, elsewhere, problems);
     checked.push(`saved: ${n} records of the transcript`);
+    let pending = since.length;
     const dir = join(state.transcript.replace(/\.jsonl$/, ""), "subagents");
     for (const file of existsSync(dir) ? readdirSync(dir).sort() : []) {
       const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file)?.[1];
       if (!id) continue;
+      // A subagent the last save did not see is read from its start, as the next save reads it.
+      const read = readAll(join(dir, file), id, state.agents?.[id]?.cursor.offset ?? 0);
+      pending += read.since.length;
       const mine = agents.get(id);
-      if (!mine) {
-        problems.push(`saved: subagent ${id.slice(0, 8)} is not saved`);
-        continue;
-      }
-      compare(`subagent ${id.slice(0, 8)}`, readAll(join(dir, file), id), mine, () => false, problems);
+      if (!read.saved.length) continue;
+      if (!mine) problems.push(`saved: subagent ${id.slice(0, 8)} is not saved`);
+      else compare(`subagent ${id.slice(0, 8)}`, read.saved, mine, () => false, problems);
     }
     if (agents.size) checked.push(`saved: ${agents.size} subagents`);
+    if (pending) notes.push(`${pending} records written since the last save, which the next save takes in`);
   } else checked.push("saved: the transcript is gone, so only the store is checked");
 
   // Loads.
@@ -279,7 +298,7 @@ export function verify(repo: Repo, session: string, remote: string): Verified {
     const since = fork.path[0]?.type === "custom" && String(fork.path[0].name ?? "").includes("compact") ? " since the last compaction" : "";
     if (state.transcript && existsSync(state.transcript)) {
       // What Claude Code reads to resume the transcript itself, against what it reads from a fork.
-      const resumed = canonical(resumeLines(readLines(state.transcript), head, stored, session));
+      const resumed = canonical(resumeLines(readLines(state.transcript, state.cursor?.offset), head, stored, session));
       const forked = canonical(text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as Line));
       const at = resumed.findIndex((l, i) => l !== forked[i]);
       if (at >= 0 || resumed.length !== forked.length) {
@@ -296,5 +315,5 @@ export function verify(repo: Repo, session: string, remote: string): Verified {
   const orphans = [...stored, ...[...agents.values()].flat()].filter((r) => typeof r.parentId === "string" && !ids.has(r.parentId));
   if (orphans.length) problems.push(`store: ${orphans.length} records have a parent that is not saved, from: ${describe(orphans[0]!, 80)}`);
   checked.push(`store: ${state.chunks} chunks, git fsck`);
-  return { session, problems, checked };
+  return { session, problems, checked, notes };
 }

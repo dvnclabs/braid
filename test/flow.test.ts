@@ -357,6 +357,13 @@ test("subagents are saved, published and briefed with their session", () => {
   const v = braid(s.env, repo, ["verify", "--all"]);
   assert.equal(v.status, 0, v.stdout);
   assert.match(v.stdout, /✓ saved: 1 subagents/);
+
+  // What subagents write after the last save, in a file the save read or in a new one, waits for the next save.
+  sub.add("assistant", { id: "m3", type: "message", role: "assistant", model: "claude-sonnet-5-5", content: [{ type: "text", text: "And timeouts." }] }, { isSidechain: true, agentId: "a36fc26663a698234" });
+  new Transcript(dir, "agent-b47fc26663a698235").add("user", { role: "user", content: "Check retries" }, { isSidechain: true, agentId: "b47fc26663a698235" });
+  const later = braid(s.env, repo, ["verify", "--session", ALICE]);
+  assert.equal(later.status, 0, later.stdout);
+  assert.match(later.stdout, /· 2 records written since the last save, which the next save takes in/);
 });
 
 test("a session publishes to each repository it commits in", () => {
@@ -867,15 +874,16 @@ test("braid verify: sessions are saved as they happened and load back the same, 
   const branch = braid(s.env, repo, ["verify", "--session", BRANCH], undefined, small);
   assert.equal(branch.status, 0, branch.stdout);
 
-  // A turn the save has not seen yet is reported, and the next save takes it in.
+  // A turn written since the last save, as in a session still running, is noted and is no problem: the next save takes it in.
   t.user("One more thing.");
   t.assistant("Noted.");
   const behind = braid(s.env, repo, ["verify", "--session", ALICE]);
-  assert.equal(behind.status, 1);
-  assert.match(behind.stdout, /✗ saved: 2 records of the transcript are not saved, from: [^\n]*One more thing/);
+  assert.equal(behind.status, 0, behind.stdout);
+  assert.match(behind.stdout, /^braid verify 5b0e2c1a: ok\n[\s\S]*\n {2}· 2 records written since the last save, which the next save takes in$/m);
   braid(s.env, repo, ["hook", "stop"], hookIn(ALICE, t));
   const all = braid(s.env, repo, ["verify", "--all"]);
   assert.equal(all.status, 0, all.stdout);
+  assert.doesNotMatch(all.stdout, /written since the last save/);
 });
 
 test("a fork holds what Claude Code reads to resume: what a compaction kept, parallel calls beside the chain, notes, messages typed mid-turn, and the session's settings", () => {

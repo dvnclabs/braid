@@ -161,19 +161,25 @@ function lastLine(buf: Buffer, end: number): number {
 }
 
 /** Converts the complete lines after `cursor`, or returns undefined when there are none. */
-export function readWindow(path: string, cursor: Cursor, session: string, limits = { maxBytes: MAX_WINDOW, overlap: OVERLAP }): Window | undefined {
+/**
+ * The next window of a transcript after `cursor`. `limits` sets the window's
+ * size and overlap, and `until` a byte offset, at a line boundary, to read no
+ * further than.
+ */
+export function readWindow(path: string, cursor: Cursor, session: string, limits: { maxBytes?: number; overlap?: number; until?: number } = {}): Window | undefined {
+  const { maxBytes = MAX_WINDOW, overlap = OVERLAP, until = Infinity } = limits;
   const fd = openSync(path, "r");
   try {
-    const size = fstatSync(fd).size;
+    const size = Math.min(fstatSync(fd).size, until);
     if (size <= cursor.offset) return undefined;
     // Start at a line boundary at least `overlap` bytes back, and always before
     // the last saved line, so records that hang off earlier ones find them.
-    const start = lineAt(fd, Math.max(0, cursor.offset - Math.max(1, limits.overlap)));
-    let end = Math.min(size, cursor.offset + limits.maxBytes);
+    const start = lineAt(fd, Math.max(0, cursor.offset - Math.max(1, overlap)));
+    let end = Math.min(size, cursor.offset + maxBytes);
     let buf = readAt(fd, start, end - start);
     // A line longer than the window: read on until it ends.
     while (start + buf.lastIndexOf(NL) + 1 <= cursor.offset && end < size) {
-      end = Math.min(size, end + limits.maxBytes);
+      end = Math.min(size, end + maxBytes);
       buf = readAt(fd, start, end - start);
     }
     // Whole lines only: a line still being written waits for the next save.
