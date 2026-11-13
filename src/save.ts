@@ -11,22 +11,31 @@ import { ensureStore, readConfig, SESSION_REFS, storeRef, type Repo } from "./re
 import { replayedIds } from "./replay.ts";
 import { markIfBig } from "./points.ts";
 import { loadState, newState, saveState, withLock, type SessionState } from "./state.ts";
-import { intact, readWindow, START, type Window } from "./transcript.ts";
+import { codexLine, formatOf, intact, readWindow, START, type Format, type Window } from "./transcript.ts";
 import { VERSION } from "./version.ts";
 
 export function actorId(repo: Repo): string {
   return config("user.email", { cwd: repo.top }) ?? `${userInfo().username}@${hostname()}`;
 }
 
+/** The Claude Code version that wrote a record, from its line. */
 function nativeVersion(r: Rec): string | undefined {
-  const native = r.native as { records?: { version?: unknown }[] } | undefined;
-  const v = native?.records?.[0]?.version;
+  const native = r.native as { source?: string; records?: { version?: unknown }[] } | undefined;
+  const v = native?.source === "claude-code" ? native.records?.[0]?.version : undefined;
   return typeof v === "string" ? v : undefined;
 }
 
+/** The model a record names: Claude Code names it on each response, Codex on the settings of each turn. */
 function modelOf(r: Rec): string | undefined {
   const m = r.model as { provider?: string; id?: string } | undefined;
-  return r.role === "assistant" && m?.id ? `${m.provider ?? "unknown"}:${m.id}` : undefined;
+  return (r.role === "assistant" || r.type === "settings") && m?.id ? `${m.provider ?? "unknown"}:${m.id}` : undefined;
+}
+
+/** The agent a session's transcript was written by: as its hook said, else as the transcript reads. */
+export function harnessOf(state: SessionState | undefined, path: string | undefined, agent?: Format): SessionState["harness"] {
+  if (agent) return agent;
+  if (state && (state.chunks > 0 || state.harness !== "claude-code")) return state.harness;
+  return formatOf(path) ?? state?.harness ?? "claude-code";
 }
 
 function header(h: Record<string, unknown>, session: string): Rec {
@@ -88,13 +97,16 @@ function unsavedOf(saved: Rec[]): (r: Rec) => boolean {
  * commits the conversation, as a label on its newest turn, for each code
  * commit made since the previous save and for `opts.commit`.
  */
-export function save(repo: Repo, session: string, transcript?: string, opts: { commit?: string } = {}): SaveResult {
+export function save(repo: Repo, session: string, transcript?: string, opts: { commit?: string; agent?: Format } = {}): SaveResult {
   ensureStore(repo);
   return withLock(repo, `save-${session}`, () => {
-    const state = loadState(repo, session) ?? newState(session, transcript);
+    const prior = loadState(repo, session);
+    const state = prior ?? newState(session, transcript);
     if (!repo.separate && !state.code) state.code = repo.top;
     if (transcript) state.transcript = transcript;
     const path = state.transcript;
+    state.harness = harnessOf(prior, path, opts.agent);
+    const format: Format = state.harness === "codex" ? "codex" : "claude-code";
     if (!path || !existsSync(path)) {
       if (opts.commit === undefined) return { added: 0, state };
       // An imported session, or one whose transcript is gone: commit what the store has.
@@ -115,6 +127,12 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
     // The lines after the cursor: the window's overlap was read by the save before.
     const fresh = (w: Window): Rec[] => {
       const native = unseen ? w.records.slice(w.fresh).filter(unseen) : w.records.slice(w.fresh);
+      // A rollout braid wrote for Codex starts with copies of the source's records: what Codex adds continues the source.
+      if (copiedLines !== undefined) {
+        return native
+          .filter((r) => !(codexLine(r.id) <= copiedLines))
+          .map((r) => (r.parentId && codexLine(r.parentId) <= copiedLines ? { ...r, parentId: state.forkFrom?.head ?? null } : r));
+      }
       if (replayed) {
         return native
           .filter((r) => !replayed.has(r.id) && !copied(r))
@@ -124,15 +142,20 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
       return native;
     };
 
-    const agents = collectAgents(repo, state, path);
+    // Codex keeps a subagent in a rollout of its own, which braid does not save yet.
+    const agents = format === "claude-code" ? collectAgents(repo, state, path) : new Map<string, NewAgent>();
     // A replayed session's file starts with copies of the source's records, under uuids derived from their ids;
     // the copied lines without a uuid (the session's settings) are named after their line, among the first it wrote.
-    const replayed =
-      state.chunks === 0 && state.forkFrom?.replayed ? replayedIds(conversation(repo, state.forkFrom.conv, readConfig(repo).remote).values()) : undefined;
+    // A Codex rollout has no ids: its first lines are the copies.
+    const replaying = state.chunks === 0 && !!state.forkFrom?.replayed;
+    if (replaying && format === "codex") state.copied = state.forkFrom?.lines ?? 0;
+    const copiedLines = format === "codex" ? state.copied : undefined;
+    const replayed = replaying && format === "claude-code" ? replayedIds(conversation(repo, state.forkFrom!.conv, readConfig(repo).remote).values()) : undefined;
     const wrote = replayed ? (state.forkFrom?.lines ?? 0) : 0;
     const copied = (r: Rec) => Number(/^claude-line-(\d+)@/.exec(r.id)?.[1] ?? Infinity) <= wrote;
-    let window = readWindow(path, cursor, session);
-    if (window && state.chunks === 0 && !state.forkFrom) {
+    const read = () => readWindow(path, cursor, session, {}, format);
+    let window = read();
+    if (window && format === "claude-code" && state.chunks === 0 && !state.forkFrom) {
       source = forkSource(repo, session, window.records);
       if (source) state.conv = source.conv;
     }
@@ -145,7 +168,7 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
       if (window) cursor = window.cursor;
       state.cursor = cursor;
       if (final) break;
-      window = readWindow(path, cursor, session);
+      window = read();
       if (!window) break;
     }
     saveState(repo, state);
@@ -175,7 +198,10 @@ function writeChunk(
     state.userAgent = nativeVersion(r) ? `claude-code/${nativeVersion(r)}` : state.userAgent;
     state.model = modelOf(r) ?? state.model;
   }
-  const actor: Actor = { actorId: actorId(repo), userAgent: state.userAgent ?? "claude-code" };
+  // A rollout braid wrote names no version of Codex's (ATXF writes 0.0.0); Codex writes its own in a rollout it starts.
+  const version = (nativeHeader?.source as { agent?: string; version?: string } | undefined)?.version;
+  if (state.harness === "codex" && version && version !== "0.0.0") state.userAgent = `codex/${version}`;
+  const actor: Actor = { actorId: actorId(repo), userAgent: state.userAgent ?? state.harness };
   const now = new Date().toISOString();
 
   const out: Rec[] = [];
@@ -342,10 +368,12 @@ function toolCallRecord(repo: Repo, state: SessionState, out: Rec[], id: string 
 }
 
 /** Registers a session with its transcript, without saving anything yet. */
-export function register(repo: Repo, session: string, transcript?: string): SessionState {
+export function register(repo: Repo, session: string, transcript?: string, agent?: Format): SessionState {
   ensureStore(repo);
-  const state = loadState(repo, session) ?? newState(session, transcript);
+  const prior = loadState(repo, session);
+  const state = prior ?? newState(session, transcript);
   if (transcript) state.transcript = transcript;
+  state.harness = harnessOf(prior, state.transcript, agent);
   if (!repo.separate && !state.code) state.code = repo.top;
   saveState(repo, state);
   return state;

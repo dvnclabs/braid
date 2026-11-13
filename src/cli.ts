@@ -1,5 +1,5 @@
 // braid command line. Hooks call it too, so hook commands never fail loudly.
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,7 @@ import { allSessions, briefing, markFork, resolve } from "./load.ts";
 import { context, pick, record } from "./merge.ts";
 import { harness } from "./harness.ts";
 import { launchDir, replay, shellWord } from "./replay.ts";
-import { currentSession, recordSession, transcriptOf } from "./registry.ts";
+import { currentAgent, currentSession, recordSession, transcriptOf } from "./registry.ts";
 import { editRecord, hide, lineText, pickLines, renderEdit, editLines, setPrivate, withhold, withholdRecent } from "./edit.ts";
 import { importOpenclaw, openclawDatabases } from "./openclaw.ts";
 import { points } from "./points.ts";
@@ -20,7 +20,7 @@ import { publish, view, type PublishResult } from "./publish.ts";
 import { braidOf, describe, isTurn, type Rec } from "./records.ts";
 import { findRepo, isEnabled, locate, readConfig, type Repo } from "./repo.ts";
 import { save } from "./save.ts";
-import { configDir, init, setup } from "./setup.ts";
+import { cliPath, configDir, init, setup } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
 import { cleanName, computeStatus, render, sessionName, sessionTitle } from "./status.ts";
 import { statusline } from "./statusline.ts";
@@ -30,13 +30,14 @@ import { VERSION } from "./version.ts";
 const HELP = `braid ${VERSION}: efficient session manager
 
 Save, edit, commit, push, fork and merge coding-agent sessions with git. Each command
-works on the session it runs in ($BRAID_SESSION, else Claude Code's $CLAUDE_CODE_SESSION_ID),
-or the one named with --session <id>.
+works on the session it runs in ($BRAID_SESSION, else Claude Code's $CLAUDE_CODE_SESSION_ID
+or Codex's $CODEX_THREAD_ID), or the one named with --session <id>.
 
 Set up
-  braid init                  this machine: the braid command, the status line, and ~/.braid, the
-                              braid repository that keeps every conversation. Inside a git
-                              repository, braid there too: .braid/config.toml, .braidignore, git hooks
+  braid init                  this machine: the braid command, the status line, braid's hooks in
+                              Codex when it is installed, and ~/.braid, the braid repository that
+                              keeps every conversation. Inside a git repository, braid there too:
+                              .braid/config.toml, .braidignore, git hooks
     --autopilot|--no-autopilot  braid works on this machine only: no push, fetch or GitHub (on by default)
     --autofork|--no-autofork    mark a fork point before each big turn (on by default)
     --repo <path>|auto        keep conversations in another braid repository, or in ~/.braid
@@ -44,7 +45,7 @@ Set up
     --autocommit|--no-autocommit  a code commit commits the conversation too (off by default)
     --autopush|--no-autopush      git push publishes the committed conversation (on by default)
     --no-git-hooks            leave git alone
-    --undo                    put back the status line braid replaced
+    --undo                    put back the status line braid replaced, and take braid's hooks out of Codex
 
 Everyday
   braid status                where this session stands, and the sessions around it
@@ -57,7 +58,7 @@ Everyday
   braid commit -m "<message>" commit the conversation: publishing goes up to the last commit
   braid push [--dry-run]      publish the committed part now (git push does this with autopush)
   braid fork [<session>|@N]   the command to continue a session, or fork point N, in a new window; with none, this one
-    --to codex                as a new Codex session (claude-code by default)
+    --to codex|claude-code    as a new session of that agent's (by default the agent it runs in, else Claude Code)
   braid fork <session> --here continue from another session in this one, before its first turn is saved
   braid merge [<session>]     show what another session has that this one lacks, for the agent to merge
   braid merge --record <id> --instruction "<text>"   record a merge; summary on stdin
@@ -195,6 +196,8 @@ function main(argv: string[]): number {
       "no-git-hooks": { type: "boolean" },
       transcript: { type: "string" },
       to: { type: "string" },
+      agent: { type: "string" },
+      detached: { type: "boolean" },
       remote: { type: "string" },
       record: { type: "string" },
       skip: { type: "string" },
@@ -229,9 +232,16 @@ function main(argv: string[]): number {
     case "hook": {
       // Hooks must never break the session: errors go to the log.
       try {
-        const input = JSON.parse(readStdin() || "{}");
+        const input = JSON.parse((opts.detached === true ? process.env.BRAID_HOOK_INPUT : readStdin()) || "{}");
+        const agent = str("agent") === "codex" ? "codex" : undefined;
+        if (args[0] === "session-end" && agent && opts.detached !== true) {
+          // Codex gives a SessionEnd hook three seconds at most: the save and the check go on after it returns.
+          const env = { ...process.env, BRAID_HOOK_INPUT: JSON.stringify(input) };
+          spawn(process.execPath, [cliPath(), "hook", "session-end", "--agent", agent, "--detached"], { detached: true, stdio: "ignore", env }).unref();
+          return 0;
+        }
         const handlers: Record<string, (i: typeof input) => string> = { "session-start": sessionStart, stop, "session-end": sessionEnd };
-        out(handlers[args[0] ?? ""]?.(input) ?? "");
+        out(handlers[args[0] ?? ""]?.({ ...input, ...(agent ? { agent } : {}) }) ?? "");
       } catch (err) {
         logError(err);
       }
@@ -401,18 +411,21 @@ function main(argv: string[]): number {
       const repo = needRepo();
       const remote = str("remote") ?? readConfig(repo).remote;
       const current = str("session") ?? currentSession();
-      const to = harness(str("to"));
+      // A fork continues in the agent it is asked from, unless another is named.
+      const to = harness(str("to") ?? currentAgent());
       const resume = (dir: string, id: string, fork: boolean) => `  cd ${shellWord(dir)} && claude --resume ${id}${fork ? " --fork-session" : ""}`;
       const wrote = (what: string, r: { cwd: string; session: string }) => `braid: wrote ${what} as a new ${to.title} session. To continue it in a new window, run in a terminal:\n  ${to.resume(r.cwd, r.session)}`;
       if (!args[0]) {
         if (!current) throw new Error("no session to branch: run inside an agent session, or pass --session <id>");
-        const transcript = loadState(repo, current)?.transcript ?? transcriptOf(current);
-        if (to.agent === "claude-code") {
+        const state = loadState(repo, current);
+        const transcript = state?.transcript ?? transcriptOf(current);
+        // Claude Code forks its own session, with everything it holds; braid writes any other.
+        if (to.agent === "claude-code" && (state?.harness ?? "claude-code") === "claude-code") {
           const dir = launchDir(transcript) ?? process.cwd();
           out(["braid: to branch this conversation into a new window, run in a terminal:", resume(dir, current, true), "or /branch to branch it in this window. braid files the branch in this conversation."].join("\n"));
           return 0;
         }
-        // Into another agent: written from the store, with the turns since the last save.
+        // Written from the store, with the turns since the last save.
         if (transcript && existsSync(transcript)) save(repo, current, transcript);
         const own = resolve(repo, current, remote).filter((f) => f.opts.gitDir);
         if (own.length !== 1) throw new Error(`this session (${current.slice(0, 8)}) is not saved yet`);

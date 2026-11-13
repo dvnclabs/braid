@@ -152,3 +152,70 @@ export class Transcript {
     });
   }
 }
+
+/** Writes a Codex rollout as Codex writes it (0.169): one {timestamp, type, payload} line per item or event, appending. */
+export class Rollout {
+  readonly path: string;
+  readonly session: string;
+  private n = 0;
+
+  /** A rollout under `codexHome`, where Codex keeps it, started in `cwd`. */
+  constructor(codexHome: string, session: string, cwd: string) {
+    this.session = session;
+    const dir = join(codexHome, "sessions", "2026", "11", "09");
+    mkdirSync(dir, { recursive: true });
+    this.path = join(dir, `rollout-2026-11-09T10-00-00-${session}.jsonl`);
+    writeFileSync(this.path, "");
+    this.line("session_meta", { id: session, session_id: session, timestamp: "2026-11-09T10:00:00.000Z", cwd, originator: "codex_exec", cli_version: "0.169.0", source: "exec", model_provider: "openai" });
+  }
+
+  line(type: string, payload: object): void {
+    this.n += 1;
+    appendFileSync(this.path, JSON.stringify({ timestamp: new Date(Date.UTC(2026, 10, 9, 10, 0, this.n)).toISOString(), type, payload }) + "\n");
+  }
+
+  item(payload: object): void {
+    this.line("response_item", payload);
+  }
+
+  /** What Codex writes when a turn starts: its instructions and the environment, the turn's settings, the prompt. */
+  turn(prompt: string, cwd: string, context = true): void {
+    this.line("event_msg", { type: "task_started", turn_id: `turn-${this.n}` });
+    if (context) {
+      this.item({ type: "message", role: "developer", content: [{ type: "input_text", text: "<permissions instructions>\nYou may write in the workspace.\n</permissions instructions>" }] });
+      this.item({ type: "message", role: "user", content: [{ type: "input_text", text: `<environment_context>\n  <cwd>${cwd}</cwd>\n</environment_context>` }] });
+      this.item({ type: "message", role: "user", content: [{ type: "input_text", text: `# AGENTS.md instructions for ${cwd}\n\n<INSTRUCTIONS>\nUse tabs.\n</INSTRUCTIONS>` }] });
+    }
+    this.line("turn_context", { turn_id: `turn-${this.n}`, cwd, model: "gpt-5.5", model_provider: "openai", effort: "medium" });
+    this.user(prompt);
+  }
+
+  user(text: string): void {
+    this.item({ type: "message", role: "user", content: [{ type: "input_text", text }] });
+  }
+
+  assistant(text: string): void {
+    this.item({ type: "message", role: "assistant", content: [{ type: "output_text", text }] });
+  }
+
+  reasoning(summary: string): void {
+    this.item({ type: "reasoning", summary: [{ type: "summary_text", text: summary }], content: null, encrypted_content: `gAAAA-${this.n}` });
+  }
+
+  call(name: string, args: object, id: string): void {
+    this.item({ type: "function_call", name, arguments: JSON.stringify(args), call_id: id });
+  }
+
+  patch(input: string, id: string): void {
+    this.item({ type: "custom_tool_call", name: "apply_patch", input, call_id: id });
+  }
+
+  output(id: string, output: string | object, custom = false): void {
+    this.item({ type: custom ? "custom_tool_call_output" : "function_call_output", call_id: id, output });
+  }
+
+  end(): void {
+    this.line("token_usage_record", { total_token_usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 } });
+    this.line("event_msg", { type: "task_complete", turn_id: `turn-${this.n}` });
+  }
+}

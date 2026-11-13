@@ -6,8 +6,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { codex } from "@leostera/atxf/codex";
-import { forModel, type Rec } from "./records.ts";
-import { forkText, keptUuids, ownLine, rewrite, shellWord, type ForkRecords } from "./replay.ts";
+import { asCodexShowed, forModel, type Rec } from "./records.ts";
+import { forkText, keptUuids, linear, ownLine, rewrite, shellWord, type ForkRecords } from "./replay.ts";
 
 export interface Written {
   /** The new session's id, as the agent knows it. */
@@ -29,9 +29,6 @@ export interface Harness {
   /** The command that continues a session written here, in a terminal. */
   resume(dir: string, session: string): string;
 }
-
-/** Records as one line of history, each the child of the one before: the order an agent reads them in. */
-const linear = (records: Rec[]): Rec[] => records.map((r, i) => ({ ...r, parentId: i ? records[i - 1]!.id : null }));
 
 type Attachment = { type?: string; prompt?: unknown; commandMode?: string; origin?: { kind?: string } };
 
@@ -141,9 +138,39 @@ export const CLAUDE_CODE: Harness = {
  * one line of history: the fork's context path as the model read it, with what
  * a compaction kept after its summary, as Claude Code puts it back, and each
  * batch of parallel calls before its results, and the results before the
- * notes on them. Codex adds its own instructions
- * and environment when it resumes.
+ * notes on them. Codex adds its own instructions and environment when it
+ * resumes, so those of a Codex session stay behind.
  */
+/**
+ * A result goes back to Codex as the output of the kind of call it answers:
+ * the converter writes every result as a function call's output, and a custom
+ * tool's call (apply_patch) takes a custom tool call's output.
+ */
+function outputsAnswerCalls(text: string): string {
+  const custom = new Set<string>();
+  return text
+    .split("\n")
+    .map((l) => {
+      if (!l) return l;
+      const line = JSON.parse(l) as { type?: string; payload?: { type?: string; call_id?: string } };
+      const p = line.payload;
+      if (line.type !== "response_item" || !p?.call_id) return l;
+      if (p.type === "custom_tool_call") custom.add(p.call_id);
+      if (p.type !== "function_call_output" || !custom.has(p.call_id)) return l;
+      return JSON.stringify({ ...line, payload: { ...p, type: "custom_tool_call_output" } });
+    })
+    .join("\n");
+}
+
+/** A fork as a Codex rollout of session `session`, written at `now`. */
+export function codexText(fork: ForkRecords, all: Map<string, Rec>, cwd: string, pairs: [string, string][], session: string, now: Date): string {
+  const kept = fork.path[0] ? keptUuids(ownLine(fork.path[0])).flatMap((u) => (all.has(u) ? [all.get(u)!] : [])) : [];
+  const path = kept.length ? [...fork.path.slice(0, 2), ...kept, ...fork.path.slice(2)] : fork.path;
+  const records = linear(resultsFirst(batched(forModel(rewrite(asCodexShowed(asClaudeCodeShowed(path), "codex"), pairs), CODEX.provider).map(asText))));
+  const header = { type: "transcript", atxf: "0.1", id: session, time: now.toISOString(), source: { agent: "braid", sessionId: session }, workspace: { cwd } };
+  return outputsAnswerCalls(codex.fromAtxf({ header, records } as never, { carry: false }));
+}
+
 export const CODEX: Harness = {
   agent: "codex",
   title: "Codex",
@@ -151,11 +178,7 @@ export const CODEX: Harness = {
   write(fork, all, cwd, pairs) {
     const session = randomUUID();
     const now = new Date();
-    const kept = fork.path[0] ? keptUuids(ownLine(fork.path[0])).flatMap((u) => (all.has(u) ? [all.get(u)!] : [])) : [];
-    const path = kept.length ? [...fork.path.slice(0, 2), ...kept, ...fork.path.slice(2)] : fork.path;
-    const records = linear(resultsFirst(batched(forModel(rewrite(asClaudeCodeShowed(path), pairs), CODEX.provider).map(asText))));
-    const header = { type: "transcript", atxf: "0.1", id: session, time: now.toISOString(), source: { agent: "braid", sessionId: session }, workspace: { cwd } };
-    const text = codex.fromAtxf({ header, records } as never, { carry: false });
+    const text = codexText(fork, all, cwd, pairs, session, now);
     const dir = join(codexHome(), "sessions", String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()));
     mkdirSync(dir, { recursive: true });
     const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;

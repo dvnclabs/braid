@@ -64,8 +64,57 @@ export function forModel(records: Rec[], provider: string): Rec[] {
   });
 }
 
-/** Messages and merges: what the ↑ and ↓ counts count. */
-export const isTurn = (r: Rec): boolean => r.type === "message" || r.type === "branch_summary";
+/** The agent whose transcript a record was read from. */
+export const sourceOf = (r: Rec): string | undefined => (r.native as { source?: string } | undefined)?.source;
+
+type Body = { role?: string; content?: unknown; display?: boolean };
+
+const textOf = (content: unknown): string =>
+  typeof content === "string" ? content : Array.isArray(content) ? content.map((b) => (typeof (b as { text?: unknown })?.text === "string" ? (b as { text: string }).text : "")).join("") : "";
+
+/** What Codex gives its model about where it runs: the environment, and the AGENTS.md files it read. */
+export const CODEX_CONTEXT = /^\s*(<environment_context>|<user_instructions>|# AGENTS\.md instructions for )/;
+/** What Codex tells its model about the conversation, in the user's place: a skill's text, a turn the user interrupted, a command the user ran. */
+const CODEX_NOTE = /^\s*<(skill|turn_aborted|subagent_notification|user_shell_command|image_resize_notice)>/;
+
+/**
+ * A Codex message as an agent's model takes it: undefined for context Codex
+ * gave its own model, and for another agent a note for what Codex wrote in the
+ * user's place.
+ */
+function codexBody<T extends Body>(body: T, agent: string): T | undefined {
+  // Developer messages are Codex's instructions to its model: its permissions, skills, plugins, collaboration mode.
+  if (body.role === "system") return undefined;
+  if (body.role !== "user") return body;
+  const text = textOf(body.content);
+  if (CODEX_CONTEXT.test(text)) return undefined;
+  return agent !== "codex" && CODEX_NOTE.test(text) ? { ...body, display: false } : body;
+}
+
+/**
+ * Codex's records as its model read them, for `agent`. Codex gives its model
+ * its instructions, the environment and AGENTS.md in the conversation itself,
+ * and gives them again, as they stand, to a session it resumes without them;
+ * another agent gives its model its own. So they stay behind, also from what a
+ * compaction kept. For another agent, what Codex wrote for its model in the
+ * user's place, such as a skill's text, is a note. Records of other agents
+ * pass as they are.
+ */
+export function asCodexShowed(records: Rec[], agent: string): Rec[] {
+  return records.flatMap((r) => {
+    if (sourceOf(r) !== "codex") return [r];
+    if (r.type === "compaction" && Array.isArray(r.replacement)) return [{ ...r, replacement: (r.replacement as Body[]).flatMap((b) => codexBody(b, agent) ?? []) }];
+    if (r.type !== "message") return [r];
+    const body = codexBody(r as Rec & Body, agent);
+    return body ? [body] : [];
+  });
+}
+
+/** Context Codex gave its own model in the conversation: its instructions, the environment, AGENTS.md. */
+export const isCodexContext = (r: Rec): boolean => sourceOf(r) === "codex" && r.type === "message" && !codexBody(r as Rec & Body, "codex");
+
+/** Messages and merges: what the ↑ and ↓ counts count, and what a log lists. */
+export const isTurn = (r: Rec): boolean => (r.type === "message" && !isCodexContext(r)) || r.type === "branch_summary";
 
 /** A commit of the conversation: what is published ends at the last one. */
 export const isCommit = (r: Rec): boolean => r.type === "label" && !!braidOf(r).commit;

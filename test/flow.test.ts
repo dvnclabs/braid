@@ -1,10 +1,11 @@
 // End to end: two people, one remote. Alice works and pushes, Bob reviews,
 // Alice merges the review. Every step goes through the CLI and real git.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { braid, clone, must, run, sandbox, storeOf, Transcript } from "./helpers.ts";
+import { braid, clone, must, Rollout, run, sandbox, storeOf, Transcript } from "./helpers.ts";
 
 const ALICE = "5b0e2c1a-7f3d-4c2e-9a61-0d8e4b2f6c13";
 const BOB = "01a1bc3e-e950-7c4b-9e7a-62f0e9a7c418";
@@ -1086,4 +1087,214 @@ test("a fork holds what Claude Code reads to resume: what a compaction kept, par
   braid(s.env, repo, ["hook", "stop"], forkIn);
   const saved = records(s.env, repo, storeOf(s.env, repo), `refs/sessions/${ALICE}/${id}`).filter((x) => x.type !== "transcript");
   assert.deepEqual(saved.map((x) => x.content), ["Next."], "the copied lines are not saved again");
+});
+
+/** The lines of a Claude Code transcript, as said: each message's text, tool calls and results, by response. */
+function claudeSaid(path: string): string[] {
+  return readFileSync(path, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l))
+    .flatMap((l) => {
+      const m = l.message;
+      if (!m) return [];
+      const blocks = typeof m.content === "string" ? [{ type: "text", text: m.content }] : m.content;
+      const who = l.type === "assistant" ? "assistant" : l.isMeta ? "note" : "user";
+      return blocks.map((b: Record<string, unknown>) =>
+        b.type === "text" ? `${who}: ${b.text}`
+        : b.type === "tool_use" ? `call ${b.id} ${b.name} ${JSON.stringify(b.input)}`
+        : b.type === "tool_result" ? `result ${b.tool_use_id}: ${b.content}`
+        : String(b.type),
+      );
+    });
+}
+
+test("Codex sessions save as they happen, from braid's hooks in Codex, and continue in Claude Code", () => {
+  const s = sandbox();
+  const repo = clone(s, "jo", "jo@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  const codexHome = join(s.root, "codex");
+  mkdirSync(codexHome);
+  // A hook of the user's own, which braid leaves as it is.
+  writeFileSync(join(codexHome, "hooks.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "notify-me", timeout: 5 }] }] } }));
+  const env = { ...s.env, CODEX_HOME: codexHome };
+  assert.match(braid(env, repo, ["init"]).stdout, /added braid's hooks to \S+\/hooks\.json, so braid saves Codex sessions too: open \/hooks in Codex once to trust them/);
+  const commands = () => {
+    const hooks = JSON.parse(readFileSync(join(codexHome, "hooks.json"), "utf8")).hooks as Record<string, { hooks: { command: string; timeout: number }[] }[]>;
+    return Object.fromEntries(Object.entries(hooks).map(([event, groups]) => [event, groups.flatMap((g) => g.hooks.map((h) => `${h.command.replace(/^\S+\/\.local\/bin\/braid /, "braid ")} ${h.timeout}`))]));
+  };
+  const installed = {
+    Stop: ["notify-me 5", "braid hook stop --agent codex 30"],
+    SessionStart: ["braid hook session-start --agent codex 15"],
+    SessionEnd: ["braid hook session-end --agent codex 3"],
+  };
+  assert.deepEqual(commands(), installed);
+  // Set up again, braid's hooks are there once; undone, the user's own stays.
+  assert.doesNotMatch(braid(env, repo, ["init"]).stdout, /hooks\.json/);
+  assert.deepEqual(commands(), installed);
+  assert.match(braid(env, repo, ["init", "--undo"]).stdout, /took braid's hooks out of \S+\/hooks\.json/);
+  assert.deepEqual(commands(), { Stop: ["notify-me 5"] });
+  braid(env, repo, ["init"]);
+
+  // Codex runs SessionStart before it writes the rollout, and Stop after each turn.
+  const ID = "01a1d58a-9cbc-7901-ae2d-6eed8de9cde3";
+  const hook = (name: string, transcript: string | null, extra: NodeJS.ProcessEnv = {}) =>
+    braid(env, repo, ["hook", name, "--agent", "codex"], JSON.stringify({ session_id: ID, transcript_path: transcript, cwd: repo, hook_event_name: name, model: "gpt-5.5" }), extra);
+  assert.equal(hook("session-start", null).status, 0);
+  const r = new Rollout(codexHome, ID, repo);
+  r.turn("Fix the bug in a.ts.", repo);
+  r.reasoning("Read both files.");
+  r.call("exec_command", { cmd: "cat a.ts" }, "call_a");
+  r.call("exec_command", { cmd: "cat b.ts" }, "call_b");
+  r.line("token_usage_record", { total_token_usage: { input_tokens: 10, output_tokens: 1 } });
+  r.output("call_a", "Process exited with code 0\nOutput:\nexport const a = 1;\n");
+  r.output("call_b", "Process exited with code 1\nOutput:\ncat: b.ts: No such file\n");
+  r.assistant("a.ts is fine; b.ts is missing, so I add it.");
+  r.patch("*** Begin Patch\n*** Add File: b.ts\n+export const b = 2;\n*** End Patch\n", "call_p");
+  r.output("call_p", "Success. Updated the following files:\nA b.ts\n", true);
+  r.end();
+  // Saved in windows of a few lines, as a long rollout is.
+  assert.equal(hook("stop", r.path, { BRAID_WINDOW_BYTES: "600" }).stdout, "");
+  r.turn("Now run the tests.", repo, false);
+  r.item({ type: "message", role: "user", content: [{ type: "input_text", text: "<skill>\n<name>tests</name>\nRun npm test.\n</skill>" }] });
+  r.call("exec_command", { cmd: "npm test" }, "call_t");
+  r.output("call_t", { content: "1 failing", success: false });
+  r.assistant("One test fails.");
+  r.end();
+  assert.equal(hook("stop", r.path, { BRAID_WINDOW_BYTES: "600" }).stdout, "");
+
+  // The log lists the conversation, without the instructions, environment and AGENTS.md Codex gave its model.
+  const log = braid(env, repo, ["log", ID]).stdout.split("\n").filter(Boolean).map((l) => l.replace(/^\S+\s+/, ""));
+  assert.deepEqual(log, [
+    "user      Fix the bug in a.ts.",
+    "assistant ",
+    "assistant → exec_command cat a.ts",
+    "assistant → exec_command cat b.ts",
+    "tool      Process exited with code 0 Output: export const a = 1;",
+    "tool      Process exited with code 1 Output: cat: b.ts: No such file",
+    "assistant a.ts is fine; b.ts is missing, so I add it.",
+    "assistant → apply_patch",
+    "tool      Success. Updated the following files: A b.ts",
+    "user      Now run the tests.",
+    "user      <skill> <name>tests</name> Run npm test. </skill>",
+    "assistant → exec_command npm test",
+    "tool      1 failing",
+    "assistant One test fails.",
+  ]);
+  const verified = braid(env, repo, ["verify", "--session", ID]);
+  assert.equal(verified.status, 0, verified.stdout);
+  assert.match(verified.stdout, /✓ loads: 14 items, the same in a fork as in the rollout/);
+
+  // From inside Codex, braid finds the session by CODEX_THREAD_ID, which Codex gives the commands it runs, and the
+  // rollout under CODEX_HOME. A commit the agent makes is noted in its conversation.
+  r.turn("Thanks.", repo, false);
+  const inCodex = { ...env, CODEX_THREAD_ID: ID };
+  writeFileSync(join(repo, "b.ts"), "export const b = 2;\n");
+  must(inCodex, repo, "git", ["add", "b.ts"]);
+  must(inCodex, repo, "git", ["commit", "--quiet", "-m", "Add b.ts"]);
+  assert.equal(braid(inCodex, repo, ["save"]).stdout, "braid: saved 4 records\n");
+  assert.match(braid(env, repo, ["log", ID]).stdout, /user {6}Thanks\.\n\S+ +code {6}Add b\.ts \([0-9a-f]{7}\)\n$/);
+  // A fork asked for from inside Codex continues in Codex, as a branch of this conversation.
+  const branch = braid(inCodex, repo, ["fork"]);
+  assert.match(branch.stdout, /^braid: wrote this conversation as a new Codex session\. To continue it in a new window, run in a terminal:\n {2}cd \S+ && codex resume [0-9a-f-]{36}\n$/);
+
+  // In Claude Code, as Claude Code writes a conversation: each response one message, results after it, Codex's own
+  // context left behind, and what Codex wrote in the user's place a note. Codex's reasoning stays with OpenAI.
+  const there = join(s.root, "there");
+  mkdirSync(there);
+  const claude = join(s.env.HOME!, ".claude");
+  const f = braid(env, repo, ["fork", "01a1d58a", "--cwd", there]);
+  assert.equal(f.status, 0, f.stderr);
+  const fork = /claude --resume (\S+)$/m.exec(f.stdout)![1]!;
+  assert.match(f.stdout, /^braid: wrote 01a1d58a as a new Claude Code session\./);
+  const file = join(claude, "projects", realpathSync(there).replace(/[^A-Za-z0-9]/g, "-"), `${fork}.jsonl`);
+  assert.deepEqual(claudeSaid(file), [
+    "user: Fix the bug in a.ts.",
+    'call call_a exec_command {"cmd":"cat a.ts"}',
+    'call call_b exec_command {"cmd":"cat b.ts"}',
+    "result call_a: Process exited with code 0\nOutput:\nexport const a = 1;\n",
+    "result call_b: Process exited with code 1\nOutput:\ncat: b.ts: No such file\n",
+    "assistant: a.ts is fine; b.ts is missing, so I add it.",
+    'call call_p apply_patch {"input":"*** Begin Patch\\n*** Add File: b.ts\\n+export const b = 2;\\n*** End Patch\\n"}',
+    "result call_p: Success. Updated the following files:\nA b.ts\n",
+    "user: Now run the tests.",
+    "note: <skill>\n<name>tests</name>\nRun npm test.\n</skill>",
+    'call call_t exec_command {"cmd":"npm test"}',
+    "result call_t: 1 failing",
+    "assistant: One test fails.",
+    "user: Thanks.",
+  ]);
+  // A response's lines share its id, and each line continues the one before.
+  const lines = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines[1].message.id, lines[2].message.id);
+  assert.notEqual(lines[2].message.id, lines[5].message.id);
+  assert.deepEqual(lines.map((l, i) => l.parentUuid === (i ? lines[i - 1].uuid : null)), lines.map(() => true));
+  assert.equal(lines.find((l) => l.message.content[0]?.tool_use_id === "call_t").message.content[0].is_error, true);
+
+  // SessionEnd: Codex gives it three seconds, so braid saves and checks the session after the hook returns.
+  r.assistant("You're welcome.");
+  const stateFile = join(s.env.HOME!, ".braid", ".git", "braid", "sessions", `${ID}.json`);
+  const checked = () => JSON.parse(readFileSync(stateFile, "utf8")).verified?.at;
+  const before = checked();
+  assert.equal(hook("session-end", r.path).status, 0);
+  for (let i = 0; i < 100 && checked() === before; i++) spawnSync("sleep", ["0.1"]);
+  assert.deepEqual(JSON.parse(readFileSync(stateFile, "utf8")).verified?.ok, true);
+  assert.match(braid(env, repo, ["log", ID]).stdout, /assistant You're welcome\.\n$/);
+});
+
+test("a session continued in Codex is saved where it left off, and comes back to Claude Code", () => {
+  const s = sandbox();
+  const repo = clone(s, "kit", "kit@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  const codexHome = join(s.root, "codex");
+  mkdirSync(codexHome);
+  const env = { ...s.env, CODEX_HOME: codexHome };
+  braid(env, repo, ["init"]);
+  const t = new Transcript(s.root, ALICE);
+  t.user("Plan the release.");
+  const head = t.assistant("First, tag the version.");
+  const hookIn = JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo });
+  braid(env, repo, ["hook", "session-start"], hookIn);
+  braid(env, repo, ["hook", "stop"], hookIn);
+
+  const r = braid(env, repo, ["fork", "5b0e2c1a", "--to", "codex", "--cwd", repo]);
+  assert.equal(r.status, 0, r.stderr);
+  const id = /codex resume (\S+)$/m.exec(r.stdout)![1]!;
+  const file = join(codexHome, "sessions", readdirSync(join(codexHome, "sessions"), { recursive: true }).map(String).find((f) => f.endsWith(`${id}.jsonl`))!);
+  const copied = readFileSync(file, "utf8").trim().split("\n").length;
+  // Codex resumes the rollout braid wrote, and appends to it.
+  const append = (type: string, payload: object) => appendFileSync(file, JSON.stringify({ timestamp: "2026-11-09T11:00:00.000Z", type, payload }) + "\n");
+  append("event_msg", { type: "task_started", turn_id: "t1" });
+  append("response_item", { type: "message", role: "developer", content: [{ type: "input_text", text: "<permissions instructions>\nWrite in the workspace.\n</permissions instructions>" }] });
+  append("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: `<environment_context>\n  <cwd>${repo}</cwd>\n</environment_context>` }] });
+  append("turn_context", { cwd: repo, model: "gpt-5.5", model_provider: "openai" });
+  append("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "Then what?" }] });
+  append("response_item", { type: "message", role: "assistant", content: [{ type: "output_text", text: "Then write the notes." }] });
+  append("event_msg", { type: "task_complete", turn_id: "t1" });
+  const codexIn = JSON.stringify({ session_id: id, transcript_path: file, cwd: repo, hook_event_name: "Stop" });
+  braid(env, repo, ["hook", "session-start", "--agent", "codex"], codexIn);
+  braid(env, repo, ["hook", "stop", "--agent", "codex"], codexIn);
+
+  // The Codex session continues the conversation: it holds only what Codex added, from the Claude session's head.
+  const sessions = braid(env, repo, ["sessions"]).stdout;
+  assert.match(sessions, new RegExp(`${id.slice(0, 8)}\\s+conv 5b0e2c1a`));
+  assert.deepEqual(
+    braid(env, repo, ["log", id]).stdout.split("\n").filter(Boolean).map((l) => l.replace(/^\S+\s+/, "")),
+    ["user      Then what?", "assistant Then write the notes."],
+  );
+  const state = JSON.parse(readFileSync(join(s.env.HOME!, ".braid", ".git", "braid", "sessions", `${id}.json`), "utf8"));
+  assert.deepEqual([state.harness, state.copied], ["codex", copied]);
+  const saved = records(env, repo, storeOf(env, repo), `refs/sessions/${ALICE}/${id}`);
+  assert.equal(saved.find((x) => x.type === "message")?.parentId === undefined, false);
+  assert.equal(saved[0].parentId, head);
+  assert.equal(saved[0].ext.braid.actor.userAgent, "codex");
+  const v = braid(env, repo, ["verify", "--session", id]);
+  assert.equal(v.status, 0, v.stdout);
+
+  // Back in Claude Code: the Claude session's own lines, then what was said in Codex.
+  const back = braid(env, repo, ["fork", id.slice(0, 8), "--cwd", repo]);
+  assert.equal(back.status, 0, back.stderr);
+  const fork = /claude --resume (\S+)$/m.exec(back.stdout)![1]!;
+  const path = join(s.env.HOME!, ".claude", "projects", realpathSync(repo).replace(/[^A-Za-z0-9]/g, "-"), `${fork}.jsonl`);
+  assert.deepEqual(claudeSaid(path), ["user: Plan the release.", "thinking", "assistant: First, tag the version.", "user: Then what?", "assistant: Then write the notes."]);
 });

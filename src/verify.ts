@@ -8,20 +8,23 @@
 //   running, wait for the next save: they are noted, and are no problem.
 // - loads: the lines Claude Code reads to resume the transcript are the lines
 //   `braid fork` writes from the store, and the fork reads back as the same
-//   messages.
+//   messages. For a Codex session: the history Codex rebuilds from the
+//   rollout, without the context Codex gives again on resuming, is the history
+//   it rebuilds from a fork.
 // - store: git fsck finds nothing wrong, and every record's parent is in the
 //   conversation.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { claudeCode } from "@leostera/atxf/claude-code";
 import { readAgents, readRecords } from "./chunks.ts";
+import { codexText } from "./harness.ts";
 import { run } from "./git.ts";
 import { conversation } from "./load.ts";
-import { describe, lastTurn, type Rec } from "./records.ts";
+import { CODEX_CONTEXT, describe, lastTurn, type Rec } from "./records.ts";
 import { forkRecords, forkText, keptUuids, replayedIds, SOURCE_ONLY, type Line } from "./replay.ts";
 import { storeRef, type Repo } from "./repo.ts";
 import { loadState } from "./state.ts";
-import { nativeIds, readWindow, START, type Cursor } from "./transcript.ts";
+import { codexLine, nativeIds, readWindow, START, type Cursor, type Format } from "./transcript.ts";
 
 export interface Verified {
   session: string;
@@ -38,12 +41,12 @@ export interface Verified {
  * after the one before it: those of the lines before `until`, where the last
  * save stopped, and those of the lines written since.
  */
-function readAll(path: string, id: string, until?: number): { saved: Rec[]; since: Rec[] } {
+function readAll(path: string, id: string, until?: number, format: Format = "claude-code"): { saved: Rec[]; since: Rec[] } {
   const saved: Rec[] = [];
   const since: Rec[] = [];
   let cursor: Cursor = START;
   for (const [out, limit] of [[saved, until], [since, undefined]] as const) {
-    for (let w = readWindow(path, cursor, id, { until: limit }); w; w = w.more ? readWindow(path, cursor, id, { until: limit }) : undefined) {
+    for (let w = readWindow(path, cursor, id, { until: limit }, format); w; w = w.more ? readWindow(path, cursor, id, { until: limit }, format) : undefined) {
       out.push(...w.records.slice(w.fresh));
       cursor = w.cursor;
     }
@@ -236,6 +239,58 @@ function canonical(lines: Line[]): string[] {
 
 const isNative = (r: Rec) => (r.native as { source?: string } | undefined)?.source === "claude-code";
 
+type Item = Record<string, unknown>;
+const itemText = (content: unknown): string =>
+  Array.isArray(content) ? content.map((c) => (typeof (c as Item)?.text === "string" ? String((c as Item).text) : "")).join("") : typeof content === "string" ? content : "";
+const argsOf = (a: unknown): unknown => {
+  try {
+    return typeof a === "string" ? JSON.parse(a) : a;
+  } catch {
+    return a;
+  }
+};
+
+/**
+ * The history Codex rebuilds from a rollout's lines, each item as the model
+ * reads it, without the context Codex gives its model again when it resumes a
+ * session: its instructions, the environment and AGENTS.md. A compaction
+ * replaces what came before it.
+ */
+function codexHistory(lines: Line[]): string[] {
+  let items: Item[] = [];
+  for (const l of lines) {
+    const p = l.payload as Item | undefined;
+    if (l.type === "response_item" && p) items.push(p);
+    if (l.type === "compacted" && p) {
+      items = Array.isArray(p.replacement_history)
+        ? (p.replacement_history as Item[]).map((x) => ((x as { item?: Item }).item ?? x))
+        : [{ type: "message", role: "user", content: [{ type: "input_text", text: String(p.message ?? "") }] }];
+    }
+  }
+  return items.flatMap((p) => {
+    switch (p.type) {
+      case "message": {
+        const text = itemText(p.content);
+        if (p.role === "developer" || p.role === "system" || (p.role === "user" && CODEX_CONTEXT.test(text))) return [];
+        return [stable({ message: p.role, text: text.trim() })];
+      }
+      case "reasoning":
+        return [stable({ reasoning: p.encrypted_content ?? null })];
+      case "function_call":
+        return [stable({ call: p.name, id: p.call_id, args: argsOf(p.arguments) })];
+      case "custom_tool_call":
+        return [stable({ custom: p.name, id: p.call_id, input: p.input })];
+      case "function_call_output":
+      case "custom_tool_call_output": {
+        const o = p.output as unknown;
+        return [stable({ output: p.type, id: p.call_id, text: typeof o === "string" ? o : itemText((o as Item)?.content ?? o) })];
+      }
+      default:
+        return [stable({ item: p.type })];
+    }
+  });
+}
+
 /** What a message says, as a person reading it sees it: role, text, tool calls and results. */
 function said(r: Rec): string {
   const blocks = Array.isArray(r.content) ? (r.content as Record<string, unknown>[]) : [{ type: "text", text: r.content }];
@@ -258,11 +313,15 @@ export function verify(repo: Repo, session: string, remote: string): Verified {
   const agents = readAgents(ref, { gitDir: repo.store });
   const all = conversation(repo, state.conv, remote);
   const replayed = replayedIds(all.values());
-  const elsewhere = (id: string) => all.has(id) || replayed.has(id);
+  // A rollout braid wrote for Codex starts with copies of the session it continues, which are saved there.
+  const copied = (id: string) => codexLine(id) <= (state.copied ?? 0);
+  const elsewhere = (id: string) => all.has(id) || replayed.has(id) || copied(id);
+
+  const format: Format = state.harness === "codex" ? "codex" : "claude-code";
 
   // Saved.
   if (state.transcript && existsSync(state.transcript)) {
-    const { saved, since } = readAll(state.transcript, session, state.cursor?.offset);
+    const { saved, since } = readAll(state.transcript, session, state.cursor?.offset, format);
     const n = compare("saved", saved, stored, elsewhere, problems);
     checked.push(`saved: ${n} records of the transcript`);
     let pending = since.length;
@@ -284,7 +343,19 @@ export function verify(repo: Repo, session: string, remote: string): Verified {
 
   // Loads.
   const head = lastTurn(stored) ?? stored.at(-1)?.id;
-  if (head) {
+  if (head && format === "codex") {
+    // What Codex rebuilds to resume the rollout itself, against what it rebuilds from a fork.
+    const fork = forkRecords(all, stored, head);
+    const forked = codexHistory(codexText(fork, all, "/", [], session, new Date()).split("\n").filter(Boolean).map((l) => JSON.parse(l) as Line));
+    if (state.transcript && existsSync(state.transcript)) {
+      const resumed = codexHistory(readLines(state.transcript, state.cursor?.offset));
+      const at = resumed.findIndex((l, i) => l !== forked[i]);
+      if (at >= 0 || resumed.length !== forked.length) {
+        const i = at >= 0 ? at : Math.min(resumed.length, forked.length);
+        problems.push(`loads: Codex rebuilds ${resumed.length} items to resume the rollout and ${forked.length} from a fork; they differ from item ${i + 1}: ${(resumed[i] ?? forked[i] ?? "").slice(0, 120)}`);
+      } else checked.push(`loads: ${resumed.length} items, the same in a fork as in the rollout`);
+    } else checked.push(`loads: ${forked.length} items in a fork`);
+  } else if (head) {
     const fork = forkRecords(all, stored, head);
     const text = forkText(fork, session, "/");
     // Every message a fork writes reads back as it was saved.

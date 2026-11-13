@@ -1,4 +1,5 @@
-// Claude Code hooks: SessionStart registers the session, Stop saves each turn.
+// Agent hooks, Claude Code's and Codex's: SessionStart registers the session,
+// Stop saves each turn, SessionEnd saves the rest and checks the session.
 import { appendFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fetchInBackground } from "./fetch.ts";
@@ -14,13 +15,16 @@ import { register, save } from "./save.ts";
 import { cliPath, writePointer } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
 import { computeStatus, sessionName } from "./status.ts";
+import type { Format } from "./transcript.ts";
 import { verify } from "./verify.ts";
 
 export interface HookInput {
   session_id?: string;
-  transcript_path?: string;
+  transcript_path?: string | null;
   cwd?: string;
   source?: string;
+  /** The agent that ran the hook, as its hook command names it. */
+  agent?: Format;
 }
 
 /** Sessions behind the current branch, without any of their text. */
@@ -60,8 +64,9 @@ function otherRepos(session: string, current: Repo | undefined): Repo[] {
 export function sessionStart(input: HookInput): string {
   const session = input.session_id;
   if (!session) return "";
+  const transcript = input.transcript_path ?? undefined;
   writePointer();
-  recordSession(session, { transcript: input.transcript_path });
+  recordSession(session, { transcript });
   const envFile = process.env.CLAUDE_ENV_FILE;
   if (envFile) {
     const bin = join(dirname(dirname(cliPath())), "bin");
@@ -71,7 +76,7 @@ export function sessionStart(input: HookInput): string {
   if (!repo) return "";
   const config = readConfig(repo);
   if (config.gitHooks && !hooksInstalled(repo)) installHooks(repo);
-  register(repo, session, input.transcript_path);
+  register(repo, session, transcript, input.agent);
   recordSession(session, { repo: repo.top });
   const remote = config.remote;
   fetchInBackground(repo, remote, 0);
@@ -86,7 +91,7 @@ export function stop(input: HookInput): string {
   // One braid repository holds the session, whichever code repositories it ran and committed in.
   const repo = locate(input.cwd ?? process.cwd()) ?? otherRepos(session, undefined)[0];
   if (!repo) return "";
-  save(repo, session, input.transcript_path);
+  save(repo, session, input.transcript_path ?? undefined, { agent: input.agent });
   const remote = readConfig(repo).remote;
   fetchInBackground(repo, remote);
   const waiting = computeStatus(repo, session, remote).waiting;
@@ -108,7 +113,7 @@ export function sessionEnd(input: HookInput): string {
   const repos = [...(current ? [current] : []), ...otherRepos(session, current)];
   const repo = repos[0];
   if (!repo) return "";
-  const { state } = save(repo, session, input.transcript_path);
+  const { state } = save(repo, session, input.transcript_path ?? undefined, { agent: input.agent });
   if (state.chunks === 0) return "";
   for (const r of repos) if (state.review && readConfig(r).autopush) publish(r, session);
   // Each session is checked when it ends: saved as it happened, and loads back the same.

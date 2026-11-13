@@ -6,7 +6,7 @@ import { closeSync, existsSync, openSync, readSync, realpathSync } from "node:fs
 import { claudeCode, uuidFor } from "@leostera/atxf/claude-code";
 import { readRecords } from "./chunks.ts";
 import { conversation, type Found } from "./load.ts";
-import { braidOf, contextPath, forModel, lastTurn, type Rec } from "./records.ts";
+import { asCodexShowed, braidOf, contextPath, forModel, lastTurn, type Rec } from "./records.ts";
 import type { Harness } from "./harness.ts";
 import { userConfig, type Repo } from "./repo.ts";
 import { loadState, newState, saveState } from "./state.ts";
@@ -104,19 +104,45 @@ export function forkRecords(all: Map<string, Rec>, own: Rec[], head: string): Fo
   return { records: [...before, ...since], path };
 }
 
+/** Records as one line of history, each the child of the one before: the order an agent reads them in. */
+export const linear = (records: Rec[]): Rec[] => records.map((r, i) => ({ ...r, parentId: i ? records[i - 1]!.id : null }));
+
+/**
+ * Another agent's responses as Claude Code writes them: a response is one
+ * message, written a block per line under the response's id, and a model API
+ * takes a batch of parallel tool calls as one message, then their results.
+ * Codex writes each item of a response on its own, so the assistant messages
+ * between two others make one response.
+ */
+function asResponses(records: Rec[]): Rec[] {
+  let response: string | undefined;
+  return records.map((r) => {
+    if (r.type !== "message") return r;
+    if (r.role !== "assistant" || ownLine(r) || typeof r.responseId === "string") {
+      response = undefined;
+      return r;
+    }
+    response ??= `msg_${r.id}`;
+    return { ...r, responseId: response };
+  });
+}
+
 /**
  * A Claude Code transcript of a fork under a new session id. Each record goes
  * out as the very line Claude Code wrote, when braid keeps it, so Claude Code
  * resumes the fork as it resumes the source. Records from elsewhere (a
- * published session, a merge) are written by ATXF's converter when they are
- * on the context path. Lines keep their links to each other, under uuids
- * derived from the records' ids.
+ * published session, a merge, another agent's session) are written by ATXF's
+ * converter when they are on the context path, as their agent showed them to
+ * its model; a record it writes nothing for (another agent's settings, its
+ * bookkeeping) passes its place in the chain to its children. Lines keep their
+ * links to each other, under uuids derived from the records' ids.
  */
 export function forkText(fork: ForkRecords, session: string, cwd: string, pairs: [string, string][] = []): string {
   const { records, path } = fork;
   const header = { type: "transcript", atxf: "0.1", id: session, time: path[0]?.time ?? new Date().toISOString(), source: { agent: "braid", sessionId: session }, workspace: { cwd } };
+  // The converter writes the context path as one chain; it ends where a record left out would break it.
   const encoded = claudeCode
-    .fromAtxf({ header, records: forModel(rewrite(path, pairs), "anthropic") } as never, { carry: false, sessionId: session })
+    .fromAtxf({ header, records: linear(asResponses(forModel(rewrite(asCodexShowed(path, "claude-code"), pairs), "anthropic"))) } as never, { carry: false, sessionId: session })
     .split("\n")
     .filter(Boolean)
     .map((l) => JSON.parse(l) as Line);
@@ -133,8 +159,24 @@ export function forkText(fork: ForkRecords, session: string, cwd: string, pairs:
       continue;
     } else {
       const line = byUuid.get(uuidFor(r.id));
-      if (!line) continue;
+      if (!line) {
+        // Nothing written for it: its children continue from the line it continues from.
+        const parent = r.parentId ? lineOf.get(r.parentId) : undefined;
+        if (parent) lineOf.set(r.id, parent);
+        continue;
+      }
       lines.push({ r, line });
+      // A record the converter writes as several lines, as a compaction with the messages it kept: the rest follow
+      // it, and its children continue from the last.
+      let last = r.id;
+      for (let n = 2; byUuid.has(uuidFor(`${r.id}#${n}`)); n++) {
+        const id = `${r.id}#${n}`;
+        lines.push({ r: { ...r, id, parentId: last }, line: byUuid.get(uuidFor(id))! });
+        lineOf.set(id, uuidFor(id));
+        last = id;
+      }
+      lineOf.set(r.id, uuidFor(last));
+      continue;
     }
     lineOf.set(r.id, uuidFor(r.id));
   }
@@ -191,14 +233,11 @@ export function replay(repo: Repo, found: Found, remote: string, to: Harness, op
   const pairs: [string, string][] = [...(from && !within ? [[from, cwd] as [string, string]] : []), ...userConfig().paths];
   const { session, file, lines } = to.write(fork, all, cwd, pairs);
 
-  // The new session continues the source: its first save keeps only what is added after the copy. braid saves
-  // Claude Code's sessions, which are written from the source's own lines.
-  if (to.agent === "claude-code") {
-    const state = loadState(repo, session) ?? newState(session, file);
-    const first = own.find((r) => braidOf(r).actor);
-    state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : undefined, replayed: true, lines };
-    saveState(repo, state);
-  }
+  // The new session continues the source: its first save keeps only what the agent adds after the copy.
+  const state = loadState(repo, session) ?? newState(session, file, to.agent);
+  const first = own.find((r) => braidOf(r).actor);
+  state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : undefined, replayed: true, lines };
+  saveState(repo, state);
   return { session, file, cwd, records: lines };
 }
 

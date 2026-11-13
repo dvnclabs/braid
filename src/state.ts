@@ -18,7 +18,8 @@ export interface PendingMerge {
 export interface SessionState {
   session: string;
   conv: string;
-  harness: "claude-code" | "openclaw";
+  /** The agent the session runs in, whose transcript braid reads. */
+  harness: "claude-code" | "codex" | "openclaw";
   transcript?: string;
   /** For imported OpenClaw sessions: the last event imported. */
   importedSeq?: number;
@@ -39,6 +40,8 @@ export interface SessionState {
   /** A session this one forks from, set by `braid fork` before the first save. */
   /** `lines`: how many lines a replayed fork wrote, all copies of the source. */
   forkFrom?: { session: string; conv: string; head: string; actor?: string; replayed?: boolean; lines?: number };
+  /** A rollout braid wrote for Codex: its first lines, this many, are copies of the session it continues, saved there. */
+  copied?: number;
   /** The last braid verify, run when the session ended. */
   verified?: { ok: boolean; at: string; problems?: string[] };
   /** The code repository the session ran in, whose .braidignore applies to it wherever it is published. */
@@ -81,8 +84,8 @@ export function saveState(repo: Repo, state: SessionState): void {
   renameSync(tmp, p);
 }
 
-export function newState(session: string, transcript?: string): SessionState {
-  return { session, conv: session, harness: "claude-code", transcript, chunks: 0 };
+export function newState(session: string, transcript?: string, harness: SessionState["harness"] = "claude-code"): SessionState {
+  return { session, conv: session, harness, transcript, chunks: 0 };
 }
 
 const sleeper = new Int32Array(new SharedArrayBuffer(4));

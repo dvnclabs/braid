@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { readAgents, readRecords } from "./chunks.ts";
 import { forEachRef, type GitOptions } from "./git.ts";
-import { braidOf, contextPath, describe, isTurn, lastTurn, type Rec } from "./records.ts";
+import { braidOf, contextPath, describe, isCodexContext, isTurn, lastTurn, type Rec } from "./records.ts";
 import { sessionsFor } from "./links.ts";
 import { AUTOPILOT } from "./fetch.ts";
 import { readConfig, remoteRefs, SESSION_REFS, type Repo } from "./repo.ts";
@@ -94,7 +94,7 @@ export function quote(title: string, records: Rec[], budget = 60_000): string {
   const lines: string[] = [];
   let used = 0;
   for (const r of records) {
-    if (r.type === "label" || r.type === "transcript") continue;
+    if (r.type === "label" || r.type === "transcript" || isCodexContext(r)) continue;
     const text = describe(r, r.role === "tool" ? 300 : 1200);
     if (!text) continue;
     const line = `[${r.id.slice(0, 12)} · ${speaker(r)}] ${text}`;

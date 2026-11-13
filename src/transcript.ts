@@ -1,11 +1,29 @@
-// Reading a Claude Code transcript incrementally. Each save converts only the
-// lines written since the previous save, plus an overlap before them so that
-// references across the boundary resolve, and never more than a bounded window
-// at once, so a transcript of any size saves in bounded memory.
+// Reading an agent's transcript incrementally: a Claude Code session, or a
+// Codex rollout. Each save converts only the lines written since the previous
+// save, plus an overlap before them so that references across the boundary
+// resolve, and never more than a bounded window at once, so a transcript of
+// any size saves in bounded memory.
 import { createHash } from "node:crypto";
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import { claudeCode } from "@leostera/atxf/claude-code";
+import { codex } from "@leostera/atxf/codex";
 import type { Rec } from "./records.ts";
+
+/** The agents whose transcripts braid reads. */
+export type Format = "claude-code" | "codex";
+
+/** The agent that wrote a transcript, from its first line: Codex starts a rollout with the session's metadata. */
+export function formatOf(path: string | undefined): Format | undefined {
+  if (!path || !existsSync(path)) return undefined;
+  const fd = openSync(path, "r");
+  try {
+    const head = readAt(fd, 0, 4096).toString("utf8");
+    if (!head.trim()) return undefined;
+    return /^\{[^\n]*"type"\s*:\s*"session_meta"/.test(head) ? "codex" : "claude-code";
+  } finally {
+    closeSync(fd);
+  }
+}
 
 export interface Cursor {
   /** Byte offset just past the last line saved. */
@@ -66,14 +84,16 @@ export function intact(path: string, cursor: Cursor): boolean {
 
 /**
  * The converter names records without a uuid after their line in the text it
- * was given. Renumbers them to their line in the whole file, scoped to the
- * session, since line numbers repeat across sessions.
+ * was given: every record of a Codex rollout, which has no ids. Renumbers them
+ * to their line in the whole file, scoped to the session, since line numbers
+ * repeat across sessions.
  */
-function renumber(records: Rec[], base: number, session: string): Rec[] {
+function renumber(records: Rec[], base: number, session: string, format: Format = "claude-code"): Rec[] {
   const tag = session.slice(0, 8);
+  const prefix = format === "codex" ? "codex-" : "claude-line-";
   const fix = (v: unknown) => {
-    const m = typeof v === "string" ? /^claude-line-(\d+)(.*)$/.exec(v) : null;
-    return m ? `claude-line-${Number(m[1]) + base}${m[2]}@${tag}` : v;
+    const m = typeof v === "string" && v.startsWith(prefix) ? /^(\d+)(.*)$/.exec(v.slice(prefix.length)) : null;
+    return m ? `${prefix}${Number(m[1]) + base}${m[2]}@${tag}` : v;
   };
   return records.map((r) => {
     const out: Rec = { ...r, id: fix(r.id) as string };
@@ -102,6 +122,9 @@ function units(buf: Buffer, from: number, to: number): number {
   }
   return filled ? n + 1 : n;
 }
+
+/** The line of the whole file a Codex record was read from, as renumber names it. */
+export const codexLine = (id: string): number => Number(/^codex-(\d+)@/.exec(id)?.[1] ?? Number.NaN);
 
 /** The index of the first record read from a line after the first `lines` units: each line ends up in one record's `native`. */
 function firstAfter(records: Rec[], lines: number): number {
@@ -160,13 +183,18 @@ function lastLine(buf: Buffer, end: number): number {
   return end < 2 ? 0 : buf.lastIndexOf(NL, end - 2) + 1;
 }
 
-/** Converts the complete lines after `cursor`, or returns undefined when there are none. */
 /**
- * The next window of a transcript after `cursor`. `limits` sets the window's
- * size and overlap, and `until` a byte offset, at a line boundary, to read no
- * further than.
+ * The next window of a transcript after `cursor`, read as `format`. `limits`
+ * sets the window's size and overlap, and `until` a byte offset, at a line
+ * boundary, to read no further than.
  */
-export function readWindow(path: string, cursor: Cursor, session: string, limits: { maxBytes?: number; overlap?: number; until?: number } = {}): Window | undefined {
+export function readWindow(
+  path: string,
+  cursor: Cursor,
+  session: string,
+  limits: { maxBytes?: number; overlap?: number; until?: number } = {},
+  format: Format = "claude-code",
+): Window | undefined {
   const { maxBytes = MAX_WINDOW, overlap = OVERLAP, until = Infinity } = limits;
   const fd = openSync(path, "r");
   try {
@@ -185,13 +213,29 @@ export function readWindow(path: string, cursor: Cursor, session: string, limits
     // Whole lines only: a line still being written waits for the next save.
     const used = buf.lastIndexOf(NL) + 1;
     if (start + used <= cursor.offset) return undefined;
+    let header: Record<string, unknown>;
     const base = cursor.lines - newlines(buf, 0, cursor.offset - start);
-    const t = claudeCode.toAtxf(buf.toString("utf8", 0, used), { integrity: false });
-    const records = nativeIds(renumber(t.records as unknown as Rec[], base, session));
+    const before = units(buf, 0, cursor.offset - start);
+    const text = buf.toString("utf8", 0, used);
+    let records: Rec[];
+    let fresh: number;
+    if (format === "codex") {
+      // A rollout's first line is the session's metadata, which goes in the header and holds no record.
+      const t = codex.toAtxf(text, { integrity: false });
+      records = renumber(t.records as unknown as Rec[], base, session, format);
+      const at = records.findIndex((r) => codexLine(r.id) > base + before);
+      fresh = at < 0 ? records.length : at;
+      header = t.header as unknown as Record<string, unknown>;
+    } else {
+      const t = claudeCode.toAtxf(text, { integrity: false });
+      records = nativeIds(renumber(t.records as unknown as Rec[], base, session));
+      fresh = firstAfter(records, before);
+      header = t.header as unknown as Record<string, unknown>;
+    }
     return {
       records,
-      fresh: firstAfter(records, units(buf, 0, cursor.offset - start)),
-      header: t.header as unknown as Record<string, unknown>,
+      fresh,
+      header,
       cursor: {
         offset: start + used,
         lines: base + newlines(buf, 0, used),

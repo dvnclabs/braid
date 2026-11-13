@@ -2,7 +2,7 @@
 
 **Efficient session manager.** braid saves every coding-agent session as it happens, in git, on your machine. You can go back to any point of a conversation, fork it into a new window, edit it before anyone else sees it, and, when you choose, share it with your team next to the code it produced.
 
-> **v0.1, for Claude Code.** Any saved session also continues in Codex (`braid fork --to codex`); saving Codex sessions is next. See [Status of v0.1](docs/design.md#status-of-v01) for what is built and what is planned.
+> **v0.1, for Claude Code and Codex.** braid saves the sessions of both, and any saved session continues in either. See [Status of v0.1](docs/design.md#status-of-v01) for what is built and what is planned.
 
 ## Install
 
@@ -15,6 +15,8 @@ You need Node 22 or later and git. In Claude Code:
 ```
 
 `/braid:init` installs the `braid` command and braid's part of the status line, creates `~/.braid`, the braid repository where every conversation is kept, and saves the conversation you run it in, from its first turn. From then on braid saves every session on the machine, after each turn. Inside a git repository it also writes `.braid/config.toml` and `.braidignore` there, for the settings below.
+
+When Codex is on the machine, `braid init` also adds braid's hooks to `~/.codex/hooks.json`, so braid saves Codex sessions the same way. Codex runs a new hook only once you trust it: open `/hooks` in Codex once and trust braid's three. Without Claude Code, clone this repository and run `node dist/braid.mjs init` in a terminal.
 
 ## Settings
 
@@ -50,7 +52,7 @@ Work with Claude Code as usual. The status line shows where your session stands:
 
 **Go back.** `braid log` lists the fork points autofork marked, and `/braid:fork @2` gives you the command to continue the conversation as it was before that turn, in a new window. `/braid:fork` alone branches the conversation as it is now.
 
-**Continue in Codex.** A session is braid's own, whichever agent wrote it. `braid fork --to codex` writes this conversation, or `braid fork <session> --to codex` another, as a new Codex session, and gives you `cd <dir> && codex resume <id>`. Codex gets the conversation as Claude's model read it: messages, tool calls and their results. Claude's reasoning stays behind, since only Anthropic's models can read it back.
+**Claude Code and Codex.** A session is braid's own, whichever agent wrote it, and it continues in either. `braid fork --to codex` writes this conversation, or `braid fork <session> --to codex` another, as a new Codex session, and gives you `cd <dir> && codex resume <id>`. `braid fork <session> --to claude-code` writes a Codex session as a new Claude Code session, and gives you `cd <dir> && claude --resume <id>`; a fork continues in the agent you ask from, unless you name another. Each agent gets the conversation as the other's model read it: messages, tool calls and their results. Reasoning stays behind, since only the provider that wrote it can read it back, and so do the instructions and environment each agent gives its own model. A session continued in the other agent is saved as part of the same conversation.
 
 **Edit before sharing.** `braid edit`, in a terminal or through `/braid:edit`, lists the session as it would be published, one numbered line per record, after redaction:
 
@@ -120,7 +122,7 @@ braid verify 9e36aa15: ok
   ✓ store: 1 chunks, git fsck
 ```
 
-`npm run check:resume -- <transcript.jsonl>...` goes one step further: Claude Code resumes the session and a fork braid writes from its store, against a local server that records the request Claude Code would send to the model, and the two requests are compared byte for byte. With `--to codex`, Codex resumes the fork instead, and the conversation in its request is compared with Claude Code's, item by item. No model is called and nothing leaves the machine.
+`npm run check:resume -- <transcript.jsonl>...` goes one step further: Claude Code resumes the session and a fork braid writes from its store, against a local server that records the request Claude Code would send to the model, and the two requests are compared byte for byte. With `--to codex`, Codex resumes the fork instead, and the conversation in its request is compared with Claude Code's, item by item. Given a Codex rollout, Codex resumes the original and Claude Code the fork. No model is called and nothing leaves the machine.
 
 ## Privacy
 
@@ -137,6 +139,7 @@ npm install
 npm run check                                  # typecheck, tests, and the bundle in dist/
 npm run check:resume -- ~/.claude/projects/*/*.jsonl   # forks resume in Claude Code as the originals do
 npm run check:resume -- --to codex ~/.claude/projects/*/*.jsonl   # and Codex gets the conversation Claude's model read
+npm run check:resume -- ~/.codex/sessions/*/*/*/rollout-*.jsonl     # and Claude Code the one Codex's model read
 ```
 
 `dist/braid.mjs` is committed, because the plugin runs it straight from the repository. `npm run check` rebuilds it, so commit it together with the change to `src/`.

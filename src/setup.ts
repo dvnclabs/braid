@@ -8,6 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installHooks, uninstallHooks } from "./githooks.ts";
 import { configDir, ensureStore, expandPath, findRepo, homeFor, homeRepo, isRepo, readConfig, userConfig, type Repo } from "./repo.ts";
+import { shellWord } from "./replay.ts";
 
 export { configDir };
 
@@ -179,7 +180,52 @@ cli="\${XDG_CONFIG_HOME:-$HOME/.config}/braid/cli"
 exec node "$(cat "$cli")" "$@"
 `;
 
-/** Per machine: a `braid` command on PATH, and braid's part in Claude Code's status line. `undo` restores the previous status line. */
+const codexHome = () => process.env.CODEX_HOME || join(homedir(), ".codex");
+
+type HookGroup = { matcher?: string; hooks?: { type?: string; command?: string; timeout?: number }[] };
+
+/** braid's own hook commands in Codex's hooks.json, by the command they run. */
+const isBraidHook = (h: { command?: string }) => / hook (session-start|stop|session-end) --agent codex$/.test(h.command ?? "");
+
+/**
+ * braid's hooks in Codex's hooks.json, when Codex is on this machine: Stop
+ * saves each turn, SessionStart registers a session, SessionEnd saves the rest
+ * and checks it (Codex gives it three seconds, so braid does that work after).
+ * `undo` takes them out. Other hooks stay as they are.
+ */
+function codexHooks(bin: string, undo: boolean): string[] {
+  const home = codexHome();
+  if (!existsSync(home)) return [];
+  const file = join(home, "hooks.json");
+  let config: { hooks?: Record<string, HookGroup[]>; [k: string]: unknown } = {};
+  if (existsSync(file)) {
+    try {
+      config = JSON.parse(readFileSync(file, "utf8")) as typeof config;
+    } catch {
+      return [`left ${file} alone: it is not valid JSON, so braid cannot add its hooks to it`];
+    }
+  }
+  const hooks: Record<string, HookGroup[]> = { ...(config.hooks ?? {}) };
+  for (const event of Object.keys(hooks)) {
+    hooks[event] = (hooks[event] ?? []).map((g) => ({ ...g, hooks: (g.hooks ?? []).filter((h) => !isBraidHook(h)) })).filter((g) => (g.hooks ?? []).length > 0);
+    if (hooks[event]!.length === 0) delete hooks[event];
+  }
+  if (!undo) {
+    const command = (name: string) => `${shellWord(bin)} hook ${name} --agent codex`;
+    const add = (event: string, name: string, timeout: number) => (hooks[event] = [...(hooks[event] ?? []), { hooks: [{ type: "command", command: command(name), timeout }] }]);
+    add("SessionStart", "session-start", 15);
+    add("Stop", "stop", 30);
+    add("SessionEnd", "session-end", 3);
+  }
+  const text = JSON.stringify({ ...config, hooks }, null, 2) + "\n";
+  if (existsSync(file) && readFileSync(file, "utf8") === text) return [];
+  writeFileSync(file, text);
+  return undo
+    ? [`took braid's hooks out of ${file}`]
+    : [`added braid's hooks to ${file}, so braid saves Codex sessions too: open /hooks in Codex once to trust them`];
+}
+
+/** Per machine: a `braid` command on PATH, braid's part in Claude Code's status line, and its hooks in Codex. `undo` restores the previous status line and takes the hooks out. */
 export function setup(opts: { undo?: boolean } = {}): string[] {
   const notes: string[] = [];
   const settingsFile = settingsPath();
@@ -192,7 +238,7 @@ export function setup(opts: { undo?: boolean } = {}): string[] {
     if (prev.previous) settings.statusLine = { type: "command", command: prev.previous, ...(prev.refreshInterval ? { refreshInterval: prev.refreshInterval } : {}) };
     else delete settings.statusLine;
     writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + "\n");
-    return [`restored the previous status line in ${settingsFile}`];
+    return [`restored the previous status line in ${settingsFile}`, ...codexHooks(join(homedir(), ".local", "bin", "braid"), true)];
   }
 
   writePointer();
@@ -212,5 +258,6 @@ export function setup(opts: { undo?: boolean } = {}): string[] {
     writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + "\n");
     notes.push(`status line set in ${settingsFile}${current?.command ? "; braid runs your previous one first" : ""}`);
   }
+  notes.push(...codexHooks(join(bin, "braid"), false));
   return notes;
 }
