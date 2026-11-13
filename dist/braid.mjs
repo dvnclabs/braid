@@ -385,7 +385,7 @@ function userConfig() {
   };
   const section = /^\s*\[paths\]\s*$([\s\S]*?)(?=^\s*\[|$(?![\s\S]))/m.exec(text)?.[1] ?? "";
   const paths = [...section.matchAll(/^\s*"([^"]+)"\s*=\s*"([^"]+)"/gm)].map((m) => [m[1], m[2]]);
-  const autopush = flag("autopush") ?? (/^\s*publish\s*=\s*"off"/m.test(top) ? false : void 0);
+  const autopush = flag("autopush");
   const repo = /^\s*repo\s*=\s*"([^"]+)"/m.exec(top)?.[1];
   return { repo, autopilot: flag("autopilot"), autofork: flag("autofork"), autocommit: flag("autocommit"), autopush, paths };
 }
@@ -407,7 +407,7 @@ function readConfig(repo) {
   config2.autopilot = flag("autopilot") ?? config2.autopilot;
   config2.autofork = flag("autofork") ?? config2.autofork;
   config2.autocommit = flag("autocommit") ?? config2.autocommit;
-  config2.autopush = flag("autopush") ?? (keys.get("publish") === "off" ? false : config2.autopush);
+  config2.autopush = flag("autopush") ?? config2.autopush;
   const link = keys.get("link");
   if (link === "trailer" || link === "store") config2.link = link;
   if (keys.get("remote")) config2.remote = keys.get("remote");

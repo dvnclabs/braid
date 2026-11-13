@@ -164,7 +164,7 @@ secrets
   assert.equal(redactString("ran /home/alice/dev/app and C:\\Users\\bob\\x and /Users/carol", counts), "ran ~/dev/app and ~\\x and ~");
 });
 
-test("autopilot by default, and a config from before autopush keeps git push from publishing", () => {
+test("autopilot by default, and the settings that change it", () => {
   const dir = mkdtempSync(join(tmpdir(), "braid-config-"));
   const home = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = join(dir, "config");
@@ -175,10 +175,8 @@ test("autopilot by default, and a config from before autopush keeps git push fro
     write("");
     const d = readConfig(repo);
     assert.deepEqual([d.autopilot, d.autofork, d.autopush, d.link, d.autocommit], [true, true, false, "store", false], "the defaults: autopilot, so no autopush and no trailers");
-    write('autopilot = false\npublish = "off"\n');
-    assert.equal(readConfig(repo).autopush, false, "a public repository's old config");
-    write('autopilot = false\npublish = "off"\nautopush = true\n');
-    assert.equal(readConfig(repo).autopush, true, "an explicit autopush wins");
+    write("autopilot = false\nautopush = false\n");
+    assert.equal(readConfig(repo).autopush, false, "autopush off");
     write("autopilot = false\n");
     assert.deepEqual([readConfig(repo).autopush, readConfig(repo).autocommit, readConfig(repo).link], [true, false, "trailer"], "the defaults off autopilot");
     mkdirSync(join(dir, "config", "braid"), { recursive: true });

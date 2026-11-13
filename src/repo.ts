@@ -169,8 +169,7 @@ export function userConfig(): UserConfig {
   };
   const section = /^\s*\[paths\]\s*$([\s\S]*?)(?=^\s*\[|$(?![\s\S]))/m.exec(text)?.[1] ?? "";
   const paths = [...section.matchAll(/^\s*"([^"]+)"\s*=\s*"([^"]+)"/gm)].map((m) => [m[1]!, m[2]!] as [string, string]);
-  // publish = "off", from before autopush, still keeps git push from publishing.
-  const autopush = flag("autopush") ?? (/^\s*publish\s*=\s*"off"/m.test(top) ? false : undefined);
+  const autopush = flag("autopush");
   const repo = /^\s*repo\s*=\s*"([^"]+)"/m.exec(top)?.[1];
   return { repo, autopilot: flag("autopilot"), autofork: flag("autofork"), autocommit: flag("autocommit"), autopush, paths };
 }
@@ -201,8 +200,7 @@ export function readConfig(repo: Repo): Config {
   config.autopilot = flag("autopilot") ?? config.autopilot;
   config.autofork = flag("autofork") ?? config.autofork;
   config.autocommit = flag("autocommit") ?? config.autocommit;
-  // A config written before autopush, with publish = "off" (public repositories), keeps git push from publishing.
-  config.autopush = flag("autopush") ?? (keys.get("publish") === "off" ? false : config.autopush);
+  config.autopush = flag("autopush") ?? config.autopush;
   const link = keys.get("link");
   if (link === "trailer" || link === "store") config.link = link;
   if (keys.get("remote")) config.remote = keys.get("remote")!;
