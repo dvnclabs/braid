@@ -10,7 +10,7 @@ import { findRepo, isEnabled, locate, readConfig, remoteRefs, SESSION_REFS, type
 import { colors, computeStatus, convOf, render } from "./status.ts";
 import { printable } from "./records.ts";
 import { loadState } from "./state.ts";
-import { configDir } from "./setup.ts";
+import { configDir, isBraidLine } from "./setup.ts";
 
 interface StatusInput {
   session_id?: string;
@@ -24,7 +24,8 @@ function previous(stdin: string): string {
   const file = join(configDir(), "statusline.json");
   if (!existsSync(file)) return "";
   const { previous } = JSON.parse(readFileSync(file, "utf8")) as { previous?: string };
-  if (!previous) return "";
+  // braid never runs another braid's status line before its own.
+  if (!previous || isBraidLine(previous)) return "";
   const r = spawnSync("sh", ["-c", previous], { input: stdin, encoding: "utf8", timeout: 3000 });
   return (r.stdout ?? "").trimEnd();
 }

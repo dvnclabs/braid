@@ -225,6 +225,9 @@ function codexHooks(bin: string, undo: boolean): string[] {
     : [`added braid's hooks to ${file}, so braid saves Codex sessions too: open /hooks in Codex once to trust them`];
 }
 
+/** Whether a status line command is braid's own, wherever that braid is installed. */
+export const isBraidLine = (command?: string): boolean => !!command && /(^|[/\s"'])braid(\.mjs)?["']? statusline\s*$/.test(command.trim());
+
 /** Per machine: a `braid` command on PATH, braid's part in Claude Code's status line, and its hooks in Codex. `undo` restores the previous status line and takes the hooks out. */
 export function setup(opts: { undo?: boolean } = {}): string[] {
   const notes: string[] = [];
@@ -252,7 +255,8 @@ export function setup(opts: { undo?: boolean } = {}): string[] {
   const command = `${join(bin, "braid")} statusline`;
   if (current?.command !== command) {
     mkdirSync(configDir(), { recursive: true });
-    writeFileSync(saved, JSON.stringify({ previous: current?.command ?? "", refreshInterval: current?.refreshInterval }, null, 2) + "\n");
+    // Another braid's status line, from a copy set up under another home, is braid's own: what ran before it stays the previous one.
+    if (!isBraidLine(current?.command)) writeFileSync(saved, JSON.stringify({ previous: current?.command ?? "", refreshInterval: current?.refreshInterval }, null, 2) + "\n");
     settings.statusLine = { type: "command", command, refreshInterval: 30 };
     mkdirSync(dirname(settingsFile), { recursive: true });
     writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + "\n");

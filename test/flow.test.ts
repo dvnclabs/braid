@@ -1393,3 +1393,26 @@ test("braid shows what a session is about: its title in the status line and brai
   assert.equal(inCodex?.split("\n")[0], `braid · ${id.slice(0, 8)} · retries-v2, a fork of 5b0e2c1a`);
   assert.match(inCodex!, /\nLast recap, [^:]+: You're adding retries to the webhook sender; backoff is in, next is a time budget\.$/);
 });
+
+test("braid init keeps the status line that ran before braid, also over another braid's", () => {
+  const s = sandbox();
+  const repo = clone(s, "joe", "joe@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  const settings = join(s.env.HOME!, ".claude", "settings.json");
+  mkdirSync(join(s.env.HOME!, ".claude"), { recursive: true });
+  writeFileSync(settings, JSON.stringify({ statusLine: { type: "command", command: "echo mine" } }));
+  braid(s.env, repo, ["init"]);
+  const saved = join(s.env.XDG_CONFIG_HOME!, "braid", "statusline.json");
+  assert.equal(JSON.parse(readFileSync(saved, "utf8")).previous, "echo mine");
+
+  // A braid set up under another home left its own status line here: init keeps "echo mine" as the one before braid.
+  writeFileSync(settings, JSON.stringify({ statusLine: { type: "command", command: "/tmp/elsewhere/.local/bin/braid statusline" } }));
+  braid(s.env, repo, ["init"]);
+  assert.equal(JSON.parse(readFileSync(saved, "utf8")).previous, "echo mine");
+  const line = (env: NodeJS.ProcessEnv = {}) => braid(s.env, repo, ["statusline"], JSON.stringify({ session_id: ALICE, workspace: { current_dir: repo } }), { NO_COLOR: "1", ...env }).stdout.trim();
+  assert.match(line(), /^mine · 5b0e2c1a/);
+
+  // And a previous line that is braid's own is never run before braid's.
+  writeFileSync(saved, JSON.stringify({ previous: "/tmp/elsewhere/.local/bin/braid statusline" }));
+  assert.match(line(), /^5b0e2c1a/);
+});

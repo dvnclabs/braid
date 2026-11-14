@@ -3662,6 +3662,7 @@ function codexHooks(bin, undo) {
   writeFileSync7(file2, text);
   return undo ? [`took braid's hooks out of ${file2}`] : [`added braid's hooks to ${file2}, so braid saves Codex sessions too: open /hooks in Codex once to trust them`];
 }
+var isBraidLine = (command) => !!command && /(^|[/\s"'])braid(\.mjs)?["']? statusline\s*$/.test(command.trim());
 function setup(opts = {}) {
   const notes = [];
   const settingsFile = settingsPath();
@@ -3685,7 +3686,7 @@ function setup(opts = {}) {
   const command = `${join10(bin, "braid")} statusline`;
   if (current?.command !== command) {
     mkdirSync7(configDir(), { recursive: true });
-    writeFileSync7(saved, JSON.stringify({ previous: current?.command ?? "", refreshInterval: current?.refreshInterval }, null, 2) + "\n");
+    if (!isBraidLine(current?.command)) writeFileSync7(saved, JSON.stringify({ previous: current?.command ?? "", refreshInterval: current?.refreshInterval }, null, 2) + "\n");
     settings.statusLine = { type: "command", command, refreshInterval: 30 };
     mkdirSync7(dirname2(settingsFile), { recursive: true });
     writeFileSync7(settingsFile, JSON.stringify(settings, null, 2) + "\n");
@@ -5164,7 +5165,7 @@ function previous(stdin) {
   const file2 = join15(configDir(), "statusline.json");
   if (!existsSync16(file2)) return "";
   const { previous: previous2 } = JSON.parse(readFileSync10(file2, "utf8"));
-  if (!previous2) return "";
+  if (!previous2 || isBraidLine(previous2)) return "";
   const r = spawnSync4("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
   return (r.stdout ?? "").trimEnd();
 }
