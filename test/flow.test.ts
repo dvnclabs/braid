@@ -2,7 +2,7 @@
 // Alice merges the review. Every step goes through the CLI and real git.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { braid, clone, must, Rollout, run, sandbox, storeOf, Transcript } from "./helpers.ts";
@@ -934,6 +934,13 @@ test("a session continues in Codex: braid fork --to codex writes what the model 
   assert.equal(r.status, 0, r.stderr);
   const id = /codex resume (\S+)$/m.exec(r.stdout)![1]!;
   assert.match(r.stdout, /^braid: wrote 5b0e2c1a as a new Codex session\. To continue it in a new window, run in a terminal:\n {2}cd \S+\/elsewhere && codex resume [0-9a-f-]{36}\n$/);
+  // The same fork asked for again is the same session; --new writes another.
+  const twice = braid(s.env, repo, ["fork", "5b0e2c1a", "--to", "codex", "--cwd", elsewhere], undefined, { CODEX_HOME: codexHome });
+  assert.match(twice.stdout, new RegExp(`^braid: 5b0e2c1a is already a Codex session, from an earlier fork\\. To continue it in a new window, run in a terminal:\\n {2}cd \\S+ && codex resume ${id}\\nbraid fork --new writes another\\.\\n$`));
+  const another = braid(s.env, repo, ["fork", "5b0e2c1a", "--to", "codex", "--cwd", elsewhere, "--new"], undefined, { CODEX_HOME: codexHome });
+  const other = /codex resume (\S+)$/m.exec(another.stdout)![1]!;
+  assert.notEqual(other, id);
+  rmSync(join(codexHome, "sessions", readdirSync(join(codexHome, "sessions"), { recursive: true }).map(String).find((f) => f.endsWith(`${other}.jsonl`))!));
   const files = readdirSync(join(codexHome, "sessions"), { recursive: true }).map(String).filter((f) => f.endsWith(".jsonl"));
   assert.equal(files.length, 1);
   assert.match(files[0]!, new RegExp(`^\\d{4}/\\d{2}/\\d{2}/rollout-\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-${id}\\.jsonl$`));

@@ -2,7 +2,7 @@
 
 // src/cli.ts
 import { spawn as spawn3, spawnSync as spawnSync5 } from "node:child_process";
-import { appendFileSync as appendFileSync2, existsSync as existsSync16, mkdirSync as mkdirSync10, mkdtempSync as mkdtempSync2, readdirSync as readdirSync6, readFileSync as readFileSync11, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
+import { appendFileSync as appendFileSync2, existsSync as existsSync17, mkdirSync as mkdirSync10, mkdtempSync as mkdtempSync2, readdirSync as readdirSync7, readFileSync as readFileSync11, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir7, tmpdir as tmpdir2 } from "node:os";
 import { join as join16 } from "node:path";
 import { parseArgs } from "node:util";
@@ -842,6 +842,7 @@ function pathWithheld(records, rules, top) {
 }
 
 // src/replay.ts
+import { randomUUID } from "node:crypto";
 import { closeSync, existsSync as existsSync5, openSync, readSync, realpathSync as realpathSync3 } from "node:fs";
 
 // node_modules/@leostera/atxf/dist/types.js
@@ -2160,7 +2161,11 @@ function replay(repo, found, remote, to, opts = {}) {
   const from = sourceCwd([...all.values()]);
   const within = !!from && (from === cwd || cwd.startsWith(`${from}/`) || from.startsWith(`${cwd}/`));
   const pairs = [...from && !within ? [[from, cwd]] : [], ...userConfig().paths];
-  const { session, file: file2, lines } = to.write(fork, all, cwd, pairs);
+  const derived = uuidFor(`braid fork ${found.session} ${head} ${to.agent} ${cwd}`);
+  const before = opts.fresh ? void 0 : to.existing(derived, cwd);
+  if (before) return { session: derived, file: before, cwd, records: 0, existing: true };
+  const session = opts.fresh || (loadState(repo, derived)?.chunks ?? 0) > 0 ? randomUUID() : derived;
+  const { file: file2, lines } = to.write(fork, all, cwd, pairs, session);
   const state = loadState(repo, session) ?? newState(session, file2, to.agent);
   const first = own.find((r) => braidOf(r).actor);
   state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : void 0, replayed: true, lines };
@@ -2453,7 +2458,7 @@ function recordSession(session, update2) {
 import { existsSync as existsSync9, readdirSync as readdirSync3, readFileSync as readFileSync6 } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join as join8 } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 
 // src/points.ts
 var BIG = { files: 5, calls: 30 };
@@ -3160,7 +3165,7 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
     if (target) {
       out.push({
         type: "label",
-        id: `braid-label-${randomUUID()}`,
+        id: `braid-label-${randomUUID2()}`,
         time: now,
         targetId: target,
         label: `review/${actor.actorId.split("@")[0]}`,
@@ -3225,7 +3230,7 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
       const kind = !c.sha ? { commit: {} } : autocommit ? { commit: { sha: c.sha } } : { code: { sha: c.sha } };
       out.push({
         type: "label",
-        id: `braid-commit-${randomUUID()}`,
+        id: `braid-commit-${randomUUID2()}`,
         time: now,
         targetId: target,
         label: c.message || "commit",
@@ -3426,8 +3431,8 @@ function prePush(repo, remote, stdin) {
 }
 
 // src/hooks.ts
-import { appendFileSync, existsSync as existsSync13 } from "node:fs";
-import { dirname as dirname3, join as join13 } from "node:path";
+import { appendFileSync, existsSync as existsSync14 } from "node:fs";
+import { dirname as dirname4, join as join13 } from "node:path";
 
 // src/setup.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
@@ -3642,14 +3647,13 @@ function setup(opts = {}) {
 }
 
 // src/verify.ts
-import { existsSync as existsSync12, readdirSync as readdirSync4, readFileSync as readFileSync9 } from "node:fs";
+import { existsSync as existsSync13, readdirSync as readdirSync5, readFileSync as readFileSync9 } from "node:fs";
 import { join as join12 } from "node:path";
 
 // src/harness.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { mkdirSync as mkdirSync8, writeFileSync as writeFileSync8 } from "node:fs";
+import { existsSync as existsSync12, mkdirSync as mkdirSync8, readdirSync as readdirSync4, writeFileSync as writeFileSync8 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { join as join11 } from "node:path";
+import { dirname as dirname3, join as join11 } from "node:path";
 function asClaudeCodeShowed(records) {
   return records.map((r) => {
     const line = ownLine(r);
@@ -3707,21 +3711,21 @@ function resultsFirst(records) {
 }
 var asText = (r) => r.role === "tool" && r.isError ? { ...r, isError: void 0 } : r;
 var claudeHome = () => process.env.CLAUDE_CONFIG_DIR || join11(homedir5(), ".claude");
+var claudeFile = (session, cwd) => join11(claudeHome(), "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"), `${session}.jsonl`);
 var codexHome2 = () => process.env.CODEX_HOME || join11(homedir5(), ".codex");
 var pad = (n) => String(n).padStart(2, "0");
 var CLAUDE_CODE = {
   agent: "claude-code",
   title: "Claude Code",
   provider: "anthropic",
-  write(fork, _all, cwd, pairs) {
-    const session = randomUUID2();
+  write(fork, _all, cwd, pairs, session) {
     const text = forkText(fork, session, cwd, pairs);
-    const dir = join11(claudeHome(), "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
-    mkdirSync8(dir, { recursive: true });
-    const file2 = join11(dir, `${session}.jsonl`);
+    const file2 = claudeFile(session, cwd);
+    mkdirSync8(dirname3(file2), { recursive: true });
     writeFileSync8(file2, text);
     return { session, file: file2, lines: text.split("\n").filter(Boolean).length };
   },
+  existing: (session, cwd) => existsSync12(claudeFile(session, cwd)) ? claudeFile(session, cwd) : void 0,
   resume: (dir, session) => `cd ${shellWord(dir)} && claude --resume ${session}`
 };
 function outputsAnswerCalls(text) {
@@ -3782,8 +3786,7 @@ var CODEX = {
   agent: "codex",
   title: "Codex",
   provider: "openai",
-  write(fork, all, cwd, pairs) {
-    const session = randomUUID2();
+  write(fork, all, cwd, pairs, session) {
     const now = /* @__PURE__ */ new Date();
     const text = codexText(fork, all, cwd, pairs, session, now);
     const dir = join11(codexHome2(), "sessions", String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()));
@@ -3792,6 +3795,12 @@ var CODEX = {
     const file2 = join11(dir, `rollout-${stamp}-${session}.jsonl`);
     writeFileSync8(file2, text);
     return { session, file: file2, lines: text.split("\n").filter(Boolean).length };
+  },
+  existing(session) {
+    const root = join11(codexHome2(), "sessions");
+    if (!existsSync12(root)) return void 0;
+    const name2 = readdirSync4(root, { recursive: true }).map(String).find((f) => f.endsWith(`-${session}.jsonl`));
+    return name2 ? join11(root, name2) : void 0;
   },
   resume: (dir, session) => `cd ${shellWord(dir)} && codex resume ${session}`
 };
@@ -4023,13 +4032,13 @@ function verify(repo, session, remote) {
   const copied = (id) => codexLine(id) <= (state.copied ?? 0);
   const elsewhere = (id) => all.has(id) || replayed.has(id) || copied(id);
   const format = state.harness === "codex" ? "codex" : "claude-code";
-  if (state.transcript && existsSync12(state.transcript)) {
+  if (state.transcript && existsSync13(state.transcript)) {
     const { saved, since } = readAll(state.transcript, session, state.cursor?.offset, format);
     const n = compare("saved", saved, stored, elsewhere, problems);
     checked.push(`saved: ${n} records of the transcript`);
     let pending = since.length;
     const dir = join12(state.transcript.replace(/\.jsonl$/, ""), "subagents");
-    for (const file2 of existsSync12(dir) ? readdirSync4(dir).sort() : []) {
+    for (const file2 of existsSync13(dir) ? readdirSync5(dir).sort() : []) {
       const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(file2)?.[1];
       if (!id) continue;
       const read = readAll(join12(dir, file2), id, state.agents?.[id]?.cursor.offset ?? 0);
@@ -4047,7 +4056,7 @@ function verify(repo, session, remote) {
     const fork = forkRecords(all, stored, head);
     const lines = codexText(fork, all, "/", [], session, /* @__PURE__ */ new Date()).split("\n").filter(Boolean).map((l) => JSON.parse(l));
     const forked = codexHistory(lines);
-    if (state.transcript && existsSync12(state.transcript)) {
+    if (state.transcript && existsSync13(state.transcript)) {
       const rollout = readLines(state.transcript, state.cursor?.offset);
       const own = rollout.slice(state.copied || 1).map(stable2);
       const tail = lines.slice(-own.length).map(stable2);
@@ -4070,7 +4079,7 @@ function verify(repo, session, remote) {
     const lost = written.filter((r) => !back.has(r.id) || said(back.get(r.id)) !== said(r));
     if (lost.length) problems.push(`loads: ${lost.length} of the ${written.length} messages a fork writes read back otherwise, from: ${describe(lost[0], 80)}`);
     const since = fork.path[0]?.type === "custom" && String(fork.path[0].name ?? "").includes("compact") ? " since the last compaction" : "";
-    if (state.transcript && existsSync12(state.transcript)) {
+    if (state.transcript && existsSync13(state.transcript)) {
       const resumed = canonical(resumeLines(readLines(state.transcript, state.cursor?.offset), head, stored, session));
       const forked = canonical(text.split("\n").filter(Boolean).map((l) => JSON.parse(l)));
       const at = resumed.findIndex((l, i) => l !== forked[i]);
@@ -4111,7 +4120,7 @@ function otherRepos(session, current) {
   const seen = new Set(current ? [current.common] : []);
   const out = [];
   for (const top of readEntry(session)?.repos ?? []) {
-    const repo = existsSync13(top) ? findRepo(top) : void 0;
+    const repo = existsSync14(top) ? findRepo(top) : void 0;
     if (!repo || seen.has(repo.common) || !isEnabled(repo)) continue;
     seen.add(repo.common);
     out.push(repo);
@@ -4126,7 +4135,7 @@ function sessionStart(input) {
   recordSession(session, { transcript });
   const envFile = process.env.CLAUDE_ENV_FILE;
   if (envFile) {
-    const bin = join13(dirname3(dirname3(cliPath())), "bin");
+    const bin = join13(dirname4(dirname4(cliPath())), "bin");
     appendFileSync(envFile, `export BRAID_SESSION=${session}
 export PATH="${bin}:$PATH"
 `);
@@ -4429,7 +4438,7 @@ function setPrivate(repo, session, value) {
 }
 
 // src/openclaw.ts
-import { existsSync as existsSync14, readdirSync as readdirSync5 } from "node:fs";
+import { existsSync as existsSync15, readdirSync as readdirSync6 } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir as homedir6 } from "node:os";
 import { join as join14 } from "node:path";
@@ -5003,8 +5012,8 @@ function openDatabase(path2) {
 }
 function openclawDatabases() {
   const agents = join14(process.env.OPENCLAW_HOME || join14(homedir6(), ".openclaw"), "agents");
-  if (!existsSync14(agents)) return [];
-  return readdirSync5(agents).map((a) => join14(agents, a, "agent", "openclaw-agent.sqlite")).filter((p) => existsSync14(p));
+  if (!existsSync15(agents)) return [];
+  return readdirSync6(agents).map((a) => join14(agents, a, "agent", "openclaw-agent.sqlite")).filter((p) => existsSync15(p));
 }
 var decode4 = (row) => (row.event_json ?? zstdDecompressSync(Buffer.from(row.event_zstd ?? new Uint8Array())).toString("utf8")).trim();
 function importOpenclaw(repo, dbPath, only) {
@@ -5086,12 +5095,12 @@ function importOpenclaw(repo, dbPath, only) {
 // src/statusline.ts
 import { spawn as spawn2, spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync15, mkdirSync as mkdirSync9, readFileSync as readFileSync10, statSync as statSync3, writeFileSync as writeFileSync9 } from "node:fs";
+import { existsSync as existsSync16, mkdirSync as mkdirSync9, readFileSync as readFileSync10, statSync as statSync3, writeFileSync as writeFileSync9 } from "node:fs";
 import { join as join15 } from "node:path";
 var hash2 = (s) => createHash3("sha1").update(s).digest("hex").slice(0, 16);
 function previous(stdin) {
   const file2 = join15(configDir(), "statusline.json");
-  if (!existsSync15(file2)) return "";
+  if (!existsSync16(file2)) return "";
   const { previous: previous2 } = JSON.parse(readFileSync10(file2, "utf8"));
   if (!previous2) return "";
   const r = spawnSync4("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
@@ -5109,7 +5118,7 @@ function pullRequest(repo) {
   } catch {
   }
   if (!fresh) {
-    writeFileSync9(file2, existsSync15(file2) ? readFileSync10(file2) : "");
+    writeFileSync9(file2, existsSync16(file2) ? readFileSync10(file2) : "");
     const tmp = `${file2}.${process.pid}`;
     spawn2("sh", ["-c", 'gh pr view --json number -q .number > "$T" 2>/dev/null; mv "$T" "$F"'], {
       cwd: repo.top,
@@ -5132,11 +5141,11 @@ function braidPart(repo, session, remote) {
       ...forEachRef([`${SESSION_REFS}/${conv ?? "-"}/`], { gitDir: repo.store }).map((r) => r.sha + r.ref),
       ...forEachRef([`${remoteRefs(remote)}/${conv ?? "-"}/`], { cwd: repo.top }).map((r) => r.sha + r.ref),
       gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim(),
-      existsSync15(statePath) ? statSync3(statePath).mtimeMs : 0
+      existsSync16(statePath) ? statSync3(statePath).mtimeMs : 0
     ].join("\n")
   );
   const file2 = join15(repo.cache, `status-${key}`);
-  if (existsSync15(file2)) return readFileSync10(file2, "utf8");
+  if (existsSync16(file2)) return readFileSync10(file2, "utf8");
   const text = render(computeStatus(repo, session, remote));
   mkdirSync9(repo.cache, { recursive: true });
   writeFileSync9(file2, text);
@@ -5202,6 +5211,7 @@ Everyday
   braid push [--dry-run]      publish the committed part now (git push does this with autopush)
   braid fork [<session>|@N]   the command to continue a session, or fork point N, in a new window; with none, this one
     --to codex|claude-code    as a new session of that agent's (by default the agent it runs in, else Claude Code)
+    --new                     another session, even when the same fork was written before
   braid fork <session> --here continue from another session in this one, before its first turn is saved
   braid merge [<session>]     show what another session has that this one lacks, for the agent to merge
   braid merge --record <id> --instruction "<text>"   record a merge; summary on stdin
@@ -5270,7 +5280,7 @@ function editSession(repo, remote, flag) {
   }
   const dir = join16(repo.dir, "sessions");
   const here = (id) => repo.separate || loadState(repo, id)?.code === repo.top;
-  const newest = (existsSync16(dir) ? readdirSync6(dir) : []).filter((f) => f.endsWith(".json")).map((f) => ({ id: f.slice(0, -".json".length), at: statSync4(join16(dir, f)).mtimeMs })).sort((a, b) => b.at - a.at).find((f) => here(f.id));
+  const newest = (existsSync17(dir) ? readdirSync7(dir) : []).filter((f) => f.endsWith(".json")).map((f) => ({ id: f.slice(0, -".json".length), at: statSync4(join16(dir, f)).mtimeMs })).sort((a, b) => b.at - a.at).find((f) => here(f.id));
   if (!newest) throw new Error("no saved session in this repository");
   return { id: newest.id, explicit: false };
 }
@@ -5332,6 +5342,7 @@ function main(argv) {
       rewrite: { type: "boolean" },
       repo: { type: "string" },
       here: { type: "boolean" },
+      new: { type: "boolean" },
       autocommit: { type: "boolean" },
       "no-autocommit": { type: "boolean" },
       autopush: { type: "boolean" },
@@ -5413,7 +5424,7 @@ function main(argv) {
       const session = str("session") ?? currentSession();
       const transcript = str("transcript") ?? (session ? transcriptOf(session) : void 0);
       const repo = locate(process.cwd());
-      if (session && repo && transcript && existsSync16(transcript)) {
+      if (session && repo && transcript && existsSync17(transcript)) {
         recordSession(session, { transcript, repo: repo.top });
         const r = save(repo, session, transcript);
         out(`braid: saved this conversation (${session.slice(0, 8)}), ${r.added} records, in ${repo.home}`);
@@ -5531,7 +5542,10 @@ function main(argv) {
       const current = str("session") ?? currentSession();
       const to = harness(str("to") ?? currentAgent());
       const resume = (dir2, id, fork) => `  cd ${shellWord(dir2)} && claude --resume ${id}${fork ? " --fork-session" : ""}`;
-      const wrote = (what, r) => `braid: wrote ${what} as a new ${to.title} session. To continue it in a new window, run in a terminal:
+      const fresh = opts.new === true;
+      const wrote = (what, r) => r.existing ? `braid: ${what} is already a ${to.title} session, from an earlier fork. To continue it in a new window, run in a terminal:
+  ${to.resume(r.cwd, r.session)}
+braid fork --new writes another.` : `braid: wrote ${what} as a new ${to.title} session. To continue it in a new window, run in a terminal:
   ${to.resume(r.cwd, r.session)}`;
       if (!args[0]) {
         if (!current) throw new Error("no session to branch: run inside an agent session, or pass --session <id>");
@@ -5542,10 +5556,10 @@ function main(argv) {
           out(["braid: to branch this conversation into a new window, run in a terminal:", resume(dir2, current, true), "or /branch to branch it in this window. braid files the branch in this conversation."].join("\n"));
           return 0;
         }
-        if (transcript && existsSync16(transcript)) save(repo, current, transcript);
+        if (transcript && existsSync17(transcript)) save(repo, current, transcript);
         const own2 = resolve2(repo, current, remote).filter((f) => f.opts.gitDir);
         if (own2.length !== 1) throw new Error(`this session (${current.slice(0, 8)}) is not saved yet`);
-        out(wrote("this conversation", replay(repo, own2[0], remote, to, { cwd: str("cwd") })));
+        out(wrote("this conversation", replay(repo, own2[0], remote, to, { cwd: str("cwd"), fresh })));
         return 0;
       }
       const at = /^(.*)@(\d+)$/.exec(args[0]);
@@ -5556,7 +5570,7 @@ function main(argv) {
         if (own2.length !== 1) throw new Error(own2.length ? `${name3} matches ${own2.length} sessions; name one` : `no session of yours matches ${name3}`);
         const point = points(repo, own2[0].session).find((p) => p.n === Number(at[2]));
         if (!point) throw new Error(`${own2[0].session.slice(0, 8)} has no fork point @${at[2]}; braid log lists them`);
-        out(wrote(`the conversation as it was ${point.what}`, replay(repo, { ...own2[0], ref: point.commit }, remote, to, { cwd: str("cwd") })));
+        out(wrote(`the conversation as it was ${point.what}`, replay(repo, { ...own2[0], ref: point.commit }, remote, to, { cwd: str("cwd"), fresh })));
         return 0;
       }
       const found = resolve2(repo, args[0], remote).filter((f) => f.session !== current);
@@ -5582,7 +5596,7 @@ function main(argv) {
         out([`braid: to fork ${name2} into a new window, run in a terminal:`, resume(dir, from.session, true), ...others].join("\n"));
         return 0;
       }
-      out([wrote(name2, replay(repo, from, remote, to, { cwd: str("cwd") })), ...others].join("\n"));
+      out([wrote(name2, replay(repo, from, remote, to, { cwd: str("cwd"), fresh })), ...others].join("\n"));
       return 0;
     }
     case "import": {

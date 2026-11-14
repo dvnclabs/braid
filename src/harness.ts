@@ -1,10 +1,9 @@
 // The agents a session can continue in. A session is braid's own: its records,
 // in ATXF, are the same whichever agent wrote them, and braid writes them out
 // for any of these agents, as a new session of theirs that continues it.
-import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { codex } from "@leostera/atxf/codex";
 import { asCodexShowed, forModel, type Rec } from "./records.ts";
 import { forkText, keptUuids, linear, ownLine, rewrite, shellWord, type ForkRecords, type Line } from "./replay.ts";
@@ -24,8 +23,10 @@ export interface Harness {
   title: string;
   /** The model provider this agent talks to: reasoning only its models wrote goes back to it. */
   provider: string;
-  /** Writes a fork as a new session of this agent's, in `cwd`, with paths moved by `pairs`. */
-  write(fork: ForkRecords, all: Map<string, Rec>, cwd: string, pairs: [string, string][]): Written;
+  /** Writes a fork as session `session` of this agent's, in `cwd`, with paths moved by `pairs`. */
+  write(fork: ForkRecords, all: Map<string, Rec>, cwd: string, pairs: [string, string][], session: string): Written;
+  /** The file of session `session`, when this agent already has it where it would resume it from `cwd`. */
+  existing(session: string, cwd: string): string | undefined;
   /** The command that continues a session written here, in a terminal. */
   resume(dir: string, session: string): string;
 }
@@ -113,6 +114,8 @@ function resultsFirst(records: Rec[]): Rec[] {
 const asText = (r: Rec): Rec => (r.role === "tool" && r.isError ? { ...r, isError: undefined } : r);
 
 const claudeHome = () => process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+/** Where Claude Code keeps session `session` of a directory, and finds it to resume it there. */
+const claudeFile = (session: string, cwd: string) => join(claudeHome(), "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"), `${session}.jsonl`);
 const codexHome = () => process.env.CODEX_HOME || join(homedir(), ".codex");
 const pad = (n: number) => String(n).padStart(2, "0");
 
@@ -120,15 +123,14 @@ export const CLAUDE_CODE: Harness = {
   agent: "claude-code",
   title: "Claude Code",
   provider: "anthropic",
-  write(fork, _all, cwd, pairs) {
-    const session = randomUUID();
+  write(fork, _all, cwd, pairs, session) {
     const text = forkText(fork, session, cwd, pairs);
-    const dir = join(claudeHome(), "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
-    mkdirSync(dir, { recursive: true });
-    const file = join(dir, `${session}.jsonl`);
+    const file = claudeFile(session, cwd);
+    mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, text);
     return { session, file, lines: text.split("\n").filter(Boolean).length };
   },
+  existing: (session, cwd) => (existsSync(claudeFile(session, cwd)) ? claudeFile(session, cwd) : undefined),
   resume: (dir, session) => `cd ${shellWord(dir)} && claude --resume ${session}`,
 };
 
@@ -226,8 +228,7 @@ export const CODEX: Harness = {
   agent: "codex",
   title: "Codex",
   provider: "openai",
-  write(fork, all, cwd, pairs) {
-    const session = randomUUID();
+  write(fork, all, cwd, pairs, session) {
     const now = new Date();
     const text = codexText(fork, all, cwd, pairs, session, now);
     const dir = join(codexHome(), "sessions", String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()));
@@ -236,6 +237,13 @@ export const CODEX: Harness = {
     const file = join(dir, `rollout-${stamp}-${session}.jsonl`);
     writeFileSync(file, text);
     return { session, file, lines: text.split("\n").filter(Boolean).length };
+  },
+  existing(session) {
+    // Codex finds a rollout by its id, under any day.
+    const root = join(codexHome(), "sessions");
+    if (!existsSync(root)) return undefined;
+    const name = readdirSync(root, { recursive: true }).map(String).find((f) => f.endsWith(`-${session}.jsonl`));
+    return name ? join(root, name) : undefined;
   },
   resume: (dir, session) => `cd ${shellWord(dir)} && codex resume ${session}`,
 };

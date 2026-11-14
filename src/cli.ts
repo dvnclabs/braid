@@ -59,6 +59,7 @@ Everyday
   braid push [--dry-run]      publish the committed part now (git push does this with autopush)
   braid fork [<session>|@N]   the command to continue a session, or fork point N, in a new window; with none, this one
     --to codex|claude-code    as a new session of that agent's (by default the agent it runs in, else Claude Code)
+    --new                     another session, even when the same fork was written before
   braid fork <session> --here continue from another session in this one, before its first turn is saved
   braid merge [<session>]     show what another session has that this one lacks, for the agent to merge
   braid merge --record <id> --instruction "<text>"   record a merge; summary on stdin
@@ -213,6 +214,7 @@ function main(argv: string[]): number {
       rewrite: { type: "boolean" },
       repo: { type: "string" },
       here: { type: "boolean" },
+      new: { type: "boolean" },
       autocommit: { type: "boolean" },
       "no-autocommit": { type: "boolean" },
       autopush: { type: "boolean" },
@@ -414,7 +416,11 @@ function main(argv: string[]): number {
       // A fork continues in the agent it is asked from, unless another is named.
       const to = harness(str("to") ?? currentAgent());
       const resume = (dir: string, id: string, fork: boolean) => `  cd ${shellWord(dir)} && claude --resume ${id}${fork ? " --fork-session" : ""}`;
-      const wrote = (what: string, r: { cwd: string; session: string }) => `braid: wrote ${what} as a new ${to.title} session. To continue it in a new window, run in a terminal:\n  ${to.resume(r.cwd, r.session)}`;
+      const fresh = opts.new === true;
+      const wrote = (what: string, r: { cwd: string; session: string; existing?: boolean }) =>
+        r.existing
+          ? `braid: ${what} is already a ${to.title} session, from an earlier fork. To continue it in a new window, run in a terminal:\n  ${to.resume(r.cwd, r.session)}\nbraid fork --new writes another.`
+          : `braid: wrote ${what} as a new ${to.title} session. To continue it in a new window, run in a terminal:\n  ${to.resume(r.cwd, r.session)}`;
       if (!args[0]) {
         if (!current) throw new Error("no session to branch: run inside an agent session, or pass --session <id>");
         const state = loadState(repo, current);
@@ -429,7 +435,7 @@ function main(argv: string[]): number {
         if (transcript && existsSync(transcript)) save(repo, current, transcript);
         const own = resolve(repo, current, remote).filter((f) => f.opts.gitDir);
         if (own.length !== 1) throw new Error(`this session (${current.slice(0, 8)}) is not saved yet`);
-        out(wrote("this conversation", replay(repo, own[0]!, remote, to, { cwd: str("cwd") })));
+        out(wrote("this conversation", replay(repo, own[0]!, remote, to, { cwd: str("cwd"), fresh })));
         return 0;
       }
       const at = /^(.*)@(\d+)$/.exec(args[0]);
@@ -441,7 +447,7 @@ function main(argv: string[]): number {
         if (own.length !== 1) throw new Error(own.length ? `${name} matches ${own.length} sessions; name one` : `no session of yours matches ${name}`);
         const point = points(repo, own[0]!.session).find((p) => p.n === Number(at[2]));
         if (!point) throw new Error(`${own[0]!.session.slice(0, 8)} has no fork point @${at[2]}; braid log lists them`);
-        out(wrote(`the conversation as it was ${point.what}`, replay(repo, { ...own[0]!, ref: point.commit }, remote, to, { cwd: str("cwd") })));
+        out(wrote(`the conversation as it was ${point.what}`, replay(repo, { ...own[0]!, ref: point.commit }, remote, to, { cwd: str("cwd"), fresh })));
         return 0;
       }
       const found = resolve(repo, args[0], remote).filter((f) => f.session !== current);
@@ -469,7 +475,7 @@ function main(argv: string[]): number {
         out([`braid: to fork ${name} into a new window, run in a terminal:`, resume(dir, from.session, true), ...others].join("\n"));
         return 0;
       }
-      out([wrote(name, replay(repo, from, remote, to, { cwd: str("cwd") })), ...others].join("\n"));
+      out([wrote(name, replay(repo, from, remote, to, { cwd: str("cwd"), fresh })), ...others].join("\n"));
       return 0;
     }
     case "import": {

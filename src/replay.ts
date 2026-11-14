@@ -2,6 +2,7 @@
 // transcript under a new session id, so `claude --resume` continues it here,
 // on another machine, or as a second direction from the same point. Paths from
 // the source checkout are rewritten to this one.
+import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync, realpathSync } from "node:fs";
 import { claudeCode, uuidFor } from "@leostera/atxf/claude-code";
 import { readRecords } from "./chunks.ts";
@@ -216,10 +217,18 @@ export interface Replayed {
   file: string;
   cwd: string;
   records: number;
+  /** Written before: the same fork was asked for already, and this is the session it wrote. */
+  existing?: boolean;
 }
 
-/** Writes a fork of a saved session as a new session of `to`'s, which continues it there. */
-export function replay(repo: Repo, found: Found, remote: string, to: Harness, opts: { cwd?: string } = {}): Replayed {
+/**
+ * Writes a fork of a saved session as a new session of `to`'s, which
+ * continues it there. The same fork, of the same point of the same session
+ * into the same agent and directory, is one session: asked for again, it is
+ * the session written the first time, as it stands, continued or not. With
+ * `fresh`, a fork is another session each time.
+ */
+export function replay(repo: Repo, found: Found, remote: string, to: Harness, opts: { cwd?: string; fresh?: boolean } = {}): Replayed {
   const all = conversation(repo, found.conv, remote);
   const own = readRecords(found.ref, found.opts);
   const head = lastTurn(own) ?? own.at(-1)?.id;
@@ -231,7 +240,12 @@ export function replay(repo: Repo, found: Found, remote: string, to: Harness, op
   // Paths move to another checkout; within the same tree (a subdirectory of it, say) they stay as they are.
   const within = !!from && (from === cwd || cwd.startsWith(`${from}/`) || from.startsWith(`${cwd}/`));
   const pairs: [string, string][] = [...(from && !within ? [[from, cwd] as [string, string]] : []), ...userConfig().paths];
-  const { session, file, lines } = to.write(fork, all, cwd, pairs);
+  const derived = uuidFor(`braid fork ${found.session} ${head} ${to.agent} ${cwd}`);
+  const before = opts.fresh ? undefined : to.existing(derived, cwd);
+  if (before) return { session: derived, file: before, cwd, records: 0, existing: true };
+  // A fork that was continued, saved, and its file then removed keeps its id: this one is another.
+  const session = opts.fresh || (loadState(repo, derived)?.chunks ?? 0) > 0 ? randomUUID() : derived;
+  const { file, lines } = to.write(fork, all, cwd, pairs, session);
 
   // The new session continues the source: its first save keeps only what the agent adds after the copy.
   const state = loadState(repo, session) ?? newState(session, file, to.agent);
