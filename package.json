@@ -4,9 +4,10 @@
   "description": "braid: efficient session manager. Saves every coding-agent session in git as it happens, so you can go back, fork, edit, merge and share it.",
   "license": "MIT",
   "author": "Giuseppe Barbalinardo",
+  "homepage": "https://dvnclabs.github.io/braid/",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gbarbalinardo/braid.git"
+    "url": "git+https://github.com/dvnclabs/braid.git"
   },
   "type": "module",
   "bin": {
@@ -27,7 +28,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "check": "npm run typecheck && npm test && npm run build",
-    "check:resume": "node scripts/resume-check.mjs"
+    "check:resume": "node scripts/resume-check.mjs",
+    "site": "rm -rf _site && mkdir _site && cp -R site/. _site/ && cp -R assets _site/assets"
   },
   "dependencies": {
     "@leostera/atxf": "0.3.0"

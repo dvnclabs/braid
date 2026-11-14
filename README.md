@@ -4,6 +4,7 @@
     <img src="assets/logo-light.svg" alt="3raid" height="72">
   </picture>
 </p>
+<p align="center"><a href="https://dvnclabs.github.io/braid/">dvnclabs.github.io/braid</a></p>
 
 **Efficient session manager.** braid saves every coding-agent session as it happens, in git, on your machine. You can go back to any point of a conversation, fork it into a new window, edit it before anyone else sees it, and, when you choose, share it with your team next to the code it produced.
 
@@ -14,7 +15,7 @@
 You need Node 22 or later and git. In Claude Code:
 
 ```
-/plugin marketplace add gbarbalinardo/braid
+/plugin marketplace add dvnclabs/braid
 /plugin install braid@braid
 /braid:init
 ```

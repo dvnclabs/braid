@@ -30,7 +30,7 @@ function visibility(repo: Repo): string | undefined {
 
 const TEMPLATE = (s: Settings) =>
   [
-    "# braid: efficient session manager. https://github.com/gbarbalinardo/braid",
+    "# braid: efficient session manager. https://github.com/dvnclabs/braid",
     "# autopilot: braid works on this machine only. It keeps conversations in the braid",
     "#   repository, and never pushes, fetches or asks GitHub anything. false: git push can",
     "#   publish them to this repository's remote, for teammates and pull request reviews.",

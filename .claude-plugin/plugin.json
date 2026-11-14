@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "braid: efficient session manager. Saves every coding-agent session in git as it happens, so you can go back, fork, edit, merge and share it.",
   "author": { "name": "Giuseppe Barbalinardo" },
-  "repository": "https://github.com/gbarbalinardo/braid",
+  "repository": "https://github.com/dvnclabs/braid",
   "license": "MIT",
   "keywords": ["git", "sessions", "code-review", "atxf"]
 }

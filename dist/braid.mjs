@@ -3452,7 +3452,7 @@ function visibility(repo) {
   return r.status === 0 ? r.stdout.trim() : void 0;
 }
 var TEMPLATE = (s) => [
-  "# braid: efficient session manager. https://github.com/gbarbalinardo/braid",
+  "# braid: efficient session manager. https://github.com/dvnclabs/braid",
   "# autopilot: braid works on this machine only. It keeps conversations in the braid",
   "#   repository, and never pushes, fetches or asks GitHub anything. false: git push can",
   "#   publish them to this repository's remote, for teammates and pull request reviews.",

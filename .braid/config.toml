@@ -1,4 +1,4 @@
-# braid: efficient session manager. https://github.com/gbarbalinardo/braid
+# braid: efficient session manager. https://github.com/dvnclabs/braid
 # autopilot: braid works on this machine only. It keeps conversations in its own git
 #   storage inside .git, and never pushes, fetches or asks GitHub anything. false: braid
 #   can publish conversations to the remote, for teammates and pull request reviews.

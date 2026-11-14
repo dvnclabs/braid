@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>braid: efficient session manager</title>
+<meta name="description" content="braid saves every coding-agent session as it happens, in git, on your machine. Go back to any point, continue it in Claude Code or Codex, edit it before anyone sees it, and share it next to the code it produced.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #11142a;
+    --muted: #565b74;
+    --line: #e5e6ef;
+    --card: #f7f7fb;
+    --code-bg: #11142a;
+    --code-fg: #e9eaf4;
+    --code-muted: #8e93b0;
+    --coral: #ff6a4d;
+    --violet: #7b5cff;
+    --teal: #14c4ae;
+    --link: #5b3df0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d18;
+      --fg: #f3f4fa;
+      --muted: #a3a7bf;
+      --line: #22253a;
+      --card: #12152a;
+      --code-bg: #12152a;
+      --code-fg: #e9eaf4;
+      --code-muted: #8e93b0;
+      --link: #a996ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 17px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; border-radius: 4px; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  p code, li code {
+    font-size: 0.86em;
+    padding: 0.1em 0.35em;
+    border-radius: 5px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 20px; }
+
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 22px 0; }
+  .top img { display: block; height: 34px; width: auto; }
+  .top nav { display: flex; gap: 22px; font-size: 15px; }
+  .top nav a { color: var(--muted); }
+  .top nav a:hover { color: var(--fg); text-decoration: none; }
+
+  .strands { height: 3px; background: linear-gradient(90deg, var(--coral), var(--violet), var(--teal)); }
+
+  .hero { padding: 72px 0 56px; }
+  .tag {
+    display: inline-block;
+    margin: 0 0 22px;
+    padding: 4px 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font-size: 14px;
+    color: var(--muted);
+  }
+  h1 {
+    margin: 0;
+    max-width: 16em;
+    font-size: clamp(34px, 6vw, 56px);
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    font-weight: 700;
+  }
+  h1 span {
+    background: linear-gradient(90deg, var(--coral), var(--violet) 55%, var(--teal));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .lede { max-width: 38em; margin: 22px 0 34px; font-size: 19px; color: var(--muted); }
+
+  .term {
+    max-width: 620px;
+    border-radius: 12px;
+    background: var(--code-bg);
+    color: var(--code-fg);
+    border: 1px solid var(--line);
+    overflow: hidden;
+  }
+  .term-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 13px;
+    color: var(--code-muted);
+  }
+  .term pre { margin: 0; padding: 16px 18px; overflow-x: auto; font-size: 14.5px; line-height: 1.65; }
+  .term .dim { color: var(--code-muted); }
+  .term .ok { color: var(--teal); }
+  button.copy {
+    font: inherit; font-size: 12.5px;
+    padding: 3px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: transparent;
+    color: var(--code-fg);
+    cursor: pointer;
+  }
+  button.copy:hover { background: rgba(255, 255, 255, 0.08); }
+  .note { margin: 14px 0 0; font-size: 14.5px; color: var(--muted); }
+  @media (max-width: 480px) { .term pre { font-size: 12.5px; padding: 14px; } .hero { padding: 48px 0 44px; } }
+
+  .features {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    padding: 8px 0 64px;
+  }
+  @media (max-width: 700px) { .features { grid-template-columns: minmax(0, 1fr); } }
+  .feature {
+    padding: 22px 22px 6px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--card);
+  }
+  .feature h2 { margin: 0 0 6px; font-size: 18px; letter-spacing: -0.01em; display: flex; align-items: center; gap: 10px; }
+  .feature h2::before { content: ""; width: 10px; height: 10px; border-radius: 3px; background: var(--dot); flex: none; }
+  .feature p { margin: 0 0 16px; font-size: 15.5px; color: var(--muted); }
+  .feature p code { background: var(--bg); }
+
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; padding: 8px 0 72px; }
+  .split h2 { margin: 0 0 10px; font-size: 26px; letter-spacing: -0.02em; }
+  .split p { margin: 0 0 12px; color: var(--muted); }
+  @media (max-width: 760px) { .split { grid-template-columns: 1fr; gap: 20px; } }
+
+  footer { border-top: 1px solid var(--line); padding: 26px 0 40px; font-size: 14px; color: var(--muted); }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 22px; justify-content: space-between; }
+  footer nav { display: flex; flex-wrap: wrap; gap: 18px; }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="strands" aria-hidden="true"></div>
+<div class="wrap">
+  <header class="top">
+    <a href="./" aria-label="braid home">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+        <img src="assets/logo-light.svg" alt="3raid">
+      </picture>
+    </a>
+    <nav>
+      <a href="https://github.com/dvnclabs/braid/blob/main/docs/design.md">Design</a>
+      <a href="https://github.com/dvnclabs/braid">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <p class="tag">v0.1 · for Claude Code and Codex</p>
+      <h1>Every coding-agent session, <span>saved in git</span> as it happens.</h1>
+      <p class="lede">braid keeps your agent conversations on your machine. Go back to any point of one, continue it in Claude Code or Codex, edit it before anyone sees it, and share it with your team next to the code it produced.</p>
+
+      <div class="term">
+        <div class="term-head"><span>In Claude Code</span><button class="copy" data-copy="install" type="button">Copy</button></div>
+        <pre><code id="install">/plugin marketplace add dvnclabs/braid
+/plugin install braid@braid
+/braid:init</code></pre>
+      </div>
+      <p class="note">Needs Node 22 or later and git. Without Claude Code, clone the repository and run <code>node dist/braid.mjs init</code>.</p>
+    </section>
+
+    <section class="features" aria-label="What braid does">
+      <article class="feature" style="--dot: var(--coral)">
+        <h2>Go back</h2>
+        <p>Before a turn that changes a lot, braid marks where the conversation stood. <code>braid log</code> lists the marks, and <code>/braid:fork @2</code> gives you the command to continue from one in a new window.</p>
+      </article>
+      <article class="feature" style="--dot: var(--violet)">
+        <h2>Claude Code and Codex</h2>
+        <p>A saved session continues in either agent. <code>braid fork --to codex</code> writes it as a Codex session, and <code>--to claude-code</code> goes the other way. Each agent gets the conversation the other's model read.</p>
+      </article>
+      <article class="feature" style="--dot: var(--teal)">
+        <h2>Edit before sharing</h2>
+        <p><code>braid edit</code> shows a session as it would be published, redacted, one line per record. Withhold, rewrite or hide any part of it, and put any of it back.</p>
+      </article>
+      <article class="feature" style="--dot: var(--coral)">
+        <h2>Share and review</h2>
+        <p><code>git push</code> can publish a session with the commits it produced. <code>/braid:review 128</code> reviews a pull request with the sessions behind it, and <code>/braid:merge</code> brings the review into your conversation.</p>
+      </article>
+    </section>
+
+    <section class="split">
+      <div>
+        <h2>Saved correctly</h2>
+        <p><code>braid verify</code> checks a session the way <code>git fsck</code> checks a repository, and runs by itself when each session ends: every record is in the store, and a fork written from it holds what the agent reads to resume.</p>
+        <p>On autopilot, the default, nothing leaves your machine. Conversations live in <code>~/.braid</code>, a git repository of their own, in <a href="https://github.com/leostera/atxf">ATXF</a>, an open format for agent transcripts. No server is involved.</p>
+      </div>
+      <div class="term">
+        <div class="term-head"><span>Terminal</span></div>
+        <pre><code><span class="dim">$</span> braid verify --all
+braid verify 9e36aa15: ok
+  <span class="ok">✓</span> saved: 1211 records of the transcript
+  <span class="ok">✓</span> loads: 53 lines since the last compaction,
+    the same in a fork as in the transcript
+  <span class="ok">✓</span> store: 1 chunks, git fsck</code></pre>
+      </div>
+    </section>
+  </main>
+</div>
+
+<footer>
+  <div class="wrap">
+    <span>braid v0.1 · MIT license</span>
+    <nav>
+      <a href="https://github.com/dvnclabs/braid#readme">README</a>
+      <a href="https://github.com/dvnclabs/braid/blob/main/docs/design.md">Design</a>
+      <a href="https://github.com/dvnclabs/braid">GitHub</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+  for (const button of document.querySelectorAll("button.copy")) {
+    button.addEventListener("click", async () => {
+      const text = document.getElementById(button.dataset.copy).innerText;
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = "Copied";
+      } catch {
+        button.textContent = "Select to copy";
+      }
+      setTimeout(() => (button.textContent = "Copy"), 1600);
+    });
+  }
+</script>
+</body>
+</html>
