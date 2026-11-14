@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { appendChunk, readAgents, readRecords } from "./chunks.ts";
 import { config, forEachRef, gitMaybe } from "./git.ts";
-import { lastTurn, withBraid, type Actor, type Rec } from "./records.ts";
+import { about, lastTurn, withBraid, type Actor, type Rec } from "./records.ts";
 import { conversation } from "./load.ts";
 import { ensureStore, readConfig, SESSION_REFS, storeRef, type Repo } from "./repo.ts";
 import { replayedIds } from "./replay.ts";
@@ -117,6 +117,8 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
     }
 
     // A rewritten file, or a session saved before braid kept cursors, is read again from the start, keeping only unsaved records.
+    // A session saved before braid kept titles: once, from what the store has.
+    if (state.chunks > 0 && !state.title) Object.assign(state, about(readRecords(storeRef(state.conv, session), { gitDir: repo.store }), state));
     const rewritten = state.cursor ? !intact(path, state.cursor) : state.chunks > 0;
     let cursor = rewritten || !state.cursor ? START : state.cursor;
     // A rewritten file is read again from the start: its first copies of each record are the saved ones.
@@ -198,6 +200,7 @@ function writeChunk(
     state.userAgent = nativeVersion(r) ? `claude-code/${nativeVersion(r)}` : state.userAgent;
     state.model = modelOf(r) ?? state.model;
   }
+  Object.assign(state, about(fresh, state));
   // A rollout braid wrote names no version of Codex's (ATXF writes 0.0.0); Codex writes its own in a rollout it starts.
   const version = (nativeHeader?.source as { agent?: string; version?: string } | undefined)?.version;
   if (state.harness === "codex" && version && version !== "0.0.0") state.userAgent = `codex/${version}`;

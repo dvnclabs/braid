@@ -114,24 +114,45 @@ export function computeStatus(repo: Repo, session: string, remote = "origin"): S
   return status;
 }
 
+/** How the status line colors each kind of mark. */
+export type Tone = "quiet" | "ahead" | "waiting" | "broken" | "ok";
+export type Paint = (tone: Tone, text: string) => string;
+const plain: Paint = (_tone, text) => text;
+
+const SGR: Record<Tone | "sep", [string, string]> = {
+  quiet: ["2", "22"],
+  ahead: ["33", "39"],
+  waiting: ["35", "39"],
+  broken: ["31", "39"],
+  ok: ["32", "39"],
+  sep: ["2", "22"],
+};
+
+/** Terminal colors, unless NO_COLOR is set. */
+export function colors(env: NodeJS.ProcessEnv = process.env): { paint: Paint; sep: string; dim: (s: string) => string } {
+  if (env.NO_COLOR) return { paint: plain, sep: " · ", dim: (s) => s };
+  const wrap = (k: Tone | "sep", t: string) => `\x1b[${SGR[k][0]}m${t}\x1b[${SGR[k][1]}m`;
+  return { paint: wrap, sep: wrap("sep", " · "), dim: (t) => wrap("quiet", t) };
+}
+
 /** The braid part of the status line, after the session id. */
-export function render(s: Status): string {
+export function render(s: Status, paint: Paint = plain, sep = " · "): string {
   if (!s.enabled) return "";
-  if (!s.saved) return "not saved";
+  if (!s.saved) return paint("ahead", "not saved");
   const parts: string[] = [];
-  if (s.broken) parts.push("⚠ braid verify");
-  if (s.private) parts.push("private");
-  else if (s.local) parts.push("local");
+  if (s.broken) parts.push(paint("broken", "⚠ braid verify"));
+  if (s.private) parts.push(paint("quiet", "private"));
+  else if (s.local) parts.push(paint("quiet", "local"));
   else {
-    if (s.ahead > 0) parts.push(`↑${s.ahead}`);
-    if (s.uncommitted > 0) parts.push(`*${s.uncommitted}`);
+    if (s.ahead > 0) parts.push(paint("ahead", `↑${s.ahead}`));
+    if (s.uncommitted > 0) parts.push(paint("ahead", `*${s.uncommitted}`));
   }
   if (s.waiting.length === 1) {
     const w = s.waiting[0]!;
-    parts.push(`↓ ${w.name} +${w.count} → /braid:merge`);
+    parts.push(paint("waiting", `↓ ${w.name} +${w.count} → /braid:merge`));
   } else if (s.waiting.length > 1) {
     const total = s.waiting.reduce((a, w) => a + w.count, 0);
-    parts.push(`↓ ${s.waiting.length} sessions +${total} → /braid:merge`);
+    parts.push(paint("waiting", `↓ ${s.waiting.length} sessions +${total} → /braid:merge`));
   }
-  return parts.length ? parts.join(" · ") : "✓";
+  return parts.length ? parts.join(sep) : paint("ok", "✓");
 }

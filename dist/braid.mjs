@@ -118,6 +118,56 @@ function config(key, opts) {
   return gitMaybe(["config", "--get", key], opts)?.trim() || void 0;
 }
 
+// src/redact.ts
+import { homedir } from "node:os";
+var RULES = [
+  { rule: "private-key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
+  { rule: "aws-access-key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
+  { rule: "github-token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})/g },
+  { rule: "anthropic-key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
+  { rule: "openai-key", re: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}/g },
+  { rule: "slack-token", re: /\bxox[abposr]-[A-Za-z0-9-]{10,}/g },
+  { rule: "stripe-key", re: /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}/g },
+  { rule: "google-api-key", re: /\bAIza[0-9A-Za-z_-]{35}/g },
+  { rule: "npm-token", re: /\bnpm_[A-Za-z0-9]{36}\b/g },
+  { rule: "jwt", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
+  { rule: "url-password", re: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:([^\s@/]{3,})@/gi, group: 1 },
+  // KEY=value in env files and shell commands: API_KEY=..., DB_PASSWORD=...
+  { rule: "env-secret", re: /\b[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_]*=(?!\[REDACTED)([^\s"'`]{8,})/g, group: 1 },
+  // password: "...", apiKey = '...': quoted literals assigned to secret-looking names
+  {
+    rule: "quoted-secret",
+    re: /\b(?:api[_-]?key|secret|token|password|passwd|auth)[A-Za-z0-9_]*["']?\s*[:=]\s*["'](?!\[REDACTED)([^"'\s]{8,})["']/gi,
+    group: 1
+  }
+];
+var HOMES = /(?:\/Users|\/home|[A-Za-z]:\\Users)[\/\\][A-Za-z0-9._-]+(?=[\/\\"'\s]|$)/g;
+function redactString(s, counts, extra = []) {
+  let out = s;
+  for (const { rule, re, group } of [...RULES, ...extra]) {
+    out = out.replace(re, (match, ...groups) => {
+      counts.set(rule, (counts.get(rule) ?? 0) + 1);
+      const marker = `[REDACTED:${rule}]`;
+      if (group === void 0) return marker;
+      const secret = groups[group - 1];
+      return typeof secret === "string" ? match.replace(secret, marker) : marker;
+    });
+  }
+  const home = homedir();
+  if (home.length > 1) out = out.split(home).join("~");
+  return out.replace(HOMES, "~");
+}
+function redactValue(value, counts, extra = []) {
+  if (typeof value === "string") return redactString(value, counts, extra);
+  if (Array.isArray(value)) return value.map((v) => redactValue(v, counts, extra));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = redactValue(v, counts, extra);
+    return out;
+  }
+  return value;
+}
+
 // src/records.ts
 var braidOf = (r) => r.ext?.braid ?? {};
 function forModel(records, provider) {
@@ -185,6 +235,37 @@ function blockText(block, max) {
     return `\u2192 ${String(b.name)}${key ? ` ${clip(String(args[key]), 120)}` : ""}`;
   }
   return "";
+}
+var RANK = { prompt: 0, agent: 1, user: 2 };
+function printable(s, max) {
+  return clip(s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/[\x00-\x1f\x7f-\x9f]/g, " "), max);
+}
+var nativeLine = (r) => r.native?.records?.[0];
+function about(records, prior = {}) {
+  let { title, recap: recap2 } = prior;
+  const take = (text, by) => {
+    const t = printable(redactString(text, /* @__PURE__ */ new Map()), 80);
+    if (t && (!title || RANK[by] >= RANK[title.by])) title = { text: t, by };
+  };
+  for (const r of records) {
+    if (r.type === "metadata" && typeof r.title === "string") take(r.title, nativeLine(r)?.type === "custom-title" ? "user" : "agent");
+    else if (r.type === "custom" && r.name === "system:away_summary") {
+      const content2 = nativeLine(r)?.content;
+      const text = typeof content2 === "string" ? printable(redactString(content2, /* @__PURE__ */ new Map()), 400) : "";
+      if (text) recap2 = { text, at: String(r.time ?? "") };
+    } else if (!title && r.type === "message" && r.role === "user" && r.display !== false && isTurn(r)) {
+      const text = textOf(r.content).trim();
+      if (text && !text.startsWith("<") && !text.startsWith("[")) take(text.split("\n")[0], "prompt");
+    }
+  }
+  return { ...title ? { title } : {}, ...recap2 ? { recap: recap2 } : {} };
+}
+function ago(iso, now = Date.now()) {
+  const s = Math.round((now - Date.parse(iso)) / 1e3);
+  if (!Number.isFinite(s)) return "some time ago";
+  if (s < 90) return "just now";
+  const [n, unit] = s < 5400 ? [Math.round(s / 60), "minute"] : s < 129600 ? [Math.round(s / 3600), "hour"] : [Math.round(s / 86400), "day"];
+  return `${n} ${unit}${n === 1 ? "" : "s"} ago`;
 }
 function describe(r, max = 400) {
   if (r.type === "branch_summary") return clip(String(r.summary ?? ""), max * 4);
@@ -350,7 +431,7 @@ import { join as join4 } from "node:path";
 
 // src/repo.ts
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir as homedir2 } from "node:os";
 import { isAbsolute, join as join2, resolve } from "node:path";
 var real = (path2) => existsSync(path2) ? realpathSync(path2) : path2;
 function findRepo(cwd) {
@@ -367,13 +448,13 @@ function isEnabled(repo) {
 }
 var hasConfig = (repo) => existsSync(join2(repo.top, ".braid", "config.toml"));
 function defaultHome() {
-  return process.env.BRAID_HOME || join2(homedir(), ".braid");
+  return process.env.BRAID_HOME || join2(homedir2(), ".braid");
 }
 function homeFor(top) {
   return repoSetting(top) ?? defaultHome();
 }
 function expandPath(path2, base) {
-  if (path2 === "~" || path2.startsWith("~/")) return join2(homedir(), path2.slice(1));
+  if (path2 === "~" || path2.startsWith("~/")) return join2(homedir2(), path2.slice(1));
   return isAbsolute(path2) ? path2 : resolve(base, path2);
 }
 var isRepo = (path2) => existsSync(join2(path2, ".git", "HEAD"));
@@ -396,7 +477,7 @@ function locate(cwd) {
 }
 function repoSetting(top) {
   const own = userConfig().repo;
-  if (own !== void 0) return own === "auto" ? void 0 : expandPath(own, homedir());
+  if (own !== void 0) return own === "auto" ? void 0 : expandPath(own, homedir2());
   const value = top ? readKeys({ top }).get("repo") : void 0;
   return value && value !== "auto" ? expandPath(value, top) : void 0;
 }
@@ -407,7 +488,7 @@ function ensureStore(repo) {
   git(["init", "--quiet", "--bare", repo.store]);
 }
 function configDir() {
-  return join2(process.env.XDG_CONFIG_HOME || join2(homedir(), ".config"), "braid");
+  return join2(process.env.XDG_CONFIG_HOME || join2(homedir2(), ".config"), "braid");
 }
 function userConfig() {
   const path2 = join2(configDir(), "config.toml");
@@ -613,56 +694,6 @@ import { isAbsolute as isAbsolute3, join as join9 } from "node:path";
 
 // src/publish.ts
 import { existsSync as existsSync6 } from "node:fs";
-
-// src/redact.ts
-import { homedir as homedir2 } from "node:os";
-var RULES = [
-  { rule: "private-key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
-  { rule: "aws-access-key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
-  { rule: "github-token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})/g },
-  { rule: "anthropic-key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
-  { rule: "openai-key", re: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}/g },
-  { rule: "slack-token", re: /\bxox[abposr]-[A-Za-z0-9-]{10,}/g },
-  { rule: "stripe-key", re: /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}/g },
-  { rule: "google-api-key", re: /\bAIza[0-9A-Za-z_-]{35}/g },
-  { rule: "npm-token", re: /\bnpm_[A-Za-z0-9]{36}\b/g },
-  { rule: "jwt", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
-  { rule: "url-password", re: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:([^\s@/]{3,})@/gi, group: 1 },
-  // KEY=value in env files and shell commands: API_KEY=..., DB_PASSWORD=...
-  { rule: "env-secret", re: /\b[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_]*=(?!\[REDACTED)([^\s"'`]{8,})/g, group: 1 },
-  // password: "...", apiKey = '...': quoted literals assigned to secret-looking names
-  {
-    rule: "quoted-secret",
-    re: /\b(?:api[_-]?key|secret|token|password|passwd|auth)[A-Za-z0-9_]*["']?\s*[:=]\s*["'](?!\[REDACTED)([^"'\s]{8,})["']/gi,
-    group: 1
-  }
-];
-var HOMES = /(?:\/Users|\/home|[A-Za-z]:\\Users)[\/\\][A-Za-z0-9._-]+(?=[\/\\"'\s]|$)/g;
-function redactString(s, counts, extra = []) {
-  let out = s;
-  for (const { rule, re, group } of [...RULES, ...extra]) {
-    out = out.replace(re, (match, ...groups) => {
-      counts.set(rule, (counts.get(rule) ?? 0) + 1);
-      const marker = `[REDACTED:${rule}]`;
-      if (group === void 0) return marker;
-      const secret = groups[group - 1];
-      return typeof secret === "string" ? match.replace(secret, marker) : marker;
-    });
-  }
-  const home = homedir2();
-  if (home.length > 1) out = out.split(home).join("~");
-  return out.replace(HOMES, "~");
-}
-function redactValue(value, counts, extra = []) {
-  if (typeof value === "string") return redactString(value, counts, extra);
-  if (Array.isArray(value)) return value.map((v) => redactValue(v, counts, extra));
-  if (value && typeof value === "object") {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = redactValue(v, counts, extra);
-    return out;
-  }
-  return value;
-}
 
 // src/rules.ts
 import { existsSync as existsSync4, readFileSync as readFileSync4, realpathSync as realpathSync2 } from "node:fs";
@@ -1893,25 +1924,39 @@ function computeStatus(repo, session, remote = "origin") {
   }
   return status;
 }
-function render(s) {
+var plain = (_tone, text) => text;
+var SGR = {
+  quiet: ["2", "22"],
+  ahead: ["33", "39"],
+  waiting: ["35", "39"],
+  broken: ["31", "39"],
+  ok: ["32", "39"],
+  sep: ["2", "22"]
+};
+function colors(env = process.env) {
+  if (env.NO_COLOR) return { paint: plain, sep: " \xB7 ", dim: (s) => s };
+  const wrap = (k, t) => `\x1B[${SGR[k][0]}m${t}\x1B[${SGR[k][1]}m`;
+  return { paint: wrap, sep: wrap("sep", " \xB7 "), dim: (t) => wrap("quiet", t) };
+}
+function render(s, paint = plain, sep = " \xB7 ") {
   if (!s.enabled) return "";
-  if (!s.saved) return "not saved";
+  if (!s.saved) return paint("ahead", "not saved");
   const parts = [];
-  if (s.broken) parts.push("\u26A0 braid verify");
-  if (s.private) parts.push("private");
-  else if (s.local) parts.push("local");
+  if (s.broken) parts.push(paint("broken", "\u26A0 braid verify"));
+  if (s.private) parts.push(paint("quiet", "private"));
+  else if (s.local) parts.push(paint("quiet", "local"));
   else {
-    if (s.ahead > 0) parts.push(`\u2191${s.ahead}`);
-    if (s.uncommitted > 0) parts.push(`*${s.uncommitted}`);
+    if (s.ahead > 0) parts.push(paint("ahead", `\u2191${s.ahead}`));
+    if (s.uncommitted > 0) parts.push(paint("ahead", `*${s.uncommitted}`));
   }
   if (s.waiting.length === 1) {
     const w = s.waiting[0];
-    parts.push(`\u2193 ${w.name} +${w.count} \u2192 /braid:merge`);
+    parts.push(paint("waiting", `\u2193 ${w.name} +${w.count} \u2192 /braid:merge`));
   } else if (s.waiting.length > 1) {
     const total = s.waiting.reduce((a, w) => a + w.count, 0);
-    parts.push(`\u2193 ${s.waiting.length} sessions +${total} \u2192 /braid:merge`);
+    parts.push(paint("waiting", `\u2193 ${s.waiting.length} sessions +${total} \u2192 /braid:merge`));
   }
-  return parts.length ? parts.join(" \xB7 ") : "\u2713";
+  return parts.length ? parts.join(sep) : paint("ok", "\u2713");
 }
 
 // src/load.ts
@@ -2169,6 +2214,8 @@ function replay(repo, found, remote, to, opts = {}) {
   const state = loadState(repo, session) ?? newState(session, file2, to.agent);
   const first = own.find((r) => braidOf(r).actor);
   state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : void 0, replayed: true, lines };
+  const upTo = head === lastTurn(own) ? own.length - 1 : own.findIndex((r) => r.id === head);
+  Object.assign(state, about(upTo >= 0 ? own.slice(0, upTo + 1) : own, state));
   saveState(repo, state);
   return { session, file: file2, cwd, records: lines };
 }
@@ -3091,6 +3138,7 @@ function save(repo, session, transcript, opts = {}) {
       saveState(repo, state);
       return { added: added2, state };
     }
+    if (state.chunks > 0 && !state.title) Object.assign(state, about(readRecords(storeRef(state.conv, session), { gitDir: repo.store }), state));
     const rewritten = state.cursor ? !intact(path2, state.cursor) : state.chunks > 0;
     let cursor = rewritten || !state.cursor ? START : state.cursor;
     const unseen = rewritten ? unsavedOf(readRecords(storeRef(state.conv, session), { gitDir: repo.store })) : void 0;
@@ -3145,6 +3193,7 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
     state.userAgent = nativeVersion(r) ? `claude-code/${nativeVersion(r)}` : state.userAgent;
     state.model = modelOf(r) ?? state.model;
   }
+  Object.assign(state, about(fresh, state));
   const version = nativeHeader?.source?.version;
   if (state.harness === "codex" && version && version !== "0.0.0") state.userAgent = `codex/${version}`;
   const actor = { actorId: actorId(repo), userAgent: state.userAgent ?? state.harness };
@@ -4149,7 +4198,20 @@ export PATH="${bin}:$PATH"
   const remote = config2.remote;
   fetchInBackground(repo, remote, 0);
   const context2 = repo.separate ? "" : index(repo, session, remote);
-  return context2 ? JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context2 } }) : "";
+  const message = input.source === "resume" ? recap(repo, session, input.agent ?? "claude-code") : "";
+  const output = {
+    ...message ? { systemMessage: message } : {},
+    ...context2 ? { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context2 } } : {}
+  };
+  return Object.keys(output).length ? JSON.stringify(output) : "";
+}
+function recap(repo, session, agent) {
+  const state = loadState(repo, session);
+  if (!state?.title && !state?.recap) return "";
+  const fork = state.forkFrom ? `, a fork of ${state.forkFrom.session.slice(0, 8)}` : "";
+  const head = `braid \xB7 ${session.slice(0, 8)}${state.title ? ` \xB7 ${state.title.text}` : ""}${fork}`;
+  return state.recap && agent === "codex" ? `${head}
+Last recap, ${ago(state.recap.at)}: ${state.recap.text}` : head;
 }
 function stop(input) {
   const session = input.session_id;
@@ -5141,12 +5203,14 @@ function braidPart(repo, session, remote) {
       ...forEachRef([`${SESSION_REFS}/${conv ?? "-"}/`], { gitDir: repo.store }).map((r) => r.sha + r.ref),
       ...forEachRef([`${remoteRefs(remote)}/${conv ?? "-"}/`], { cwd: repo.top }).map((r) => r.sha + r.ref),
       gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim(),
-      existsSync16(statePath) ? statSync3(statePath).mtimeMs : 0
+      existsSync16(statePath) ? statSync3(statePath).mtimeMs : 0,
+      process.env.NO_COLOR ? "plain" : "color"
     ].join("\n")
   );
   const file2 = join15(repo.cache, `status-${key}`);
   if (existsSync16(file2)) return readFileSync10(file2, "utf8");
-  const text = render(computeStatus(repo, session, remote));
+  const { paint, sep } = colors();
+  const text = render(computeStatus(repo, session, remote), paint, sep);
   mkdirSync9(repo.cache, { recursive: true });
   writeFileSync9(file2, text);
   return text;
@@ -5160,19 +5224,23 @@ function statusline(stdin) {
   const prev = previous(stdin);
   const session = input.session_id;
   if (!session) return prev;
-  const parts = [session.slice(0, 8)];
+  const { sep, dim } = colors();
+  let head = dim(session.slice(0, 8));
+  const parts = [];
   const dir = input.workspace?.current_dir ?? input.cwd ?? process.cwd();
   const code = findRepo(dir);
   const pr = code && !readConfig(code).autopilot ? pullRequest(code) : void 0;
   if (pr) parts.push(pr);
   const repo = locate(dir);
   if (repo) {
+    const title = loadState(repo, session)?.title?.text;
+    if (title) head += ` ${printable(title, 40)}`;
     const remote = readConfig(repo).remote;
     const part = braidPart(repo, session, remote);
     if (part) parts.push(part);
     fetchInBackground(repo, remote);
   }
-  const ours = parts.join(" \xB7 ");
+  const ours = [head, ...parts].join(sep);
   if (!prev) return ours;
   return prev.includes("\n") ? `${prev}
 ${ours}` : `${prev} \xB7 ${ours}`;
@@ -5486,6 +5554,9 @@ function main(argv) {
         return 0;
       }
       out(`session ${session.slice(0, 8)}${s.conv ? ` (conversation ${s.conv.slice(0, 8)})` : ""}: ${render(s)}`);
+      const about2 = loadState(repo, session);
+      if (about2?.title) out(`  ${about2.title.text}`);
+      if (about2?.recap) out(`  recap, ${ago(about2.recap.at)}: ${about2.recap.text}`);
       for (const w of s.waiting) out(`  waiting: ${w.name} (${w.session.slice(0, 8)}), ${w.count} records not merged, forked at ${w.base ?? "?"}`);
       if (s.conv) {
         out("sessions in this conversation:");
@@ -5494,6 +5565,8 @@ function main(argv) {
           const actor = records.map((r) => braidOf(r).actor).find(Boolean);
           const mark = f.session === session ? "  (this session)" : "";
           out(`  ${f.session.slice(0, 8)}  ${sessionName(records, f.session).padEnd(12)} ${actor?.actorId ?? "?"}  ${records.filter(isTurn).length} records${mark}`);
+          const title = f.opts.gitDir ? loadState(repo, f.session)?.title?.text : void 0;
+          if (title && f.session !== session) out(`      ${title}`);
           for (const line of agentLines(records, readAgents(f.ref, f.opts))) out(`      ${line}`);
         }
       }
@@ -5507,6 +5580,8 @@ function main(argv) {
         const actor = records.map((r) => braidOf(r).actor).find(Boolean);
         const ran = f.opts.gitDir ? loadState(repo, f.session)?.code : void 0;
         out(`${f.session.slice(0, 8)}  conv ${f.conv.slice(0, 8)}  ${sessionName(records, f.session).padEnd(12)} ${actor?.actorId ?? "?"}  ${records.filter(isTurn).length} records${f.opts.gitDir ? `  (yours${ran ? `, in ${ran.replace(homedir7(), "~")}` : ""})` : ""}`);
+        const title = f.opts.gitDir ? loadState(repo, f.session)?.title?.text : void 0;
+        if (title) out(`    ${title}`);
         for (const line of agentLines(records, readAgents(f.ref, f.opts))) out(`    ${line}`);
       }
       return 0;
@@ -5740,6 +5815,10 @@ ${HELP}`);
       return 2;
   }
 }
+process.stdout.on("error", (err) => {
+  if (err.code !== "EPIPE") throw err;
+  process.exit(process.exitCode ?? 0);
+});
 try {
   process.exitCode = main(process.argv.slice(2));
 } catch (err) {

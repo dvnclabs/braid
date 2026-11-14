@@ -83,7 +83,9 @@ test("save, publish, review, merge", () => {
 
   // The status line: Alice's session id and state.
   const line = braid(s.env, alice, ["statusline"], JSON.stringify({ session_id: ALICE, workspace: { current_dir: alice } }));
-  assert.equal(line.stdout.trim(), "5b0e2c1a · ✓");
+  // Her first prompt stands for the session until Claude Code titles it; the key in it stays hidden.
+  assert.equal(line.stdout.trim().replace(/\x1b\[[0-9;]*m/g, ""), "5b0e2c1a Add retries to sendWebhook. My key is […" + " · ✓");
+  assert.doesNotMatch(line.stdout, /AKIA/);
 
   // Bob clones; his first session sets up the hooks itself and lists Alice's session.
   const bob = clone(s, "bob", "bob@example.com", "bob");
@@ -1334,4 +1336,60 @@ test("a session continued in Codex is saved where it left off, and comes back to
   const fork = /claude --resume (\S+)$/m.exec(back.stdout)![1]!;
   const path = join(s.env.HOME!, ".claude", "projects", realpathSync(repo).replace(/[^A-Za-z0-9]/g, "-"), `${fork}.jsonl`);
   assert.deepEqual(claudeSaid(path), ["user: Plan the release.", "thinking", "assistant: First, tag the version.", "user: Then what?", "assistant: Then write the notes."]);
+});
+
+test("braid shows what a session is about: its title in the status line and braid status, and where it stands when it resumes", () => {
+  const s = sandbox();
+  const repo = clone(s, "ida", "ida@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, repo, ["init"]);
+  const t = new Transcript(s.root, ALICE);
+  const hookIn = (source?: string) => JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo, ...(source ? { source } : {}) });
+  const statusline = (env: NodeJS.ProcessEnv = {}) => braid(s.env, repo, ["statusline"], JSON.stringify({ session_id: ALICE, workspace: { current_dir: repo } }), env).stdout.trim();
+  const plain = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
+  const started = (out: string) => JSON.parse(out || "{}") as { systemMessage?: string };
+
+  // Before Claude Code titles the session, its first prompt stands for it.
+  t.user("<command-name>/braid:init</command-name>");
+  t.user("Add retries to the webhook sender");
+  t.assistant("Added exponential backoff with jitter.");
+  braid(s.env, repo, ["hook", "stop"], hookIn());
+  assert.equal(plain(statusline()), "5b0e2c1a Add retries to the webhook sender · local");
+
+  // Claude Code's own title, then the recap it writes when you come back to the session.
+  t.raw({ type: "ai-title", aiTitle: "Webhook retries with backoff", sessionId: ALICE });
+  t.system("away_summary", "You're adding retries to the webhook sender; backoff is in, next is a time budget.");
+  braid(s.env, repo, ["hook", "stop"], hookIn());
+  assert.equal(statusline({ NO_COLOR: "1" }), "5b0e2c1a Webhook retries with backoff · local");
+  assert.equal(statusline(), "\x1b[2m5b0e2c1a\x1b[22m Webhook retries with backoff\x1b[2m · \x1b[22m\x1b[2mlocal\x1b[22m", "the id and quiet marks dimmed");
+  const status = braid(s.env, repo, ["status", "--session", ALICE]).stdout;
+  assert.match(status, /\n {2}Webhook retries with backoff\n {2}recap, [^:]+: You're adding retries to the webhook sender; backoff is in, next is a time budget\.\n/);
+
+  // Resuming shows what the session is about. Claude Code shows its own recap again, so braid adds none there.
+  assert.equal(started(braid(s.env, repo, ["hook", "session-start"], hookIn("resume")).stdout).systemMessage, "braid · 5b0e2c1a · Webhook retries with backoff");
+  assert.equal(started(braid(s.env, repo, ["hook", "session-start"], hookIn("startup")).stdout).systemMessage, undefined, "a new session has nothing to recap");
+
+  // A name you give with /rename wins over Claude Code's titles, also newer ones.
+  t.raw({ type: "custom-title", customTitle: "retries-v2", sessionId: ALICE });
+  t.raw({ type: "ai-title", aiTitle: "A newer title", sessionId: ALICE });
+  braid(s.env, repo, ["hook", "stop"], hookIn());
+  assert.equal(statusline({ NO_COLOR: "1" }), "5b0e2c1a retries-v2 · local");
+
+  // A session saved before braid kept titles gets its own back from the store, the name you gave included.
+  const statePath = join(s.env.HOME!, ".braid", ".git", "braid", "sessions", `${ALICE}.json`);
+  const { title: _title, recap: _recap, ...older } = JSON.parse(readFileSync(statePath, "utf8"));
+  writeFileSync(statePath, JSON.stringify(older));
+  t.raw({ type: "ai-title", aiTitle: "Yet another title", sessionId: ALICE });
+  braid(s.env, repo, ["hook", "stop"], hookIn());
+  assert.equal(statusline({ NO_COLOR: "1" }), "5b0e2c1a retries-v2 · local");
+
+  // A fork into Codex is about what its source was about. Codex writes no recaps, so braid shows Claude Code's latest.
+  const codexHome = join(s.root, "codex");
+  const r = braid(s.env, repo, ["fork", "5b0e2c1a", "--to", "codex"], undefined, { CODEX_HOME: codexHome });
+  assert.equal(r.status, 0, r.stderr);
+  const id = /codex resume (\S+)$/m.exec(r.stdout)![1]!;
+  const codexIn = JSON.stringify({ session_id: id, cwd: repo, source: "resume", transcript_path: null });
+  const inCodex = started(braid(s.env, repo, ["hook", "session-start", "--agent", "codex"], codexIn, { CODEX_HOME: codexHome }).stdout).systemMessage;
+  assert.equal(inCodex?.split("\n")[0], `braid · ${id.slice(0, 8)} · retries-v2, a fork of 5b0e2c1a`);
+  assert.match(inCodex!, /\nLast recap, [^:]+: You're adding retries to the webhook sender; backoff is in, next is a time budget\.$/);
 });

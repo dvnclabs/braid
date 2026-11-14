@@ -7,7 +7,7 @@ import { closeSync, existsSync, openSync, readSync, realpathSync } from "node:fs
 import { claudeCode, uuidFor } from "@leostera/atxf/claude-code";
 import { readRecords } from "./chunks.ts";
 import { conversation, type Found } from "./load.ts";
-import { asCodexShowed, braidOf, contextPath, forModel, lastTurn, type Rec } from "./records.ts";
+import { about, asCodexShowed, braidOf, contextPath, forModel, lastTurn, type Rec } from "./records.ts";
 import type { Harness } from "./harness.ts";
 import { userConfig, type Repo } from "./repo.ts";
 import { loadState, newState, saveState } from "./state.ts";
@@ -251,6 +251,9 @@ export function replay(repo: Repo, found: Found, remote: string, to: Harness, op
   const state = loadState(repo, session) ?? newState(session, file, to.agent);
   const first = own.find((r) => braidOf(r).actor);
   state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : undefined, replayed: true, lines };
+  // The fork is about what its source was about at the point it forks from; from the newest, as it is now.
+  const upTo = head === lastTurn(own) ? own.length - 1 : own.findIndex((r) => r.id === head);
+  Object.assign(state, about(upTo >= 0 ? own.slice(0, upTo + 1) : own, state));
   saveState(repo, state);
   return { session, file, cwd, records: lines };
 }

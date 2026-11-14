@@ -40,21 +40,26 @@ braid starts on autopilot: it does everything by itself and nothing leaves your 
 
 ## Use
 
-Work with Claude Code as usual. The status line shows where your session stands:
+Work with Claude Code as usual. The status line shows what your session is about and where it stands:
 
 ```
-5b0e2c1a · local
+5b0e2c1a Webhook retries · local
 ```
 
 | | |
 |---|---|
 | `5b0e2c1a` | this session |
+| `Webhook retries` | what it is about: the name you gave it with `/rename`, else Claude Code's title for it, else its first prompt |
 | `local` | saved on this machine only |
 | `↑4` | 4 committed records not published yet |
 | `*3` | 3 records since the last commit |
 | `↓ review/bob +5` | a session built on yours, such as a review or a branch, has 5 records you have not merged |
 | `⚠ braid verify` | the last check of this session found a problem: run `braid verify` |
 | `✓` | everything published, nothing waiting |
+
+Marks are in color: amber for work not yet published, magenta for a session waiting to be merged, red for a failed check, green when everything is published. `NO_COLOR` turns colors off.
+
+**Come back.** When you resume a session, or open a fork of one, braid shows what it is about: `braid · 5b0e2c1a · Webhook retries`. In Codex, which writes no recaps, it adds Claude Code's latest recap of the session too. `braid status` shows the title and the latest recap.
 
 **Go back.** `braid log` lists the fork points autofork marked, and `/braid:fork @2` gives you the command to continue the conversation as it was before that turn, in a new window. `/braid:fork` alone branches the conversation as it is now.
 

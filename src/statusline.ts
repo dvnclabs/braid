@@ -7,7 +7,9 @@ import { join } from "node:path";
 import { fetchInBackground } from "./fetch.ts";
 import { forEachRef, gitMaybe } from "./git.ts";
 import { findRepo, isEnabled, locate, readConfig, remoteRefs, SESSION_REFS, type Repo } from "./repo.ts";
-import { computeStatus, convOf, render } from "./status.ts";
+import { colors, computeStatus, convOf, render } from "./status.ts";
+import { printable } from "./records.ts";
+import { loadState } from "./state.ts";
 import { configDir } from "./setup.ts";
 
 interface StatusInput {
@@ -67,11 +69,13 @@ function braidPart(repo: Repo, session: string, remote: string): string {
       ...forEachRef([`${remoteRefs(remote)}/${conv ?? "-"}/`], { cwd: repo.top }).map((r) => r.sha + r.ref),
       gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim(),
       existsSync(statePath) ? statSync(statePath).mtimeMs : 0,
+      process.env.NO_COLOR ? "plain" : "color",
     ].join("\n"),
   );
   const file = join(repo.cache, `status-${key}`);
   if (existsSync(file)) return readFileSync(file, "utf8");
-  const text = render(computeStatus(repo, session, remote));
+  const { paint, sep } = colors();
+  const text = render(computeStatus(repo, session, remote), paint, sep);
   mkdirSync(repo.cache, { recursive: true });
   writeFileSync(file, text);
   return text;
@@ -87,7 +91,10 @@ export function statusline(stdin: string): string {
   const prev = previous(stdin);
   const session = input.session_id;
   if (!session) return prev;
-  const parts = [session.slice(0, 8)];
+  const { sep, dim } = colors();
+  // The session id, dimmed, and what the session is about.
+  let head = dim(session.slice(0, 8));
+  const parts: string[] = [];
   const dir = input.workspace?.current_dir ?? input.cwd ?? process.cwd();
   const code = findRepo(dir);
   // On autopilot braid asks GitHub nothing, not even the pull request of the branch.
@@ -95,12 +102,14 @@ export function statusline(stdin: string): string {
   if (pr) parts.push(pr);
   const repo = locate(dir);
   if (repo) {
+    const title = loadState(repo, session)?.title?.text;
+    if (title) head += ` ${printable(title, 40)}`;
     const remote = readConfig(repo).remote;
     const part = braidPart(repo, session, remote);
     if (part) parts.push(part);
     fetchInBackground(repo, remote);
   }
-  const ours = parts.join(" · ");
+  const ours = [head, ...parts].join(sep);
   if (!prev) return ours;
   return prev.includes("\n") ? `${prev}\n${ours}` : `${prev} · ${ours}`;
 }

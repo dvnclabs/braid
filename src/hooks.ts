@@ -7,7 +7,7 @@ import { sessionsBehind } from "./links.ts";
 import { hooksInstalled, installHooks } from "./githooks.ts";
 import { allSessions } from "./load.ts";
 import { readRecords } from "./chunks.ts";
-import { braidOf, isTurn } from "./records.ts";
+import { ago, braidOf, isTurn } from "./records.ts";
 import { findRepo, isEnabled, locate, readConfig, type Repo } from "./repo.ts";
 import { publish } from "./publish.ts";
 import { readEntry, recordSession } from "./registry.ts";
@@ -82,7 +82,26 @@ export function sessionStart(input: HookInput): string {
   fetchInBackground(repo, remote, 0);
   // Outside a code repository there is no branch to list sessions behind.
   const context = repo.separate ? "" : index(repo, session, remote);
-  return context ? JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context } }) : "";
+  // Coming back to a session: what it is about, for you. The model gets none of it.
+  const message = input.source === "resume" ? recap(repo, session, input.agent ?? "claude-code") : "";
+  const output = {
+    ...(message ? { systemMessage: message } : {}),
+    ...(context ? { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context } } : {}),
+  };
+  return Object.keys(output).length ? JSON.stringify(output) : "";
+}
+
+/**
+ * "braid · 5b0e2c1a · Retry webhook deliveries". In Codex, which writes no
+ * recaps, also Claude Code's latest recap of the session; Claude Code shows
+ * its own again when it resumes a session.
+ */
+export function recap(repo: Repo, session: string, agent: Format): string {
+  const state = loadState(repo, session);
+  if (!state?.title && !state?.recap) return "";
+  const fork = state.forkFrom ? `, a fork of ${state.forkFrom.session.slice(0, 8)}` : "";
+  const head = `braid · ${session.slice(0, 8)}${state.title ? ` · ${state.title.text}` : ""}${fork}`;
+  return state.recap && agent === "codex" ? `${head}\nLast recap, ${ago(state.recap.at)}: ${state.recap.text}` : head;
 }
 
 export function stop(input: HookInput): string {

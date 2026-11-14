@@ -1,4 +1,5 @@
 // ATXF records as braid handles them: loosely typed JSON with the few fields braid reads.
+import { redactString } from "./redact.ts";
 
 export interface Actor {
   actorId: string;
@@ -157,6 +158,60 @@ function blockText(block: unknown, max: number): string {
     return `→ ${String(b.name)}${key ? ` ${clip(String(args[key]), 120)}` : ""}`;
   }
   return "";
+}
+
+/** What a session is about: its title, and the agent's latest recap of it. */
+export interface About {
+  /** `user`: named with /rename; `agent`: the agent's own title; `prompt`: the first prompt, when the agent gave none. */
+  title?: { text: string; by: "user" | "agent" | "prompt" };
+  /** Claude Code's recap, written when the user came back to the session after a while. */
+  recap?: { text: string; at: string };
+}
+
+const RANK = { prompt: 0, agent: 1, user: 2 } as const;
+
+/** Text other people or a model wrote, safe to print in a terminal: one line, no control characters. */
+export function printable(s: string, max: number): string {
+  return clip(s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/[\x00-\x1f\x7f-\x9f]/g, " "), max);
+}
+
+/** The line an agent wrote for a record, as it wrote it. */
+const nativeLine = (r: Rec): Record<string, unknown> | undefined => (r.native as { records?: Record<string, unknown>[] } | undefined)?.records?.[0];
+
+/**
+ * A session's title and latest recap, from its records in order, continuing
+ * `prior`: a name the user gave wins over the agent's title, which wins over
+ * the first prompt; the newest of each kind wins.
+ */
+export function about(records: Iterable<Rec>, prior: About = {}): About {
+  let { title, recap } = prior;
+  // Shown on screen: credentials in a prompt stay hidden.
+  const take = (text: string, by: "user" | "agent" | "prompt") => {
+    const t = printable(redactString(text, new Map()), 80);
+    if (t && (!title || RANK[by] >= RANK[title.by])) title = { text: t, by };
+  };
+  for (const r of records) {
+    if (r.type === "metadata" && typeof r.title === "string") take(r.title, nativeLine(r)?.type === "custom-title" ? "user" : "agent");
+    else if (r.type === "custom" && r.name === "system:away_summary") {
+      const content = nativeLine(r)?.content;
+      const text = typeof content === "string" ? printable(redactString(content, new Map()), 400) : "";
+      if (text) recap = { text, at: String(r.time ?? "") };
+    } else if (!title && r.type === "message" && r.role === "user" && r.display !== false && isTurn(r)) {
+      const text = textOf(r.content).trim();
+      // Wrapped text is the agent's own: a command, a reminder, a note.
+      if (text && !text.startsWith("<") && !text.startsWith("[")) take(text.split("\n")[0]!, "prompt");
+    }
+  }
+  return { ...(title ? { title } : {}), ...(recap ? { recap } : {}) };
+}
+
+/** "5 minutes ago", for a time in the past. */
+export function ago(iso: string, now = Date.now()): string {
+  const s = Math.round((now - Date.parse(iso)) / 1000);
+  if (!Number.isFinite(s)) return "some time ago";
+  if (s < 90) return "just now";
+  const [n, unit] = s < 5400 ? [Math.round(s / 60), "minute"] : s < 129600 ? [Math.round(s / 3600), "hour"] : [Math.round(s / 86400), "day"];
+  return `${n} ${unit}${n === 1 ? "" : "s"} ago`;
 }
 
 /** One readable line (or a few) for a record, for logs and briefings. */

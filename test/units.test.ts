@@ -4,10 +4,10 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { publishedChunks } from "../src/publish.ts";
-import { parseJsonl, type Rec } from "../src/records.ts";
+import { about, ago, parseJsonl, printable, type Rec } from "../src/records.ts";
 import { redactString } from "../src/redact.ts";
 import { readConfig, type Repo } from "../src/repo.ts";
-import { cleanName, render, uncovered, type Status } from "../src/status.ts";
+import { cleanName, colors, render, uncovered, type Status } from "../src/status.ts";
 import { intact, readWindow, START } from "../src/transcript.ts";
 import { parseToml } from "../src/rules.ts";
 import { ignoredBy, parseIgnore } from "../src/ignore.ts";
@@ -194,4 +194,44 @@ test("a session that failed braid verify says so in the status line", () => {
   const base: Status = { session: "s", enabled: true, saved: true, private: false, local: true, ahead: 0, uncommitted: 0, waiting: [] };
   assert.equal(render(base), "local");
   assert.equal(render({ ...base, broken: true }), "⚠ braid verify · local");
+});
+
+test("the status line's colors, and none with NO_COLOR", () => {
+  const base: Status = { session: "s", enabled: true, saved: true, private: false, local: false, ahead: 0, uncommitted: 0, waiting: [] };
+  const { paint, sep } = colors({});
+  assert.equal(render(base, paint, sep), "\x1b[32m✓\x1b[39m");
+  assert.equal(render({ ...base, broken: true, ahead: 2 }, paint, sep), "\x1b[31m⚠ braid verify\x1b[39m\x1b[2m · \x1b[22m\x1b[33m↑2\x1b[39m");
+  const off = colors({ NO_COLOR: "1" });
+  assert.equal(render({ ...base, broken: true, ahead: 2 }, off.paint, off.sep), "⚠ braid verify · ↑2");
+});
+
+test("what a session is about: a name you gave, else the agent's title, else the first prompt; and the newest recap", () => {
+  const meta = (title: string, kind: string): Rec => ({ type: "metadata", id: `m-${title}`, title, native: { source: "claude-code", records: [{ type: kind }] } });
+  const recap = (text: string, time: string): Rec => ({
+    type: "custom",
+    id: `r-${time}`,
+    time,
+    namespace: "claude-code",
+    name: "system:away_summary",
+    native: { source: "claude-code", records: [{ type: "system", subtype: "away_summary", content: text }] },
+  });
+  const command: Rec = { type: "message", id: "u0", role: "user", content: "<command-name>/braid:init</command-name>" };
+  const prompt: Rec = { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "Add retries; key AKIAABCDEFGHIJKLMNOP\nand more" }] };
+  assert.deepEqual(about([command, prompt]).title, { text: "Add retries; key [REDACTED:aws-access-key]", by: "prompt" });
+  const titled = about([prompt, meta("Webhook retries", "ai-title")]);
+  assert.deepEqual(titled.title, { text: "Webhook retries", by: "agent" });
+  const named = about([meta("retries-v2", "custom-title")], titled);
+  assert.equal(about([meta("A newer title", "ai-title"), prompt], named).title?.text, "retries-v2", "a name you gave stays");
+  const latest = about([recap("first", "2026-11-14T10:00:00Z"), recap("You're adding retries.\u001b[31m Next: a budget", "2026-11-14T12:00:00Z")]);
+  assert.deepEqual(latest.recap, { text: "You're adding retries. Next: a budget", at: "2026-11-14T12:00:00Z" });
+  assert.equal(printable("a\u001b[2Kb\u0007c\nd", 20), "ab c d", "no escapes or control characters reach the terminal");
+});
+
+test("how long ago", () => {
+  const now = Date.parse("2026-11-14T12:00:00Z");
+  assert.equal(ago("2026-11-14T11:59:30Z", now), "just now");
+  assert.equal(ago("2026-11-14T11:55:00Z", now), "5 minutes ago");
+  assert.equal(ago("2026-11-14T10:00:00Z", now), "2 hours ago");
+  assert.equal(ago("2026-11-13T12:00:00Z", now), "24 hours ago");
+  assert.equal(ago("2026-11-11T12:00:00Z", now), "3 days ago");
 });

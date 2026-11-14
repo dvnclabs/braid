@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Repo } from "./repo.ts";
+import type { About } from "./records.ts";
 import type { Cursor } from "./transcript.ts";
 
 export interface PendingMerge {
@@ -64,6 +65,10 @@ export interface SessionState {
   private?: boolean;
   /** What the last after-turn notice reported, so it is not repeated. */
   notified?: string;
+  /** What the session is about, from its records: the status line and braid status show it. */
+  title?: About["title"];
+  /** The agent's latest recap of the session, shown when the session is resumed. */
+  recap?: About["recap"];
 }
 
 function path(repo: Repo, session: string): string {

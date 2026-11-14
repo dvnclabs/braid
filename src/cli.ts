@@ -17,7 +17,7 @@ import { editRecord, hide, lineText, pickLines, renderEdit, editLines, setPrivat
 import { importOpenclaw, openclawDatabases } from "./openclaw.ts";
 import { points } from "./points.ts";
 import { publish, view, type PublishResult } from "./publish.ts";
-import { braidOf, describe, isTurn, type Rec } from "./records.ts";
+import { ago, braidOf, describe, isTurn, type Rec } from "./records.ts";
 import { findRepo, isEnabled, locate, readConfig, type Repo } from "./repo.ts";
 import { save } from "./save.ts";
 import { cliPath, configDir, init, setup } from "./setup.ts";
@@ -359,6 +359,9 @@ function main(argv: string[]): number {
         return 0;
       }
       out(`session ${session.slice(0, 8)}${s.conv ? ` (conversation ${s.conv.slice(0, 8)})` : ""}: ${render(s)}`);
+      const about = loadState(repo, session);
+      if (about?.title) out(`  ${about.title.text}`);
+      if (about?.recap) out(`  recap, ${ago(about.recap.at)}: ${about.recap.text}`);
       for (const w of s.waiting) out(`  waiting: ${w.name} (${w.session.slice(0, 8)}), ${w.count} records not merged, forked at ${w.base ?? "?"}`);
       if (s.conv) {
         out("sessions in this conversation:");
@@ -367,6 +370,8 @@ function main(argv: string[]): number {
           const actor = records.map((r) => braidOf(r).actor).find(Boolean);
           const mark = f.session === session ? "  (this session)" : "";
           out(`  ${f.session.slice(0, 8)}  ${sessionName(records, f.session).padEnd(12)} ${actor?.actorId ?? "?"}  ${records.filter(isTurn).length} records${mark}`);
+          const title = f.opts.gitDir ? loadState(repo, f.session)?.title?.text : undefined;
+          if (title && f.session !== session) out(`      ${title}`);
           for (const line of agentLines(records, readAgents(f.ref, f.opts))) out(`      ${line}`);
         }
       }
@@ -380,6 +385,8 @@ function main(argv: string[]): number {
         const actor = records.map((r) => braidOf(r).actor).find(Boolean);
         const ran = f.opts.gitDir ? loadState(repo, f.session)?.code : undefined;
         out(`${f.session.slice(0, 8)}  conv ${f.conv.slice(0, 8)}  ${sessionName(records, f.session).padEnd(12)} ${actor?.actorId ?? "?"}  ${records.filter(isTurn).length} records${f.opts.gitDir ? `  (yours${ran ? `, in ${ran.replace(homedir(), "~")}` : ""})` : ""}`);
+        const title = f.opts.gitDir ? loadState(repo, f.session)?.title?.text : undefined;
+        if (title) out(`    ${title}`);
         for (const line of agentLines(records, readAgents(f.ref, f.opts))) out(`    ${line}`);
       }
       return 0;
@@ -617,6 +624,12 @@ function main(argv: string[]): number {
       return 2;
   }
 }
+
+// Output cut short by its reader, as `braid log | head` does, ends the command quietly.
+process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code !== "EPIPE") throw err;
+  process.exit(process.exitCode ?? 0);
+});
 
 try {
   process.exitCode = main(process.argv.slice(2));

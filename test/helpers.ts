@@ -137,6 +137,21 @@ export class Transcript {
     return this.add("user", { role: "user", content: text });
   }
 
+  /** A line as Claude Code writes it outside the chain, such as a title. */
+  raw(entry: object): void {
+    appendFileSync(this.path, JSON.stringify(entry) + "\n");
+  }
+
+  /** A system line in the chain, such as the recap Claude Code writes when you come back. */
+  system(subtype: string, content: string): string {
+    this.n += 1;
+    const uuid = `${this.session.slice(0, 8)}-0000-4000-8000-${String(this.n).padStart(12, "0")}`;
+    const time = new Date(Date.UTC(2026, 10, 9, 10, 0, this.n)).toISOString();
+    this.raw({ parentUuid: this.last, isSidechain: false, type: "system", subtype, content, isMeta: false, uuid, timestamp: time, cwd: "/work", sessionId: this.session, version: "2.1.222", userType: "external" });
+    this.last = uuid;
+    return uuid;
+  }
+
   assistant(text: string): string {
     return this.add("assistant", {
       id: `msg_${this.n}`,
