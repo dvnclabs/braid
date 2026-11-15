@@ -324,6 +324,78 @@ test("a session that ended right after compacting continues from the compaction,
   assert.deepEqual(said, ["compacted: Summary: planning a migration.", "assistant: Step one is the schema."]);
 });
 
+test("a fork from a turn between two compactions holds the compaction before the turn, what it kept, and the turn; nothing after", () => {
+  const s = sandbox();
+  const repo = realpathSync(clone(s, "kim", "kim@example.com"));
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, repo, ["init"]);
+  const path = join(s.root, `${ALICE}.jsonl`);
+  let n = 0;
+  const uuid = () => `5b0e2c1a-0000-4000-8000-${String(++n).padStart(12, "0")}`;
+  const put = (fields: Record<string, unknown>) => {
+    appendFileSync(path, JSON.stringify({ isSidechain: false, timestamp: new Date(Date.UTC(2026, 10, 9, 10, 0, n)).toISOString(), cwd: repo, sessionId: ALICE, version: "2.1.316", ...fields }) + "\n");
+    return fields.uuid as string;
+  };
+  const say = (parentUuid: string | null, role: "user" | "assistant", text: string) =>
+    put({ parentUuid, type: role, uuid: uuid(), message: role === "user" ? { role, content: text } : { id: `msg_${n}`, type: "message", role, model: "claude-sonnet-5-5", content: [{ type: "text", text }] } });
+  // Claude Code's compaction: a boundary with no parent, the messages it kept named in it, and the summary after it.
+  const compact = (last: string, summary: string) => {
+    const boundary = uuid();
+    const s = uuid();
+    put({ parentUuid: null, logicalParentUuid: last, type: "system", subtype: "compact_boundary", uuid: boundary, content: "Conversation compacted", compactMetadata: { trigger: "auto", preservedMessages: { anchorUuid: s, uuids: [last], allUuids: [last] } } });
+    return put({ parentUuid: boundary, type: "user", uuid: s, isCompactSummary: true, message: { role: "user", content: summary } });
+  };
+  let at = say(say(null, "user", "Plan the migration."), "assistant", "Schema first.");
+  at = say(say(at, "user", "Write the schema."), "assistant", "Wrote the schema.");
+  at = compact(at, "Summary one: the migration is planned and the schema written.");
+  at = say(say(at, "user", "Add the indexes."), "assistant", "Added the indexes.");
+  at = say(say(at, "user", "Backfill the data."), "assistant", "Backfilled the data.");
+  at = compact(at, "Summary two: indexes added, data backfilled.");
+  say(say(at, "user", "Ship it."), "assistant", "Shipped.");
+  braid(s.env, repo, ["hook", "stop"], JSON.stringify({ session_id: ALICE, transcript_path: path, cwd: repo }));
+  // A summary is no prompt: the turns are the five prompts typed.
+  assert.deepEqual(braid(s.env, repo, ["log", ALICE]).stdout.split("\n").filter(Boolean).map((l) => l.replace(/ +/g, " ")), [
+    "5b0e2c1a.1 Plan the migration.",
+    "5b0e2c1a.2 Write the schema.",
+    "5b0e2c1a.3 Add the indexes.",
+    "5b0e2c1a.4 Backfill the data.",
+    "5b0e2c1a.5 Ship it.",
+  ]);
+
+  // What each fork gives Claude Code's model, in order: the text of its messages along the chain Claude Code reads.
+  const projects = join(s.env.HOME!, ".claude", "projects", repo.replace(/[^A-Za-z0-9]/g, "-"));
+  const told = (turn: string) => {
+    const r = braid(s.env, repo, ["fork", turn, "--cwd", repo, "--new"]);
+    assert.equal(r.status, 0, r.stderr);
+    const lines = readFileSync(join(projects, `${/--resume (\S+)/.exec(r.stdout)![1]}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    // Claude Code reads back from the newest message, through each parent, and after a boundary, what it kept.
+    const byUuid = new Map(lines.filter((l) => l.uuid).map((l) => [l.uuid, l]));
+    const chain: string[] = [];
+    for (let l = lines.filter((l) => l.message).at(-1); l; l = byUuid.get(l.parentUuid)) {
+      if (l.subtype === "compact_boundary") {
+        for (const k of [...(l.compactMetadata.preservedMessages.allUuids as string[])].reverse()) chain.push(`kept: ${byUuid.get(k)?.message?.content?.[0]?.text ?? "MISSING"}`);
+        break;
+      }
+      const c = l.message?.content;
+      if (c) chain.push(typeof c === "string" ? c : c[0].text);
+    }
+    return chain.reverse();
+  };
+  assert.deepEqual(told("5b0e2c1a.2"), ["Plan the migration.", "Schema first.", "Write the schema.", "Wrote the schema."]);
+  assert.deepEqual(told("5b0e2c1a.3"), ["kept: Wrote the schema.", "Summary one: the migration is planned and the schema written.", "Add the indexes.", "Added the indexes."]);
+  assert.deepEqual(told("5b0e2c1a.4"), ["kept: Wrote the schema.", "Summary one: the migration is planned and the schema written.", "Add the indexes.", "Added the indexes.", "Backfill the data.", "Backfilled the data."]);
+  assert.deepEqual(told("5b0e2c1a.5"), ["kept: Backfilled the data.", "Summary two: indexes added, data backfilled.", "Ship it.", "Shipped."]);
+
+  // Into Codex, from turn 3: Codex's record of the first compaction, what it kept, and turn 3.
+  const codexHome = join(s.root, "codex");
+  const r = braid(s.env, repo, ["fork", "5b0e2c1a.3", "--to", "codex", "--cwd", repo], undefined, { CODEX_HOME: codexHome });
+  assert.equal(r.status, 0, r.stderr);
+  const file = readdirSync(join(codexHome, "sessions"), { recursive: true }).map(String).find((f) => f.endsWith(".jsonl"))!;
+  const lines = readFileSync(join(codexHome, "sessions", file), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const said = lines.slice(1).map(({ type, payload: p }) => (type === "compacted" ? `compacted: ${p.message}` : `${p.role}: ${p.content.map((c: { text: string }) => c.text).join("")}`));
+  assert.deepEqual(said, ["compacted: Summary one: the migration is planned and the schema written.", "assistant: Wrote the schema.", "user: Add the indexes.", "assistant: Added the indexes."]);
+});
+
 test("a fork holds what Claude Code reads to resume: what a compaction kept, parallel calls beside the chain, notes, messages typed mid-turn, and the session's settings", () => {
   const s = sandbox();
   const repo = clone(s, "gus", "gus@example.com");

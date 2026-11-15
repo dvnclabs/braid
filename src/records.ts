@@ -205,7 +205,7 @@ export function printable(s: string, max: number): string {
 }
 
 /** The line an agent wrote for a record, as it wrote it. */
-const nativeLine = (r: Rec): Record<string, unknown> | undefined => (r.native as { records?: Record<string, unknown>[] } | undefined)?.records?.[0];
+export const nativeLine = (r: Rec): Record<string, unknown> | undefined => (r.native as { records?: Record<string, unknown>[] } | undefined)?.records?.[0];
 
 /**
  * A session's title and latest recap, from its records in order, continuing

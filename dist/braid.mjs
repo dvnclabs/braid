@@ -2073,10 +2073,16 @@ function readWindow(path2, cursor, session, limits = {}, format = "claude-code")
 var startsTurn = (r) => isPrompt(r);
 var turnName = (session, n) => `${session.slice(0, 8)}.${n}`;
 var TURN = /^(.*)\.(\d+)$/;
+var compacts = (r) => r.type === "compaction" || nativeLine(r)?.subtype === "compact_boundary";
 function turnsOf(records) {
   const out = [{ n: 0, records: [] }];
   for (const r of records) {
-    if (startsTurn(r)) out.push({ n: out.length, start: r, records: [] });
+    if (startsTurn(r)) {
+      const before = out.at(-1).records;
+      const answered = before.findLastIndex((x) => x.type === "message" && x.role === "assistant");
+      const from = before.findIndex((x, i) => i > answered && compacts(x));
+      out.push({ n: out.length, start: r, records: from >= 0 ? before.splice(from) : [] });
+    }
     out.at(-1).records.push(r);
   }
   return out;
@@ -2120,7 +2126,7 @@ function turnDetail(records) {
 }
 
 // src/version.ts
-var VERSION = "0.4.3";
+var VERSION = "0.4.4";
 
 // src/save.ts
 function actorId(repo) {

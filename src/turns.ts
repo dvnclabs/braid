@@ -4,7 +4,7 @@
 // fork continues the numbering of the session it forks.
 import { readRecords } from "./store.ts";
 import type { Found } from "./load.ts";
-import { isPrompt, lastTurn, type Rec } from "./records.ts";
+import { isPrompt, lastTurn, nativeLine, type Rec } from "./records.ts";
 import type { Repo } from "./repo.ts";
 
 export const startsTurn = (r: Rec): boolean => isPrompt(r);
@@ -22,11 +22,24 @@ export interface TurnRecords {
   records: Rec[];
 }
 
-/** A session's turns, in order, each with its records. */
+/** Where a compaction starts: Claude Code's boundary line, or the compaction itself, as Codex writes it. */
+const compacts = (r: Rec): boolean => r.type === "compaction" || nativeLine(r)?.subtype === "compact_boundary";
+
+/**
+ * A session's turns, in order, each with its records. A compaction after a
+ * turn's last answer starts the next turn: Claude Code compacts as the next
+ * prompt goes out, so a fork from the end of a turn holds the turn as it
+ * ended, before the compaction. One in the middle of a turn is the turn's.
+ */
 export function turnsOf(records: Rec[]): TurnRecords[] {
   const out: TurnRecords[] = [{ n: 0, records: [] }];
   for (const r of records) {
-    if (startsTurn(r)) out.push({ n: out.length, start: r, records: [] });
+    if (startsTurn(r)) {
+      const before = out.at(-1)!.records;
+      const answered = before.findLastIndex((x) => x.type === "message" && x.role === "assistant");
+      const from = before.findIndex((x, i) => i > answered && compacts(x));
+      out.push({ n: out.length, start: r, records: from >= 0 ? before.splice(from) : [] });
+    }
     out.at(-1)!.records.push(r);
   }
   return out;
