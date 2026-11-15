@@ -437,17 +437,16 @@ var recordsFile = (repo, session) => join3(repo.sessions, `${session}.jsonl.gz`)
 var plainFile = (repo, session) => join3(repo.sessions, `${session}.jsonl`);
 function text(repo, session) {
   const gz = recordsFile(repo, session);
-  if (existsSync3(gz)) {
-    const buf = readFileSync2(gz);
-    try {
-      return { text: gunzipSync(buf).toString("utf8"), truncated: false };
-    } catch {
-      const partial = gunzipSync(buf, { finishFlush: constants.Z_SYNC_FLUSH }).toString("utf8");
-      return { text: partial.slice(0, partial.lastIndexOf("\n") + 1), truncated: true };
-    }
-  }
   const plain2 = plainFile(repo, session);
-  return { text: existsSync3(plain2) ? readFileSync2(plain2, "utf8") : "", truncated: false };
+  const after = existsSync3(plain2) ? readFileSync2(plain2, "utf8") : "";
+  if (!existsSync3(gz)) return { text: after, truncated: false };
+  const buf = readFileSync2(gz);
+  try {
+    return { text: gunzipSync(buf).toString("utf8") + after, truncated: false };
+  } catch {
+    const partial = gunzipSync(buf, { finishFlush: constants.Z_SYNC_FLUSH }).toString("utf8");
+    return { text: partial.slice(0, partial.lastIndexOf("\n") + 1) + after, truncated: true };
+  }
 }
 function sessionFile(repo, session) {
   const gz = recordsFile(repo, session);
@@ -478,8 +477,10 @@ function appendRecords(repo, session, records, agents = /* @__PURE__ */ new Map(
   ensureStore(repo);
   const gz = recordsFile(repo, session);
   const plain2 = plainFile(repo, session);
-  if (!existsSync3(gz) && existsSync3(plain2)) {
-    writeFileSync3(gz, gzipSync(readFileSync2(plain2)));
+  if (existsSync3(plain2)) {
+    const before = readFileSync2(plain2);
+    if (existsSync3(gz)) appendFileSync(gz, gzipSync(before));
+    else writeFileSync3(gz, gzipSync(before));
     rmSync(plain2);
   }
   appendFileSync(gz, gzipSync(toJsonl(lines)));
@@ -2075,7 +2076,7 @@ function turnDetail(records) {
 }
 
 // src/version.ts
-var VERSION = "0.4.0";
+var VERSION = "0.4.1";
 
 // src/save.ts
 function actorId(repo) {

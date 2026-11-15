@@ -878,10 +878,20 @@ test("a session's file is gzip, one member per save, which zcat reads whole; bra
   assert.equal(existsSync(plain), false);
   assert.match(braid(s.env, repo, ["log", ALICE]).stdout, /5b0e2c1a\.3 +One more\.\n$/);
 
+  // Lines an older braid still running appends uncompressed read after the file's, and the next save folds them in.
+  appendFileSync(plain, `${JSON.stringify({ type: "message", id: "older-braid-line", role: "assistant", content: "From an older braid." })}\n`);
+  assert.match(braid(s.env, repo, ["log", ALICE, "--records"]).stdout, /assistant +From an older braid\.\n$/);
+  t.user("And another.");
+  t.assistant("Done.");
+  stop();
+  assert.equal(existsSync(plain), false);
+  const ids = saved(repo, ALICE).map((r) => r.id);
+  assert.ok(ids.indexOf("older-braid-line") >= 0 && ids.indexOf("older-braid-line") < ids.length - 2, "folded in before the new save's records");
+
   // A save cut short, as by a crash while it wrote: what was written whole reads back, and braid verify says so.
   const whole = readFileSync(file);
   writeFileSync(file, Buffer.concat([whole, gzip(Buffer.from('{"type":"message","id":"x"}\n'.repeat(50))).subarray(0, 30)]));
-  assert.match(braid(s.env, repo, ["log", ALICE]).stdout, /5b0e2c1a\.3 +One more\.\n$/);
+  assert.match(braid(s.env, repo, ["log", ALICE]).stdout, /5b0e2c1a\.4 +And another\.\n$/);
   const v = braid(s.env, repo, ["verify", "--session", ALICE]);
   assert.equal(v.status, 1);
   assert.match(v.stdout, /✗ file: the last save was cut short/);

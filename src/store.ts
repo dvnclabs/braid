@@ -20,21 +20,25 @@ export interface Read {
   truncated: boolean;
 }
 
-/** The text of a session's file, and whether its last gzip member was cut short. */
+/**
+ * The text of a session's file, and whether its last gzip member was cut
+ * short. Lines an older braid appended to an uncompressed <id>.jsonl, as one
+ * still running in an agent does until the agent reloads its plugins, follow:
+ * the next save folds them in.
+ */
 function text(repo: Repo, session: string): { text: string; truncated: boolean } {
   const gz = recordsFile(repo, session);
-  if (existsSync(gz)) {
-    const buf = readFileSync(gz);
-    try {
-      return { text: gunzipSync(buf).toString("utf8"), truncated: false };
-    } catch {
-      // A member cut short: what decodes is kept, up to its last whole line.
-      const partial = gunzipSync(buf, { finishFlush: constants.Z_SYNC_FLUSH }).toString("utf8");
-      return { text: partial.slice(0, partial.lastIndexOf("\n") + 1), truncated: true };
-    }
-  }
   const plain = plainFile(repo, session);
-  return { text: existsSync(plain) ? readFileSync(plain, "utf8") : "", truncated: false };
+  const after = existsSync(plain) ? readFileSync(plain, "utf8") : "";
+  if (!existsSync(gz)) return { text: after, truncated: false };
+  const buf = readFileSync(gz);
+  try {
+    return { text: gunzipSync(buf).toString("utf8") + after, truncated: false };
+  } catch {
+    // A member cut short: what decodes is kept, up to its last whole line.
+    const partial = gunzipSync(buf, { finishFlush: constants.Z_SYNC_FLUSH }).toString("utf8");
+    return { text: partial.slice(0, partial.lastIndexOf("\n") + 1) + after, truncated: true };
+  }
 }
 
 /** The file that holds a session: compressed, or as braid 0.2 kept it until its next save. */
@@ -79,10 +83,12 @@ export function appendRecords(repo: Repo, session: string, records: Rec[], agent
   if (lines.length === 0) return;
   ensureStore(repo);
   const gz = recordsFile(repo, session);
-  // A session braid 0.2 kept uncompressed is compressed first, whole.
+  // What an older braid wrote uncompressed goes in first, as a member of its own.
   const plain = plainFile(repo, session);
-  if (!existsSync(gz) && existsSync(plain)) {
-    writeFileSync(gz, gzipSync(readFileSync(plain)));
+  if (existsSync(plain)) {
+    const before = readFileSync(plain);
+    if (existsSync(gz)) appendFileSync(gz, gzipSync(before));
+    else writeFileSync(gz, gzipSync(before));
     rmSync(plain);
   }
   appendFileSync(gz, gzipSync(toJsonl(lines)));
