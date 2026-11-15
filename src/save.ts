@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { appendRecords, readAgents, readRecords } from "./store.ts";
 import { config } from "./git.ts";
 import { about, lastTurn, withBraid, type Actor, type Rec } from "./records.ts";
-import { checkoutOf, ensureStore, type Repo } from "./repo.ts";
-import { recordSession } from "./registry.ts";
+import { checkoutOf, ensureStore, projectOf, repoFor, type Repo } from "./repo.ts";
+import { recordSession, sessionsOnMachine, type OnMachine } from "./registry.ts";
 import { loadState, newState, saveState, withLock, type SessionState } from "./state.ts";
 import { formatOf, intact, readWindow, START, type Format, type Window } from "./transcript.ts";
 import { startsTurn } from "./turns.ts";
@@ -236,4 +236,49 @@ export function register(repo: Repo, session: string, transcript?: string, agent
   if (cwd) state.ran ??= checkoutOf(cwd);
   saveState(repo, state);
   return state;
+}
+
+export interface Saved {
+  session: string;
+  repo: Repo;
+  added: number;
+  state?: SessionState;
+  error?: string;
+}
+
+/**
+ * `braid save --all`: every Claude Code and Codex session on this machine that
+ * ran in the project `cwd` is in, in any of its worktrees, saved up to now, as
+ * sessions that started before braid was installed. A session saved already
+ * gets only what it wrote since. A session that ran in a folder since deleted,
+ * as a removed worktree, cannot be told apart and is left out.
+ */
+export function saveAll(cwd: string): { project: string; saved: Saved[] } {
+  const { project, sessions } = projectSessions(cwd);
+  const saved = sessions.map((s): Saved => {
+      const repo = repoFor(s.session, s.cwd);
+    try {
+      register(repo, s.session, s.transcript, s.agent, s.cwd);
+      return { session: s.session, repo, ...save(repo, s.session, s.transcript, { agent: s.agent }) };
+    } catch (err) {
+      return { session: s.session, repo, added: 0, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  return { project, saved };
+}
+
+/** The sessions on this machine that ran in the project `cwd` is in, in any of its worktrees. */
+export function projectSessions(cwd: string): { project: string; sessions: OnMachine[] } {
+  const project = projectOf(cwd);
+  const projects = new Map<string, string>();
+  const projectAt = (dir: string) => {
+    if (!projects.has(dir)) projects.set(dir, existsSync(dir) ? projectOf(dir) : "");
+    return projects.get(dir);
+  };
+  return { project, sessions: sessionsOnMachine().filter((s) => projectAt(s.cwd) === project) };
+}
+
+/** Sessions of the project `cwd` is in that ran on this machine and braid has not saved, as those from before it was installed. */
+export function unsaved(cwd: string): OnMachine[] {
+  return projectSessions(cwd).sessions.filter((s) => !((loadState(repoFor(s.session, s.cwd), s.session)?.chunks ?? 0) > 0));
 }

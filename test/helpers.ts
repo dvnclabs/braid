@@ -75,11 +75,14 @@ export function clone(s: Env, name: string, email: string): string {
 export class Transcript {
   readonly path: string;
   readonly session: string;
+  /** The folder the session runs in, which each record names. */
+  cwd = "/work";
   private last: string | null = null;
   private n = 0;
 
-  constructor(dir: string, session: string) {
+  constructor(dir: string, session: string, cwd?: string) {
     this.session = session;
+    if (cwd) this.cwd = cwd;
     this.path = join(dir, `${session}.jsonl`);
     writeFileSync(this.path, "");
   }
@@ -94,7 +97,7 @@ export class Transcript {
       message,
       uuid,
       timestamp: new Date(Date.UTC(2026, 10, 9, 10, 0, this.n)).toISOString(),
-      cwd: "/work",
+      cwd: this.cwd,
       sessionId: this.session,
       version: "2.1.222",
       userType: "external",
@@ -142,7 +145,7 @@ export class Transcript {
     this.n += 1;
     const uuid = `${this.session.slice(0, 8)}-0000-4000-8000-${String(this.n).padStart(12, "0")}`;
     const time = new Date(Date.UTC(2026, 10, 9, 10, 0, this.n)).toISOString();
-    this.raw({ parentUuid: this.last, isSidechain: false, type: "system", subtype, content, isMeta: false, uuid, timestamp: time, cwd: "/work", sessionId: this.session, version: "2.1.222", userType: "external" });
+    this.raw({ parentUuid: this.last, isSidechain: false, type: "system", subtype, content, isMeta: false, uuid, timestamp: time, cwd: this.cwd, sessionId: this.session, version: "2.1.222", userType: "external" });
     this.last = uuid;
     return uuid;
   }

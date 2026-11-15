@@ -329,7 +329,7 @@ function config(key, opts) {
 }
 
 // src/registry.ts
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, writeFileSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join } from "node:path";
 function file(session) {
@@ -353,17 +353,61 @@ var list = (dir) => {
 function transcriptOf(session) {
   const known = readEntry(session)?.transcript;
   if (known || !/^[A-Za-z0-9-]{8,80}$/.test(session)) return known;
-  const projects = join(process.env.CLAUDE_CONFIG_DIR || join(homedir2(), ".claude"), "projects");
+  const projects = claudeProjects();
   const claude = list(projects).map((d) => join(projects, d, `${session}.jsonl`)).find((p) => existsSync(p));
   if (claude) return claude;
-  const sessions = join(process.env.CODEX_HOME || join(homedir2(), ".codex"), "sessions");
-  for (const y of list(sessions).sort().reverse())
-    for (const m of list(join(sessions, y)).sort().reverse())
-      for (const d of list(join(sessions, y, m)).sort().reverse()) {
-        const name = list(join(sessions, y, m, d)).find((f) => f.startsWith("rollout-") && f.endsWith(`-${session}.jsonl`));
-        if (name) return join(sessions, y, m, d, name);
-      }
+  for (const dir of codexDays().reverse()) {
+    const name = list(dir).find((f) => f.startsWith("rollout-") && f.endsWith(`-${session}.jsonl`));
+    if (name) return join(dir, name);
+  }
   return void 0;
+}
+var claudeProjects = () => join(process.env.CLAUDE_CONFIG_DIR || join(homedir2(), ".claude"), "projects");
+function codexDays() {
+  const sessions = join(process.env.CODEX_HOME || join(homedir2(), ".codex"), "sessions");
+  const sub = (dir) => list(dir).sort().map((d) => join(dir, d));
+  return sub(sessions).flatMap(sub).flatMap(sub);
+}
+function cwdOf(path2) {
+  let fd;
+  try {
+    fd = openSync(path2, "r");
+    const block = Buffer.alloc(1 << 16);
+    let text2 = "";
+    for (let at = 0; at < 1 << 23; ) {
+      const n = readSync(fd, block, 0, block.length, at);
+      if (n === 0) return void 0;
+      at += n;
+      text2 += block.subarray(0, n).toString("latin1");
+      const m = /"cwd":"((?:[^"\\]|\\.)*)"/.exec(text2);
+      if (m) return JSON.parse(Buffer.from(`"${m[1]}"`, "latin1").toString("utf8"));
+      text2 = text2.slice(-4096);
+    }
+    return void 0;
+  } catch {
+    return void 0;
+  } finally {
+    if (fd !== void 0) closeSync(fd);
+  }
+}
+function sessionsOnMachine() {
+  const out = [];
+  const add = (session, transcript, agent) => {
+    const cwd = cwdOf(transcript);
+    if (cwd) out.push({ session, transcript, agent, cwd });
+  };
+  const projects = claudeProjects();
+  for (const d of list(projects))
+    for (const f of list(join(projects, d))) {
+      const session = /^([A-Za-z0-9-]{8,80})\.jsonl$/.exec(f)?.[1];
+      if (session) add(session, join(projects, d, f), "claude-code");
+    }
+  for (const dir of codexDays())
+    for (const f of list(dir)) {
+      const session = /^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(f)?.[1];
+      if (session) add(session, join(dir, f), "codex");
+    }
+  return out;
 }
 function readEntry(session) {
   const path2 = file(session);
@@ -537,7 +581,7 @@ function withLock(repo, name, fn) {
 
 // src/transcript.ts
 import { createHash as createHash2 } from "node:crypto";
-import { closeSync, existsSync as existsSync5, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync as closeSync2, existsSync as existsSync5, fstatSync, openSync as openSync2, readSync as readSync2 } from "node:fs";
 
 // node_modules/@leostera/atxf/dist/types.js
 var TREE_TYPES = /* @__PURE__ */ new Set([
@@ -1854,13 +1898,13 @@ var codex = defineConverter({ agent: AGENT2, format: FORMAT2, framing: jsonl, de
 // src/transcript.ts
 function formatOf(path2) {
   if (!path2 || !existsSync5(path2)) return void 0;
-  const fd = openSync(path2, "r");
+  const fd = openSync2(path2, "r");
   try {
     const head = readAt(fd, 0, 4096).toString("utf8");
     if (!head.trim()) return void 0;
     return /^\{[^\n]*"type"\s*:\s*"session_meta"/.test(head) ? "codex" : "claude-code";
   } finally {
-    closeSync(fd);
+    closeSync2(fd);
   }
 }
 var START = { offset: 0, lines: 0, mark: "" };
@@ -1871,7 +1915,7 @@ function readAt(fd, start, length) {
   const buf = Buffer.alloc(length);
   let n = 0;
   while (n < length) {
-    const r = readSync(fd, buf, n, length - n, start + n);
+    const r = readSync2(fd, buf, n, length - n, start + n);
     if (r === 0) break;
     n += r;
   }
@@ -1885,13 +1929,13 @@ function newlines(buf, from, to) {
 var hash = (buf) => createHash2("sha256").update(buf).digest("base64");
 function intact(path2, cursor) {
   if (cursor.offset === 0) return true;
-  const fd = openSync(path2, "r");
+  const fd = openSync2(path2, "r");
   try {
     if (fstatSync(fd).size < cursor.offset) return false;
     const start = lineAt(fd, cursor.offset - 1);
     return hash(readAt(fd, start, cursor.offset - start)) === cursor.mark;
   } finally {
-    closeSync(fd);
+    closeSync2(fd);
   }
 }
 function renumber(records, base, session, format = "claude-code") {
@@ -1971,7 +2015,7 @@ function lastLine(buf, end) {
 }
 function readWindow(path2, cursor, session, limits = {}, format = "claude-code") {
   const { maxBytes = MAX_WINDOW, overlap = OVERLAP, until = Infinity } = limits;
-  const fd = openSync(path2, "r");
+  const fd = openSync2(path2, "r");
   try {
     const size = Math.min(fstatSync(fd).size, until);
     if (size <= cursor.offset) return void 0;
@@ -2021,7 +2065,7 @@ function readWindow(path2, cursor, session, limits = {}, format = "claude-code")
       more: end < size
     };
   } finally {
-    closeSync(fd);
+    closeSync2(fd);
   }
 }
 
@@ -2076,7 +2120,7 @@ function turnDetail(records) {
 }
 
 // src/version.ts
-var VERSION = "0.4.1";
+var VERSION = "0.4.2";
 
 // src/save.ts
 function actorId(repo) {
@@ -2254,6 +2298,31 @@ function register(repo, session, transcript, agent, cwd) {
   saveState(repo, state);
   return state;
 }
+function saveAll(cwd) {
+  const { project, sessions } = projectSessions(cwd);
+  const saved = sessions.map((s) => {
+    const repo = repoFor(s.session, s.cwd);
+    try {
+      register(repo, s.session, s.transcript, s.agent, s.cwd);
+      return { session: s.session, repo, ...save(repo, s.session, s.transcript, { agent: s.agent }) };
+    } catch (err) {
+      return { session: s.session, repo, added: 0, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  return { project, saved };
+}
+function projectSessions(cwd) {
+  const project = projectOf(cwd);
+  const projects = /* @__PURE__ */ new Map();
+  const projectAt = (dir) => {
+    if (!projects.has(dir)) projects.set(dir, existsSync6(dir) ? projectOf(dir) : "");
+    return projects.get(dir);
+  };
+  return { project, sessions: sessionsOnMachine().filter((s) => projectAt(s.cwd) === project) };
+}
+function unsaved(cwd) {
+  return projectSessions(cwd).sessions.filter((s) => !((loadState(repoFor(s.session, s.cwd), s.session)?.chunks ?? 0) > 0));
+}
 
 // src/setup.ts
 import { chmodSync, existsSync as existsSync8, mkdirSync as mkdirSync4, readFileSync as readFileSync5, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync5 } from "node:fs";
@@ -2263,16 +2332,16 @@ import { fileURLToPath } from "node:url";
 
 // src/replay.ts
 import { randomUUID } from "node:crypto";
-import { closeSync as closeSync2, existsSync as existsSync7, openSync as openSync2, readSync as readSync2, realpathSync as realpathSync2 } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync7, openSync as openSync3, readSync as readSync3, realpathSync as realpathSync2 } from "node:fs";
 function launchDir(transcript) {
   if (!transcript || !existsSync7(transcript)) return void 0;
   const buf = Buffer.alloc(256 * 1024);
-  const fd = openSync2(transcript, "r");
+  const fd = openSync3(transcript, "r");
   let n;
   try {
-    n = readSync2(fd, buf, 0, buf.length, 0);
+    n = readSync3(fd, buf, 0, buf.length, 0);
   } finally {
-    closeSync2(fd);
+    closeSync3(fd);
   }
   for (const line of buf.subarray(0, n).toString("utf8").split("\n")) {
     try {
@@ -3212,6 +3281,8 @@ Codex's $CODEX_THREAD_ID), or the one named with --session <id>.
     --new                     another session, even when the same fork was written before
   braid verify [<session>|--all]   check that a session was saved as it happened and loads back the same
   braid save                  save this session now (the Stop hook does this after each turn)
+    --all                     every session on this machine that ran in this project, in any of its
+                              worktrees, as those from before braid was installed
   braid migrate               move conversations from braid 0.1's ~/.braid into their projects
 
   <session> is a session id or its first characters, or the name you gave it with /rename.
@@ -3329,12 +3400,29 @@ function main(argv) {
         const r = save(repo, current, transcript);
         out(`braid: saved this conversation (${named(repo, current)}), ${r.added} records, in ${sessionFile(repo, current)}`);
       }
+      const earlier = unsaved(process.cwd()).filter((s) => s.session !== current).length;
+      if (earlier) out(`braid: ${earlier} earlier session${earlier === 1 ? "" : "s"} of this project on this machine ${earlier === 1 ? "is" : "are"} not saved: braid save --all saves them`);
       return 0;
     }
     case "migrate":
       for (const note of migrate()) out(`braid: ${note}`);
       return 0;
     case "save": {
+      if (opts.all === true) {
+        const { project, saved } = saveAll(process.cwd());
+        if (saved.length === 0) {
+          out(`braid: no Claude Code or Codex session on this machine ran in ${project}`);
+          return 0;
+        }
+        const rows = saved.filter((r2) => !r2.error && r2.state && r2.state.chunks > 0).map((r2) => ({ r: r2, name: named(r2.repo, r2.session), title: r2.state?.title ? printable(r2.state.title.text, 50) : "" })).sort((a, b) => a.title.localeCompare(b.title));
+        const width = Math.max(0, ...rows.map((x) => x.name.length));
+        const fresh = rows.filter((x) => x.r.added > 0).length;
+        out(`braid: ${rows.length} session${rows.length === 1 ? "" : "s"} of ${project}, kept in ${join12(project, ".braid", "sessions")}; ${fresh} saved now, ${rows.length - fresh} up to date already`);
+        for (const x of rows) out(`  ${x.name.padEnd(width)}  ${x.title}${x.r.added ? `  (${x.r.added} records saved)` : ""}`);
+        for (const r2 of saved.filter((r3) => r3.error)) out(`  ${r2.session.slice(0, 8)}  not saved: ${r2.error}`);
+        out("braid log <session> lists a session's turns; braid fork <session> continues it in a new window");
+        return 0;
+      }
       const session = needSession(current);
       const repo = here();
       const known = loadState(repo, session)?.transcript;

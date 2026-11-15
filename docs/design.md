@@ -52,6 +52,8 @@ Claude Code writes each subagent to its own file next to the transcript. braid s
 
 Each record keeps its native line in ATXF's `native` field, so braid can give back the agent's file byte for byte. A save appends, so it costs about the size of what the turn added. Agents delete old transcripts (Claude Code after 30 days by default), and the project's `.braid` folder keeps them.
 
+Sessions from before braid was installed are saved when asked: `braid save --all` finds every Claude Code transcript under `projects/` and every Codex rollout under `sessions/`, reads the folder each session started in from the start of its file, and saves those whose folder is in this project, in any of its worktrees. A session saved already gets only what it wrote since. A session whose folder is gone, as a removed worktree's, cannot be told apart from another project's and is left out. `braid init` says how many are waiting.
+
 ## Status
 
 The status line shows the session braid is saving, by the name of its newest turn, and what it is about:
@@ -139,7 +141,7 @@ The skills and the hooks call the CLI. You rarely need it yourself.
 | `braid log [<session>] [--records]` | a session's turns, each by name with what it did; `--records`: each record under its turn |
 | `braid fork [<session>\|<session>.<n>\|.<n>] [--cwd <path>] [--to claude-code\|codex] [--new]` | the command to continue a session, or one from the end of its turn n, in a new window, in Claude Code or Codex: the agent it runs in unless `--to` names the other; with no target, this one. The same fork asked for again is the same session; `--new` writes another |
 | `braid verify [<session>\|--all]` | check that a session was saved as it happened and loads back the same |
-| `braid save` | save this session now; the Stop hook does it after each turn |
+| `braid save [--all]` | save this session now; the Stop hook does it after each turn. `--all`: every Claude Code and Codex session on the machine that ran in this project, in any of its worktrees, as those from before braid was installed |
 | `braid migrate` | move conversations from 0.1's `~/.braid` into the projects they ran in, each conversation whole, to the project its first session ran in |
 
 A session is addressed by its id or a unique prefix, or by the name you gave it with `/rename`; an id finds a session another project keeps too. Inside an agent, commands act on the current session, which braid takes from `BRAID_SESSION`, else from Claude Code's `CLAUDE_CODE_SESSION_ID` or Codex's `CODEX_THREAD_ID`.

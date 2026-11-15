@@ -9,9 +9,9 @@ import { migrate, waitingToMove } from "./migrate.ts";
 import { claudeEnv, harness } from "./harness.ts";
 import { launchDir, replay, shellWord } from "./replay.ts";
 import { currentAgent, currentSession, knownSessions, recordSession, transcriptOf } from "./registry.ts";
-import { ago, describe, isTurn, promptLine } from "./records.ts";
+import { ago, describe, isTurn, printable, promptLine } from "./records.ts";
 import { configDir, repoAt, repoFor, type Repo } from "./repo.ts";
-import { save } from "./save.ts";
+import { save, saveAll, unsaved } from "./save.ts";
 import { cliPath, init, setup } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
 import { computeStatus } from "./status.ts";
@@ -41,6 +41,8 @@ Codex's $CODEX_THREAD_ID), or the one named with --session <id>.
     --new                     another session, even when the same fork was written before
   braid verify [<session>|--all]   check that a session was saved as it happened and loads back the same
   braid save                  save this session now (the Stop hook does this after each turn)
+    --all                     every session on this machine that ran in this project, in any of its
+                              worktrees, as those from before braid was installed
   braid migrate               move conversations from braid 0.1's ~/.braid into their projects
 
   <session> is a session id or its first characters, or the name you gave it with /rename.
@@ -177,12 +179,33 @@ function main(argv: string[]): number {
         const r = save(repo, current, transcript);
         out(`braid: saved this conversation (${named(repo, current)}), ${r.added} records, in ${sessionFile(repo, current)}`);
       }
+      // Sessions of this project from before braid was installed are saved when asked.
+      const earlier = unsaved(process.cwd()).filter((s) => s.session !== current).length;
+      if (earlier) out(`braid: ${earlier} earlier session${earlier === 1 ? "" : "s"} of this project on this machine ${earlier === 1 ? "is" : "are"} not saved: braid save --all saves them`);
       return 0;
     }
     case "migrate":
       for (const note of migrate()) out(`braid: ${note}`);
       return 0;
     case "save": {
+      if (opts.all === true) {
+        const { project, saved } = saveAll(process.cwd());
+        if (saved.length === 0) {
+          out(`braid: no Claude Code or Codex session on this machine ran in ${project}`);
+          return 0;
+        }
+        const rows = saved
+          .filter((r) => !r.error && r.state && r.state.chunks > 0)
+          .map((r) => ({ r, name: named(r.repo, r.session), title: r.state?.title ? printable(r.state.title.text, 50) : "" }))
+          .sort((a, b) => a.title.localeCompare(b.title));
+        const width = Math.max(0, ...rows.map((x) => x.name.length));
+        const fresh = rows.filter((x) => x.r.added > 0).length;
+        out(`braid: ${rows.length} session${rows.length === 1 ? "" : "s"} of ${project}, kept in ${join(project, ".braid", "sessions")}; ${fresh} saved now, ${rows.length - fresh} up to date already`);
+        for (const x of rows) out(`  ${x.name.padEnd(width)}  ${x.title}${x.r.added ? `  (${x.r.added} records saved)` : ""}`);
+        for (const r of saved.filter((r) => r.error)) out(`  ${r.session.slice(0, 8)}  not saved: ${r.error}`);
+        out("braid log <session> lists a session's turns; braid fork <session> continues it in a new window");
+        return 0;
+      }
       const session = needSession(current);
       const repo = here();
       const known = loadState(repo, session)?.transcript;

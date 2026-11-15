@@ -1,6 +1,6 @@
 {
   "name": "@gbarbalinardo/braid",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "braid: efficient session manager. Saves every Claude Code and Codex session in the project it runs in, as it happens, so you can go back to any turn and continue it in either agent.",
   "license": "MIT",
   "author": "Giuseppe Barbalinardo",

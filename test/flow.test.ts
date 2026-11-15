@@ -897,3 +897,67 @@ test("a session's file is gzip, one member per save, which zcat reads whole; bra
   assert.match(v.stdout, /✗ file: the last save was cut short/);
 });
 
+
+test("braid save --all saves every session of the project on this machine, in any of its worktrees, as those from before braid was installed", () => {
+  const s = sandbox();
+  const repo = realpathSync(clone(s, "lou", "lou@example.com"));
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  const feature = join(s.root, "lou-feature");
+  must(s.env, repo, "git", ["worktree", "add", "--quiet", "-b", "feature", feature]);
+  const elsewhere = join(s.root, "notes");
+  mkdirSync(join(repo, "docs"));
+  mkdirSync(elsewhere);
+  const codexHome = join(s.root, "codex");
+  const env = { ...s.env, CODEX_HOME: codexHome };
+  // Claude Code keeps each session under projects/, in a folder named for where it started; no braid hook ran for any.
+  const projects = (dir: string) => {
+    const p = join(s.env.HOME!, ".claude", "projects", realpathSync(dir).replace(/[^A-Za-z0-9]/g, "-"));
+    mkdirSync(p, { recursive: true });
+    return p;
+  };
+  const inMain = new Transcript(projects(repo), ALICE, repo);
+  // A first line longer than a read, naming another folder only inside its text, as a pasted file does.
+  inMain.raw({ type: "attachment", content: `"cwd":"${elsewhere}" ${"x".repeat(200_000)}`, sessionId: ALICE });
+  inMain.raw({ type: "custom-title", customTitle: "financial-plan", sessionId: ALICE });
+  inMain.user("Plan the budget.");
+  inMain.assistant("Rent first.");
+  const inWorktree = new Transcript(projects(feature), BOB, feature);
+  inWorktree.raw({ type: "custom-title", customTitle: "crm-attio", sessionId: BOB });
+  inWorktree.user("Sync the CRM.");
+  inWorktree.assistant("Synced.");
+  const OTHER = "9d0e1f2a-0000-4000-8000-0000000000cc";
+  const other = new Transcript(projects(elsewhere), OTHER, elsewhere);
+  other.user("Unrelated.");
+  other.assistant("Fine.");
+  const CODEX = "01a1d58a-9cbc-7901-ae2d-6eed8de9cde3";
+  const r = new Rollout(codexHome, CODEX, join(repo, "docs"));
+  r.turn("Draft the whitepaper.", join(repo, "docs"));
+  r.assistant("Drafted.");
+  r.end();
+
+  // init names what is waiting; nothing is saved until asked.
+  assert.match(braid(env, repo, ["init"]).stdout, /^braid: 3 earlier sessions of this project on this machine are not saved: braid save --all saves them$/m);
+  assert.equal(existsSync(join(repo, ".braid", "sessions", `${ALICE}.jsonl.gz`)), false);
+
+  const all = braid(env, feature, ["save", "--all"]);
+  assert.equal(all.status, 0, all.stderr);
+  const lines = all.stdout.split("\n");
+  assert.equal(lines[0], `braid: 3 sessions of ${repo}, kept in ${join(repo, ".braid", "sessions")}; 3 saved now, 0 up to date already`);
+  assert.match(all.stdout, /^ {2}01a1bc3e\.1 +crm-attio {2}\(\d+ records saved\)$/m);
+  assert.match(all.stdout, /^ {2}5b0e2c1a\.1 +financial-plan {2}\(\d+ records saved\)$/m);
+  assert.match(all.stdout, /^ {2}01a1d58a\.1 +Draft the whitepaper\. {2}\(\d+ records saved\)$/m);
+  assert.doesNotMatch(all.stdout, /9d0e1f2a/, "a session of another folder is not this project's");
+  assert.equal(existsSync(join(elsewhere, ".braid")), false);
+  assert.deepEqual(saved(repo, ALICE).filter((x) => x.type === "message").map((x) => x.content?.[1]?.text ?? x.content), ["Plan the budget.", "Rent first."]);
+  assert.match(braid(env, repo, ["status", "--session", BOB]).stdout, /^ {2}ran in \S+\/lou-feature$/m);
+  assert.equal(braid(env, repo, ["log", "financial-plan"]).stdout, "5b0e2c1a.1    Plan the budget.\n");
+
+  // Again: only what was written since.
+  inMain.user("And savings?");
+  inMain.assistant("Ten percent.");
+  const again = braid(env, repo, ["save", "--all"]).stdout;
+  assert.match(again, /; 1 saved now, 2 up to date already\n/);
+  assert.match(again, /^ {2}5b0e2c1a\.2 +financial-plan {2}\(2 records saved\)$/m);
+  assert.doesNotMatch(braid(env, repo, ["init"]).stdout, /earlier session/);
+  assert.equal(braid(env, elsewhere, ["save", "--all"]).stdout.split("\n")[0], `braid: 1 session of ${realpathSync(elsewhere)}, kept in ${join(realpathSync(elsewhere), ".braid", "sessions")}; 1 saved now, 0 up to date already`);
+});
