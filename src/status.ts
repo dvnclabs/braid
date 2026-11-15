@@ -1,12 +1,10 @@
-// What the status line shows: committed records not published yet (↑), turns
-// since the last commit (*), and sessions built on this one that wait to be
-// merged (↓).
-import { readRecords } from "./chunks.ts";
-import { forEachRef } from "./git.ts";
-import { braidOf, committedLength, isTurn, lastTurn, type Rec } from "./records.ts";
-import { isEnabled, remoteRefs, SESSION_REFS, storeRef, type Repo } from "./repo.ts";
-import { spread } from "./publish.ts";
+// What the status line shows after a session's name: sessions built on this
+// one that wait to be merged (↓), and a session that failed braid verify (⚠).
+import { allSessions, sessionName } from "./load.ts";
+import { braidOf, isTurn, lastTurn, type Rec } from "./records.ts";
+import type { Repo } from "./repo.ts";
 import { loadState } from "./state.ts";
+import { readRecords } from "./store.ts";
 
 export interface Waiting {
   session: string;
@@ -19,43 +17,11 @@ export interface Waiting {
 
 export interface Status {
   session: string;
+  saved: boolean;
   /** The last braid verify, when the session ended, found problems. */
   broken?: boolean;
-  enabled: boolean;
-  saved: boolean;
   conv?: string;
-  private: boolean;
-  /** Saved, never committed, never published. */
-  local: boolean;
-  /** Committed turns not published yet. */
-  ahead: number;
-  /** Turns since the last commit. */
-  uncommitted: number;
   waiting: Waiting[];
-}
-
-/** Keeps names printable: other people write them. */
-export function cleanName(name: string): string {
-  return name.replace(/[^A-Za-z0-9/._-]/g, "").slice(0, 32);
-}
-
-export function sessionName(records: Rec[], session: string): string {
-  const label = records.find((r) => r.type === "label" && typeof r.label === "string" && !braidOf(r).commit && !braidOf(r).code);
-  return (label && cleanName(String(label.label))) || session.slice(0, 8);
-}
-
-/** "5b0e2c1a", or "5b0e2c1a (review/bob)" when the session has a name. */
-export function sessionTitle(records: Rec[], session: string): string {
-  const name = sessionName(records, session);
-  return name === session.slice(0, 8) ? name : `${session.slice(0, 8)} (${name})`;
-}
-
-/** The conversation a session of the store belongs to. */
-export function convOf(repo: Repo, session: string): string | undefined {
-  const state = loadState(repo, session);
-  if (state && state.chunks > 0) return state.conv;
-  const ref = forEachRef([`${SESSION_REFS}/*/${session}`], { gitDir: repo.store })[0];
-  return ref?.ref.split("/")[2];
 }
 
 /** Records of `others` that no merge in `mine` covers. A merge covers its heads and everything before them. */
@@ -73,58 +39,37 @@ export function uncovered(mine: Rec[], others: Rec[], extraHeads: string[] = [])
   return others.filter((r) => isTurn(r) && !covered.has(r.id));
 }
 
-export function computeStatus(repo: Repo, session: string, remote = "origin"): Status {
-  const status: Status = { session, enabled: isEnabled(repo), saved: false, private: false, local: false, ahead: 0, uncommitted: 0, waiting: [] };
-  const conv = convOf(repo, session);
-  if (!conv) return status;
+export function computeStatus(repo: Repo, session: string): Status {
+  const status: Status = { session, saved: false, waiting: [] };
   const state = loadState(repo, session);
-  const mine = readRecords(storeRef(conv, session), { gitDir: repo.store });
-  if (mine.length === 0) return status;
-  Object.assign(status, { saved: true, conv, private: state?.private ?? false, broken: state?.verified?.ok === false });
-
-  const tracking = remoteRefs(remote);
-  const published = new Set(readRecords(`${tracking}/${conv}/${session}`, { cwd: repo.top }).map((r) => r.id));
-  // A withheld record takes its tool results along, as publishing does.
-  const withheld = spread(new Map((state?.withheld ?? []).map((id) => [id, "you"])), mine, new Map());
-  const committed = committedLength(mine);
-  const counts = (recs: Rec[]) => recs.filter((r) => isTurn(r) && !published.has(r.id) && !withheld.has(r.id)).length;
-  status.ahead = counts(mine.slice(0, committed));
-  status.uncommitted = counts(mine.slice(committed));
-  status.local = published.size === 0 && committed === 0;
-
+  if (!state || state.chunks === 0) return status;
+  const mine = readRecords(repo, session);
+  Object.assign(status, { saved: mine.length > 0, conv: state.conv, broken: state.verified?.ok === false });
   const myIds = new Set(mine.map((r) => r.id));
-  const pending = state?.pendingMerge ? [state.pendingMerge.fromHead] : [];
-  // Your own branches of this conversation, then everyone's published sessions.
-  const refs = new Map<string, { ref: string; opts: { gitDir?: string; cwd?: string } }>();
-  for (const { ref } of forEachRef([`${SESSION_REFS}/${conv}/`], { gitDir: repo.store })) refs.set(ref.slice(ref.lastIndexOf("/") + 1), { ref, opts: { gitDir: repo.store } });
-  for (const { ref } of forEachRef([`${tracking}/${conv}/`], { cwd: repo.top })) {
-    const other = ref.slice(ref.lastIndexOf("/") + 1);
-    if (!refs.has(other)) refs.set(other, { ref, opts: { cwd: repo.top } });
-  }
-  for (const [other, { ref, opts }] of refs) {
-    if (other === session) continue;
-    const theirs = readRecords(ref, opts);
+  const pending = state.pendingMerge ? [state.pendingMerge.fromHead] : [];
+  // Branches of this conversation that forked from this session and have turns it has not merged.
+  for (const other of allSessions(repo)) {
+    if (other.conv !== state.conv || other.session === session) continue;
+    const theirs = readRecords(repo, other.session);
     const fork = theirs.find((r) => r.parentId && myIds.has(r.parentId));
     if (!fork) continue;
     const open = uncovered(mine, theirs, pending);
     if (open.length === 0) continue;
     const head = lastTurn(theirs) ?? open.at(-1)!.id;
-    status.waiting.push({ session: other, name: sessionName(theirs, other), count: open.length, head, base: fork.parentId ?? null });
+    status.waiting.push({ session: other.session, name: sessionName(repo, other.session), count: open.length, head, base: fork.parentId ?? null });
   }
   return status;
 }
 
 /** How the status line colors each kind of mark. */
-export type Tone = "quiet" | "ahead" | "waiting" | "broken" | "ok";
+export type Tone = "quiet" | "waiting" | "broken";
 export type Paint = (tone: Tone, text: string) => string;
 const plain: Paint = (_tone, text) => text;
 
 const SGR: Record<Tone | "sep", [string, string]> = {
   quiet: ["2", "22"],
-  ahead: ["33", "39"],
   waiting: ["35", "39"],
   broken: ["31", "39"],
-  ok: ["32", "39"],
   sep: ["2", "22"],
 };
 
@@ -135,18 +80,10 @@ export function colors(env: NodeJS.ProcessEnv = process.env): { paint: Paint; se
   return { paint: wrap, sep: wrap("sep", " · "), dim: (t) => wrap("quiet", t) };
 }
 
-/** The braid part of the status line, after the session id. */
+/** The marks after a session's name: a failed check, and sessions waiting to be merged. */
 export function render(s: Status, paint: Paint = plain, sep = " · "): string {
-  if (!s.enabled) return "";
-  if (!s.saved) return paint("ahead", "not saved");
   const parts: string[] = [];
   if (s.broken) parts.push(paint("broken", "⚠ braid verify"));
-  if (s.private) parts.push(paint("quiet", "private"));
-  else if (s.local) parts.push(paint("quiet", "local"));
-  else {
-    if (s.ahead > 0) parts.push(paint("ahead", `↑${s.ahead}`));
-    if (s.uncommitted > 0) parts.push(paint("ahead", `*${s.uncommitted}`));
-  }
   if (s.waiting.length === 1) {
     const w = s.waiting[0]!;
     parts.push(paint("waiting", `↓ ${w.name} +${w.count} → /braid:merge`));
@@ -154,5 +91,5 @@ export function render(s: Status, paint: Paint = plain, sep = " · "): string {
     const total = s.waiting.reduce((a, w) => a + w.count, 0);
     parts.push(paint("waiting", `↓ ${s.waiting.length} sessions +${total} → /braid:merge`));
   }
-  return parts.length ? parts.join(sep) : paint("ok", "✓");
+  return parts.join(sep);
 }

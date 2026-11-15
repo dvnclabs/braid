@@ -11,18 +11,17 @@
 //   messages. For a Codex session: the history Codex rebuilds from the
 //   rollout, without the context Codex gives again on resuming, is the history
 //   it rebuilds from a fork.
-// - store: git fsck finds nothing wrong, and every record's parent is in the
-//   conversation.
+// - file: the session's file reads back, one record per line, and every
+//   record's parent is in the conversation.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { claudeCode } from "@leostera/atxf/claude-code";
-import { readAgents, readRecords } from "./chunks.ts";
+import { readAgents, readRecords, recordsFile } from "./store.ts";
 import { codexText } from "./harness.ts";
-import { run } from "./git.ts";
 import { conversation } from "./load.ts";
 import { CODEX_CONTEXT, describe, lastTurn, type Rec } from "./records.ts";
 import { forkRecords, forkText, keptUuids, replayedIds, SOURCE_ONLY, type Line } from "./replay.ts";
-import { storeRef, type Repo } from "./repo.ts";
+import type { Repo } from "./repo.ts";
 import { loadState } from "./state.ts";
 import { codexLine, nativeIds, readWindow, START, type Cursor, type Format } from "./transcript.ts";
 
@@ -302,16 +301,21 @@ function said(r: Rec): string {
   });
 }
 
-export function verify(repo: Repo, session: string, remote: string): Verified {
+export function verify(repo: Repo, session: string): Verified {
   const problems: string[] = [];
   const checked: string[] = [];
   const notes: string[] = [];
   const state = loadState(repo, session);
   if (!state || state.chunks === 0) return { session, problems: ["not saved yet"], checked, notes };
-  const ref = storeRef(state.conv, session);
-  const stored = readRecords(ref, { gitDir: repo.store });
-  const agents = readAgents(ref, { gitDir: repo.store });
-  const all = conversation(repo, state.conv, remote);
+  let stored: Rec[];
+  let agents: Map<string, Rec[]>;
+  try {
+    stored = readRecords(repo, session);
+    agents = readAgents(repo, session);
+  } catch (err) {
+    return { session, problems: [`file: ${recordsFile(repo, session)} does not read back: ${err instanceof Error ? err.message : String(err)}`], checked, notes };
+  }
+  const all = conversation(repo, state.conv);
   const replayed = replayedIds(all.values());
   // A rollout braid wrote for Codex starts with copies of the session it continues, which are saved there.
   const copied = (id: string) => codexLine(id) <= (state.copied ?? 0);
@@ -386,12 +390,10 @@ export function verify(repo: Repo, session: string, remote: string): Verified {
     } else checked.push(`loads: ${written.length} messages${since}, the same after a fork`);
   }
 
-  // Store.
-  const fsck = run(["fsck", "--no-dangling", "--no-progress"], { gitDir: repo.store });
-  if (fsck.status !== 0 || /error|missing|broken/i.test(fsck.stdout + fsck.stderr)) problems.push(`store: git fsck: ${(fsck.stderr || fsck.stdout).trim().split("\n")[0]}`);
+  // The file.
   const ids = new Set([...all.keys(), ...[...agents.values()].flat().map((r) => r.id)]);
   const orphans = [...stored, ...[...agents.values()].flat()].filter((r) => typeof r.parentId === "string" && !ids.has(r.parentId));
-  if (orphans.length) problems.push(`store: ${orphans.length} records have a parent that is not saved, from: ${describe(orphans[0]!, 80)}`);
-  checked.push(`store: ${state.chunks} chunks, git fsck`);
+  if (orphans.length) problems.push(`file: ${orphans.length} records have a parent that is not saved, from: ${describe(orphans[0]!, 80)}`);
+  checked.push(`file: ${stored.length} records, each with its parent`);
   return { session, problems, checked, notes };
 }

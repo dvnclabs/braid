@@ -1,15 +1,14 @@
-// The sessions running on this machine, and the code repositories each one
-// committed in. An agent often starts in one repository and commits in another
-// (a nested repository, a worktree); the git hooks of that repository find the
-// session's transcript here, and that repository's remote publishes it too.
+// The sessions on this machine: each one's transcript, and the project whose
+// .braid folder keeps it. A session is kept where its conversation started, so
+// a fork opened in another folder is found here.
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 export interface Entry {
   transcript?: string;
-  /** Working trees of the code repositories the session ran or committed in. */
-  repos: string[];
+  /** The project whose .braid folder keeps the session. */
+  project?: string;
 }
 
 function file(session: string): string | undefined {
@@ -69,19 +68,19 @@ export function readEntry(session: string): Entry | undefined {
   if (!path || !existsSync(path)) return undefined;
   try {
     const entry = JSON.parse(readFileSync(path, "utf8")) as Partial<Entry>;
-    return { transcript: entry.transcript, repos: Array.isArray(entry.repos) ? entry.repos : [] };
+    return { transcript: entry.transcript, project: entry.project };
   } catch {
     return undefined;
   }
 }
 
-/** Records a session's transcript and, when given, a repository it is saved in. */
-export function recordSession(session: string, update: { transcript?: string; repo?: string }): void {
+/** Records a session's transcript, or the project that keeps it. */
+export function recordSession(session: string, update: { transcript?: string; project?: string }): void {
   const path = file(session);
   if (!path) return;
-  const entry = readEntry(session) ?? { repos: [] };
+  const entry = readEntry(session) ?? {};
   if (update.transcript) entry.transcript = update.transcript;
-  if (update.repo && !entry.repos.includes(update.repo)) entry.repos.push(update.repo);
+  if (update.project) entry.project = update.project;
   mkdirSync(join(path, ".."), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(entry, null, 2) + "\n");

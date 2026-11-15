@@ -1,18 +1,18 @@
 ---
 name: status
-description: Show where this agent session stands in braid, what is published, and which teammates' sessions wait to be merged. Use for /braid:status, or when the user asks about the braid status line.
+description: Show where this agent session stands in braid: its newest turn, what it is about, where it is kept, and branches of it waiting to be merged. Use for /braid:status, or when the user asks about the braid status line.
 ---
 
 # Session status
 
 Run `braid status` and explain the result briefly:
 
+- `braid · 5b0e2c1a.12 · <title>`: this session at its twelfth turn, by the name `braid fork` takes, and what it is about: the name the user gave it with /rename, else the agent's title, else its first prompt.
+- `recap`: the agent's latest recap of the session.
+- `kept in`: the file that holds the session, in the project's `.braid` folder; `ran in`: the worktree it ran in, when that is not the project's main checkout.
+- `↓ <name> +N`: a branch of this conversation has N records this session has not merged. `/braid:merge` merges them.
 - `⚠ braid verify`: the check braid ran when this session last ended found a problem. Run `braid verify` and report what it says.
-- `local`: saved on this machine, nothing committed or published. On autopilot (the default) sessions stay local: nothing is pushed or fetched. `/braid:edit`, then `/braid:commit`, prepares it to be shared.
-- `↑N`: N committed records are not published yet. They go out with the next `git push` of a commit made in this session (with autopush), or with `/braid:push`.
-- `*N`: N records since the last commit. Publishing stops at the last commit; `/braid:edit` and `/braid:commit` take them in.
-- `↓ name +N`: a session built on this one, such as a review or a branch, has N records that are not merged. `/braid:merge` merges them.
-- `private`: the user withheld the whole session.
-- `✓`: everything is published and nothing is waiting.
+
+`braid log` lists the session's turns, with what each did, and `braid sessions` every session the project keeps.
 
 If `braid` is not on PATH, run `node "$(cat "${XDG_CONFIG_HOME:-$HOME/.config}/braid/cli")"` in its place.

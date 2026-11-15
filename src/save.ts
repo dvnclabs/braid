@@ -1,20 +1,18 @@
-// Saving: import what a harness wrote since the last save into the store.
+// Saving: append what an agent wrote since the last save to the session's file.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
-import { appendChunk, readAgents, readRecords } from "./chunks.ts";
-import { config, forEachRef, gitMaybe } from "./git.ts";
+import { appendRecords, readAgents, readRecords } from "./store.ts";
+import { config } from "./git.ts";
 import { about, lastTurn, withBraid, type Actor, type Rec } from "./records.ts";
-import { conversation } from "./load.ts";
-import { ensureStore, readConfig, SESSION_REFS, storeRef, type Repo } from "./repo.ts";
+import { allSessions, conversation } from "./load.ts";
+import { checkoutOf, ensureStore, type Repo } from "./repo.ts";
+import { recordSession } from "./registry.ts";
 import { replayedIds } from "./replay.ts";
-import { markIfBig } from "./points.ts";
 import { loadState, newState, saveState, withLock, type SessionState } from "./state.ts";
 import { codexLine, formatOf, intact, readWindow, START, type Format, type Window } from "./transcript.ts";
-import { VERSION } from "./version.ts";
 import { newestTurn, startsTurn } from "./turns.ts";
-import { readEntry } from "./registry.ts";
+import { VERSION } from "./version.ts";
 
 export function actorId(repo: Repo): string {
   return config("user.email", { cwd: repo.top }) ?? `${userInfo().username}@${hostname()}`;
@@ -66,22 +64,19 @@ export interface SaveResult {
  */
 function forkSource(repo: Repo, session: string, native: Rec[]): { conv: string; known: Set<string> } | undefined {
   const firstMessage = native.find((r) => r.type === "message")?.id;
-  const dir = join(repo.dir, "sessions");
-  if (!firstMessage || !existsSync(dir)) return undefined;
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".json") || name === `${session}.json`) continue;
-    const other = loadState(repo, name.slice(0, -".json".length));
-    if (!other || other.first !== firstMessage || other.chunks === 0) continue;
+  if (!firstMessage) return undefined;
+  for (const other of allSessions(repo)) {
+    if (other.session === session) continue;
+    const state = loadState(repo, other.session);
+    if (!state || state.first !== firstMessage || state.chunks === 0) continue;
     const known = new Set<string>();
-    for (const { ref } of forEachRef([`${SESSION_REFS}/${other.conv}/`], { gitDir: repo.store })) {
-      for (const r of readRecords(ref, { gitDir: repo.store })) known.add(r.id);
-    }
-    return { conv: other.conv, known };
+    for (const s of allSessions(repo).filter((s) => s.conv === state.conv)) for (const r of readRecords(repo, s.session)) known.add(r.id);
+    return { conv: state.conv, known };
   }
   return undefined;
 }
 
-/** For a file read again from the start: whether a record is past the copies of its id the store holds already. */
+/** For a file read again from the start: whether a record is past the copies of its id the session holds already. */
 function unsavedOf(saved: Rec[]): (r: Rec) => boolean {
   const left = new Map<string, number>();
   for (const r of saved) left.set(r.id, (left.get(r.id) ?? 0) + 1);
@@ -93,38 +88,32 @@ function unsavedOf(saved: Rec[]): (r: Rec) => boolean {
 }
 
 /**
- * Saves a session: converts what the harness wrote since the previous save
- * with ATXF's converter and appends it to the session's ref as one chunk, or
- * as several bounded chunks for a large file read for the first time. A save
- * commits the conversation, as a label on its newest turn, for each code
- * commit made since the previous save and for `opts.commit`.
+ * Saves a session: converts what the agent wrote since the previous save with
+ * ATXF's converter and appends it to the session's file, in bounded windows
+ * for a large file read for the first time.
  */
-export function save(repo: Repo, session: string, transcript?: string, opts: { commit?: string; agent?: Format } = {}): SaveResult {
+export function save(repo: Repo, session: string, transcript?: string, opts: { agent?: Format } = {}): SaveResult {
   ensureStore(repo);
+  recordSession(session, { project: repo.top });
   return withLock(repo, `save-${session}`, () => {
     const prior = loadState(repo, session);
     const state = prior ?? newState(session, transcript);
-    if (!repo.separate && !state.code) state.code = repo.top;
     if (transcript) state.transcript = transcript;
     const path = state.transcript;
     state.harness = harnessOf(prior, path, opts.agent);
     const format: Format = state.harness === "codex" ? "codex" : "claude-code";
     if (!path || !existsSync(path)) {
-      if (opts.commit === undefined) return { added: 0, state };
-      // An imported session, or one whose transcript is gone: commit what the store has.
-      if (state.chunks === 0) throw new Error("this session is not saved yet: braid saves sessions that start after it is set up");
-      const added = writeChunk(repo, state, [], undefined, true, opts, new Map());
       saveState(repo, state);
-      return { added, state };
+      return { added: 0, state };
     }
 
     // A rewritten file, or a session saved before braid kept cursors, is read again from the start, keeping only unsaved records.
-    // A session saved before braid kept titles: once, from what the store has.
-    if (state.chunks > 0 && !state.title) Object.assign(state, about(readRecords(storeRef(state.conv, session), { gitDir: repo.store }), state));
+    // A session saved before braid kept titles: once, from what it holds.
+    if (state.chunks > 0 && !state.title) Object.assign(state, about(readRecords(repo, session), state));
     const rewritten = state.cursor ? !intact(path, state.cursor) : state.chunks > 0;
     let cursor = rewritten || !state.cursor ? START : state.cursor;
     // A rewritten file is read again from the start: its first copies of each record are the saved ones.
-    const unseen = rewritten ? unsavedOf(readRecords(storeRef(state.conv, session), { gitDir: repo.store })) : undefined;
+    const unseen = rewritten ? unsavedOf(readRecords(repo, session)) : undefined;
     let source: ReturnType<typeof forkSource>;
     let added = 0;
 
@@ -154,7 +143,7 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
     const replaying = state.chunks === 0 && !!state.forkFrom?.replayed;
     if (replaying && format === "codex") state.copied = state.forkFrom?.lines ?? 0;
     const copiedLines = format === "codex" ? state.copied : undefined;
-    const replayed = replaying && format === "claude-code" ? replayedIds(conversation(repo, state.forkFrom!.conv, readConfig(repo).remote).values()) : undefined;
+    const replayed = replaying && format === "claude-code" ? replayedIds(conversation(repo, state.forkFrom!.conv).values()) : undefined;
     const wrote = replayed ? (state.forkFrom?.lines ?? 0) : 0;
     const copied = (r: Rec) => Number(/^claude-line-(\d+)@/.exec(r.id)?.[1] ?? Infinity) <= wrote;
     const read = () => readWindow(path, cursor, session, {}, format);
@@ -167,36 +156,26 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
       const records = window ? fresh(window) : [];
       const final = !window?.more;
       state.first ??= window?.records.find((r) => r.type === "message")?.id;
-      const pending = final && (state.pendingMerge || (state.commits ?? []).length > 0 || opts.commit !== undefined || agents.size > 0);
-      if (records.length > 0 || pending) added += writeChunk(repo, state, records, window?.header, final, opts, final ? agents : new Map());
+      const pending = final && (state.pendingMerge || agents.size > 0);
+      if (records.length > 0 || pending) added += writeChunk(repo, state, records, window?.header, final, final ? agents : new Map());
       if (window) cursor = window.cursor;
       state.cursor = cursor;
       if (final) break;
       window = read();
       if (!window) break;
     }
-    // A session's first save, or one saved before braid counted turns: its turns, counted along its line once.
-    if (state.chunks > 0 && state.turn === undefined) state.turn = newestTurn(repo, state.conv, session, readConfig(repo).remote);
     saveState(repo, state);
-    if (state.chunks > 0 && state.chunks % 50 === 0) gitMaybe(["gc", "--auto", "--quiet"], { gitDir: repo.store });
+    // A session's first save, or one saved before braid counted turns: its turns, counted along its line once it is on disk.
+    if (state.chunks > 0 && state.turn === undefined) {
+      state.turn = newestTurn(repo, state.conv, session);
+      saveState(repo, state);
+    }
     return { added, state };
   });
 }
 
-/**
- * Appends one chunk with the records and returns how many it wrote. A final
- * chunk also carries the merge waiting to be written, and a commit label for
- * each code commit since the previous save and for `opts.commit`.
- */
-function writeChunk(
-  repo: Repo,
-  state: SessionState,
-  fresh: Rec[],
-  nativeHeader: Record<string, unknown> | undefined,
-  final: boolean,
-  opts: { commit?: string },
-  agents: Map<string, NewAgent>,
-): number {
+/** Appends the records of one window to the session's file, and returns how many it wrote. A final one also carries the merge waiting to be written. */
+function writeChunk(repo: Repo, state: SessionState, fresh: Rec[], nativeHeader: Record<string, unknown> | undefined, final: boolean, agents: Map<string, NewAgent>): number {
   const session = state.session;
   const first = state.chunks === 0;
   if (first && state.forkFrom) state.conv = state.forkFrom.conv;
@@ -223,24 +202,8 @@ function writeChunk(
     out.push(rec);
   }
   const lastNative = fresh.at(-1)?.id ?? state.last ?? state.head ?? null;
-
-  if (first && state.forkFrom?.actor && state.forkFrom.actor !== actor.actorId) {
-    const target = fresh.find((r) => r.type === "message")?.id;
-    if (target) {
-      out.push({
-        type: "label",
-        id: `braid-label-${randomUUID()}`,
-        time: now,
-        targetId: target,
-        label: `review/${actor.actorId.split("@")[0]}`,
-        ext: { braid: { actor, session } },
-      });
-      state.review = true;
-    }
-  }
   delete state.forkFrom;
 
-  const codeCommits = final ? (state.commits ?? []) : [];
   if (final && state.pendingMerge && lastNative) {
     const pm = state.pendingMerge;
     out.push({
@@ -286,40 +249,13 @@ function writeChunk(
       ext: { braid: { actor, session } },
     });
   }
-  // Commit labels go last, so the agent links written in this chunk fall within the commit.
-  if (final) {
-    const target = lastTurn(out) ?? state.head;
-    // A session commits in other repositories than the one it runs in: each commit's message is in one of them.
-    const tops = [repo.top, ...(readEntry(session)?.repos ?? [])];
-    const messageOf = (sha: string) => tops.map((top) => gitMaybe(["log", "-1", "--format=%s", sha], { cwd: top })?.trim()).find(Boolean) ?? "";
-    const commits = codeCommits.map((sha) => ({ sha, message: messageOf(sha) }));
-    if (opts.commit !== undefined) commits.push({ sha: "", message: opts.commit });
-    if (opts.commit !== undefined && !target) throw new Error("nothing to commit: this session has no saved turns yet");
-    // A code commit commits the conversation too only with autocommit on; otherwise it is noted, for links.
-    const autocommit = codeCommits.length > 0 && readConfig(repo).autocommit;
-    for (const c of target ? commits : []) {
-      const kind = !c.sha ? { commit: {} } : autocommit ? { commit: { sha: c.sha } } : { code: { sha: c.sha } };
-      out.push({
-        type: "label",
-        id: `braid-commit-${randomUUID()}`,
-        time: now,
-        targetId: target,
-        label: c.message || "commit",
-        ext: { braid: { actor, session, ...kind } },
-      });
-    }
-  }
   if (out.length === 0 && agentRecords.size === 0) return 0;
 
-  // Before a turn that changes a lot, a point to fork from, at the session as it stood.
-  if (readConfig(repo).autofork) markIfBig(repo, state, [...out, ...[...agentRecords.values()].flat()]);
-  const head = gitMaybe(["rev-parse", "-q", "--verify", "HEAD"], { cwd: repo.top })?.trim();
-  appendChunk(storeRef(state.conv, session), out, { time: now, head, commits: codeCommits }, { gitDir: repo.store }, agentRecords);
+  appendRecords(repo, session, out, agentRecords);
   state.last = fresh.at(-1)?.id ?? state.last;
   state.head = lastTurn(out) ?? state.head;
   if (state.turn !== undefined) state.turn += out.filter(startsTurn).length;
   state.chunks += 1;
-  if (final) state.commits = [];
   return out.length;
 }
 
@@ -345,7 +281,7 @@ function collectAgents(repo: Repo, state: SessionState, path: string): Map<strin
     const prior = state.agents[id];
     const rescan = !!prior && !intact(fp, prior.cursor);
     const st = rescan || !prior ? { cursor: START, linked: prior?.linked } : prior;
-    const unseen = rescan ? unsavedOf(readAgents(storeRef(state.conv, state.session), { gitDir: repo.store }).get(id) ?? []) : undefined;
+    const unseen = rescan ? unsavedOf(readAgents(repo, state.session).get(id) ?? []) : undefined;
     const records: Rec[] = [];
     for (let w = readWindow(fp, st.cursor, id); w; w = w.more ? readWindow(fp, st.cursor, id) : undefined) {
       const fresh = unseen ? w.records.slice(w.fresh).filter(unseen) : w.records.slice(w.fresh);
@@ -371,23 +307,22 @@ function collectAgents(repo: Repo, state: SessionState, path: string): Map<strin
   return out;
 }
 
-/** The record holding tool call `id`: among the records being written, else in the store. */
+/** The record holding tool call `id`: among the records being written, else among those saved. */
 function toolCallRecord(repo: Repo, state: SessionState, out: Rec[], id: string | undefined): string | undefined {
   if (!id) return undefined;
   const holds = (r: Rec) => Array.isArray(r.content) && (r.content as { type?: string; id?: string }[]).some((b) => b?.type === "tool_call" && b.id === id);
-  return (out.find(holds) ?? readRecords(storeRef(state.conv, state.session), { gitDir: repo.store }).findLast(holds))?.id;
+  return (out.find(holds) ?? readRecords(repo, state.session).findLast(holds))?.id;
 }
 
-/** Registers a session with its transcript, without saving anything yet. */
-export function register(repo: Repo, session: string, transcript?: string, agent?: Format): SessionState {
+/** Registers a session with its transcript and the checkout it runs in, without saving anything yet. */
+export function register(repo: Repo, session: string, transcript?: string, agent?: Format, cwd?: string): SessionState {
   ensureStore(repo);
+  recordSession(session, { project: repo.top });
   const prior = loadState(repo, session);
   const state = prior ?? newState(session, transcript);
   if (transcript) state.transcript = transcript;
   state.harness = harnessOf(prior, state.transcript, agent);
-  if (!repo.separate && !state.code) state.code = repo.top;
+  if (cwd) state.ran ??= checkoutOf(cwd);
   saveState(repo, state);
   return state;
 }
-
-

@@ -1,7 +1,7 @@
-// Per-session state, kept next to the store in the braid repository: ~/.braid/.git/braid/sessions/<id>.json.
+// Per-session state, next to its records: .braid/sessions/<id>.json.
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Repo } from "./repo.ts";
+import { ensureStore, type Repo } from "./repo.ts";
 import type { About } from "./records.ts";
 import type { Cursor } from "./transcript.ts";
 
@@ -20,16 +20,15 @@ export interface SessionState {
   session: string;
   conv: string;
   /** The agent the session runs in, whose transcript braid reads. */
-  harness: "claude-code" | "codex" | "openclaw";
+  harness: "claude-code" | "codex";
   transcript?: string;
-  /** For imported OpenClaw sessions: the last event imported. */
-  importedSeq?: number;
   /** Where the previous save stopped reading the transcript. */
   cursor?: Cursor;
   /** Id of the last native record saved, so the next save starts after it. */
   last?: string;
-  /** Id of the newest record of this session in the store. */
+  /** Id of the newest record of this session saved. */
   head?: string;
+  /** How many saves wrote records. */
   chunks: number;
   /** "anthropic:claude-sonnet-5-5": the model of the newest assistant record. */
   model?: string;
@@ -45,24 +44,9 @@ export interface SessionState {
   copied?: number;
   /** The last braid verify, run when the session ended. */
   verified?: { ok: boolean; at: string; problems?: string[] };
-  /** The code repository the session ran in, whose .braidignore applies to it wherever it is published. */
-  code?: string;
   pendingMerge?: PendingMerge;
   /** Native records whose parent is `from` continue from the merge record `to`. */
   reparent?: { from: string; to: string };
-  /** Code commits made since the last save; the next save commits the conversation with each. */
-  commits?: string[];
-  /** Records withheld with braid edit; each takes its tool results and subagents along. */
-  withheld?: string[];
-  /** Text hidden with braid edit --hide, in every record of this session. */
-  terms?: string[];
-  /** Records rewritten with braid edit --rewrite: the text published in their place, by record id. */
-  edits?: Record<string, string>;
-  /** The published copy this machine pushed last to each code repository's remote (`<git dir> <remote>`), to tell its own edits from another machine's. */
-  published?: Record<string, string>;
-  /** Forked from someone else's session: published when it ends, since a review has no commits to push. */
-  review?: boolean;
-  private?: boolean;
   /** What the last after-turn notice reported, so it is not repeated. */
   notified?: string;
   /** What the session is about, from its records: the status line and braid status show it. */
@@ -71,10 +55,12 @@ export interface SessionState {
   recap?: About["recap"];
   /** The number of the session's newest turn, counted along its line from the conversation's first prompt. */
   turn?: number;
+  /** The checkout the session ran in: one of the project's worktrees, or the project itself. */
+  ran?: string;
 }
 
 function path(repo: Repo, session: string): string {
-  return join(repo.dir, "sessions", `${session}.json`);
+  return join(repo.sessions, `${session}.json`);
 }
 
 export function loadState(repo: Repo, session: string): SessionState | undefined {
@@ -85,7 +71,7 @@ export function loadState(repo: Repo, session: string): SessionState | undefined
 
 export function saveState(repo: Repo, state: SessionState): void {
   const p = path(repo, state.session);
-  mkdirSync(join(repo.dir, "sessions"), { recursive: true });
+  ensureStore(repo);
   const tmp = `${p}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
   renameSync(tmp, p);

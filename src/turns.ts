@@ -2,11 +2,10 @@
 // stopped, or a merge. Each has a name, <session>.<n>: turns are numbered from
 // the conversation's first prompt along the session's line, so a fork
 // continues the numbering of the session it forks from.
-import { readRecords } from "./chunks.ts";
-import { allSessions, resolve } from "./load.ts";
+import { readRecords } from "./store.ts";
+import { allSessions, resolve, type Found } from "./load.ts";
 import { isPrompt, lastTurn, type Rec } from "./records.ts";
 import type { Repo } from "./repo.ts";
-import type { Found } from "./load.ts";
 
 export const startsTurn = (r: Rec): boolean => isPrompt(r) || r.type === "branch_summary";
 
@@ -45,17 +44,16 @@ export function numbering(sessions: Session[]): Map<string, Map<string, number>>
   return out;
 }
 
-/** The sessions of a conversation, your own copies first, with their records. */
-export function conversationSessions(repo: Repo, conv: string, remote: string): (Session & { found: Found })[] {
-  return allSessions(repo, remote)
+/** The sessions of a conversation, with their records. */
+export function conversationSessions(repo: Repo, conv: string): (Session & { found: Found })[] {
+  return allSessions(repo)
     .filter((f) => f.conv === conv)
-    .sort((a, b) => Number(!!b.opts.gitDir) - Number(!!a.opts.gitDir))
-    .map((found) => ({ session: found.session, records: readRecords(found.ref, found.opts), found }));
+    .map((found) => ({ session: found.session, records: readRecords(repo, found.session), found }));
 }
 
 /** The number of a session's newest turn: what its next prompt continues. */
-export function newestTurn(repo: Repo, conv: string, session: string, remote: string): number {
-  const turns = numbering(conversationSessions(repo, conv, remote)).get(session);
+export function newestTurn(repo: Repo, conv: string, session: string): number {
+  const turns = numbering(conversationSessions(repo, conv)).get(session);
   return turns ? Math.max(0, ...turns.values()) : 0;
 }
 
@@ -121,27 +119,72 @@ export function turnsAlong(line: Session[], turns: Map<string, Map<string, numbe
 }
 
 /** Finds turn `n` along a session's line: in its own records, or, before it forked, in a session it continues. */
-export function findTurn(repo: Repo, found: Found, n: number, remote: string): Turn | undefined {
-  const sessions = conversationSessions(repo, found.conv, remote);
+export function findTurn(repo: Repo, found: Found, n: number): Turn | undefined {
+  const sessions = conversationSessions(repo, found.conv);
   const line = lineOf(sessions, found.session);
   const t = turnsAlong(line, numbering(sessions)).find((t) => t.n === n && t.start);
   if (!t) return undefined;
   // A fork continues from the turn's newest point, in the newest session of the line that holds the turn.
-  const seg = [...line].reverse().find((s) => t.records.some((r) => s.records.includes(r) && s.records.some((x) => x.id === r.id)))!;
+  const seg = [...line].reverse().find((s) => t.records.some((r) => s.records.includes(r)))!;
   const of = t.records.filter((r) => seg.records.includes(r));
   const head = lastTurn(of);
   return head ? { found: seg.found, n, until: of.at(-1)!.id, head } : undefined;
 }
 
 /** A turn by name, as `braid fork` takes it, or undefined when the name is a session's own. */
-export function resolveTurn(repo: Repo, name: string, current: string | undefined, remote: string): Turn | undefined {
+export function resolveTurn(repo: Repo, name: string, current: string | undefined): Turn | undefined {
   const m = TURN.exec(name);
-  if (!m || (m[1] && resolve(repo, name, remote).length > 0)) return undefined;
+  if (!m || (m[1] && resolve(repo, name).length > 0)) return undefined;
   const target = m[1] || current;
   if (!target) throw new Error(`no session: name one, as in braid fork <id>.${m[2]}, or run inside an agent session`);
-  const found = resolve(repo, target, remote);
+  const found = resolve(repo, target);
   if (found.length !== 1) throw new Error(found.length ? `${target} matches ${found.length} sessions; name one` : `no session matches ${target}`);
-  const turn = findTurn(repo, found[0]!, Number(m[2]), remote);
+  const turn = findTurn(repo, found[0]!, Number(m[2]));
   if (!turn) throw new Error(`${found[0]!.session.slice(0, 8)} has no turn ${m[2]}; braid log lists its turns`);
   return turn;
+}
+
+const EDITS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch", "edit", "write"]);
+
+/** The files a patch in Codex's format adds, updates, deletes or moves to. */
+export function patchedFiles(patch: string): string[] {
+  if (!patch.includes("*** Begin Patch")) return [];
+  return [...patch.matchAll(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+?)\s*$/gm)].map((m) => m[1]!);
+}
+
+type Call = { type?: string; name?: string; input?: unknown; arguments?: Record<string, unknown> };
+
+/** The text a call may carry a patch in: apply_patch's input, or a shell command that runs apply_patch. */
+function patchText(b: Call): string {
+  const a = b.arguments ?? {};
+  for (const v of [b.input, a.input, a.cmd, a.command, a.patch]) {
+    if (typeof v === "string") return v;
+    if (Array.isArray(v)) return v.filter((x) => typeof x === "string").join("\n");
+  }
+  return "";
+}
+
+/** What the records of a turn did: the files edited, and the tool calls made. */
+export function turnStats(records: Rec[]): { files: number; calls: number } {
+  const files = new Set<string>();
+  let calls = 0;
+  for (const r of records) {
+    if (!Array.isArray(r.content)) continue;
+    for (const b of r.content as Call[]) {
+      if (b?.type !== "tool_call") continue;
+      calls++;
+      const path = b.arguments?.file_path ?? b.arguments?.path ?? b.arguments?.notebook_path;
+      if (EDITS.has(String(b.name)) && typeof path === "string") files.add(path);
+      // Codex edits files with patches, which name each file in a header.
+      for (const f of patchedFiles(patchText(b))) files.add(f);
+    }
+  }
+  return { files: files.size, calls };
+}
+
+/** "5 files edited, 6 tool calls", or "" for a turn that called no tools. */
+export function turnDetail(records: Rec[]): string {
+  const { files, calls } = turnStats(records);
+  const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+  return [files ? `${plural(files, "file")} edited` : "", calls ? plural(calls, "tool call") : ""].filter(Boolean).join(", ");
 }

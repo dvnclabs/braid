@@ -5,11 +5,12 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync, realpathSync } from "node:fs";
 import { claudeCode, uuidFor } from "@leostera/atxf/claude-code";
-import { readRecords } from "./chunks.ts";
+import { readRecords } from "./store.ts";
+import { recordSession } from "./registry.ts";
 import { conversation, type Found } from "./load.ts";
 import { about, asCodexShowed, braidOf, contextPath, forModel, lastTurn, type Rec } from "./records.ts";
 import type { Harness } from "./harness.ts";
-import { userConfig, type Repo } from "./repo.ts";
+import type { Repo } from "./repo.ts";
 import { loadState, newState, saveState } from "./state.ts";
 import { conversationSessions, numbering } from "./turns.ts";
 
@@ -229,9 +230,9 @@ export interface Replayed {
  * the session written the first time, as it stands, continued or not. With
  * `fresh`, a fork is another session each time.
  */
-export function replay(repo: Repo, found: Found, remote: string, to: Harness, opts: { cwd?: string; fresh?: boolean; until?: string } = {}): Replayed {
-  const all = conversation(repo, found.conv, remote);
-  const read = readRecords(found.ref, found.opts);
+export function replay(repo: Repo, found: Found, to: Harness, opts: { cwd?: string; fresh?: boolean; until?: string } = {}): Replayed {
+  const all = conversation(repo, found.conv);
+  const read = readRecords(repo, found.session);
   // From a turn: the session up to that turn's last record.
   const own = opts.until ? read.slice(0, read.findIndex((r) => r.id === opts.until) + 1) : read;
   if (opts.until && own.length === 0) throw new Error(`session ${found.session.slice(0, 8)} has no record ${opts.until}`);
@@ -243,7 +244,7 @@ export function replay(repo: Repo, found: Found, remote: string, to: Harness, op
   const from = sourceCwd([...all.values()]);
   // Paths move to another checkout; within the same tree (a subdirectory of it, say) they stay as they are.
   const within = !!from && (from === cwd || cwd.startsWith(`${from}/`) || from.startsWith(`${cwd}/`));
-  const pairs: [string, string][] = [...(from && !within ? [[from, cwd] as [string, string]] : []), ...userConfig().paths];
+  const pairs: [string, string][] = from && !within ? [[from, cwd]] : [];
   const derived = uuidFor(`braid fork ${found.session} ${head} ${to.agent} ${cwd}`);
   const before = opts.fresh ? undefined : to.existing(derived, cwd);
   if (before) return { session: derived, file: before, cwd, records: 0, existing: true };
@@ -259,8 +260,10 @@ export function replay(repo: Repo, found: Found, remote: string, to: Harness, op
   const upTo = head === lastTurn(own) ? own.length - 1 : own.findIndex((r) => r.id === head);
   Object.assign(state, about(upTo >= 0 ? own.slice(0, upTo + 1) : own, state));
   // Its turns continue the numbering from the turn it forks at.
-  state.turn = numbering(conversationSessions(repo, found.conv, remote)).get(found.session)?.get(head) ?? 0;
+  state.turn = numbering(conversationSessions(repo, found.conv)).get(found.session)?.get(head) ?? 0;
+  // The fork is kept with the session it forks, wherever it runs.
   saveState(repo, state);
+  recordSession(session, { project: repo.top });
   return { session, file, cwd, records: lines };
 }
 

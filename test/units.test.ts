@@ -3,17 +3,14 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFi
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { publishedChunks } from "../src/publish.ts";
 import { about, ago, isPrompt, parseJsonl, printable, promptLine, type Rec } from "../src/records.ts";
-import { lineOf, numbering, turnsAlong } from "../src/turns.ts";
+import { lineOf, numbering, patchedFiles, turnDetail, turnsAlong } from "../src/turns.ts";
 import { redactString } from "../src/redact.ts";
-import { readConfig, userConfig, type Repo } from "../src/repo.ts";
-import { TEMPLATE, USER_TEMPLATE } from "../src/setup.ts";
-import { cleanName, colors, render, uncovered, type Status } from "../src/status.ts";
+import { projectOf, repoFor } from "../src/repo.ts";
+import { recordSession } from "../src/registry.ts";
+import { spawnSync } from "node:child_process";
+import { colors, render, uncovered, type Status } from "../src/status.ts";
 import { intact, readWindow, START } from "../src/transcript.ts";
-import { parseToml } from "../src/rules.ts";
-import { ignoredBy, parseIgnore } from "../src/ignore.ts";
-import { bigTurn, patchedFiles } from "../src/points.ts";
 import { Transcript } from "./helpers.ts";
 
 const example = parseJsonl(readFileSync(join(import.meta.dirname, "..", "examples", "pr-review", "conversation.atxf.jsonl"), "utf8"));
@@ -54,38 +51,6 @@ test("↓ counts records that no merge covers", () => {
   const r6: Rec = { ...bob.find((r) => r.id === "r5")!, id: "r6", parentId: "r5" };
   assert.equal(uncovered(afterMerge, [...bob, r6]).length, 1, "a record after the merged head waits again");
   assert.equal(uncovered(beforeMerge, bob, ["r5"]).length, 0, "a recorded merge not yet saved covers too");
-});
-
-test("the status line text", () => {
-  const base: Status = { session: "s", enabled: true, saved: true, private: false, local: false, ahead: 0, uncommitted: 0, waiting: [] };
-  assert.equal(render(base), "✓");
-  assert.equal(render({ ...base, saved: false }), "not saved");
-  assert.equal(render({ ...base, local: true, ahead: 3 }), "local");
-  assert.equal(render({ ...base, ahead: 4 }), "↑4");
-  assert.equal(render({ ...base, ahead: 4, uncommitted: 2 }), "↑4 · *2");
-  assert.equal(render({ ...base, uncommitted: 2 }), "*2");
-  const w = { session: "01a1bc3e", name: "review/bob", count: 5, head: "r5", base: "e8" };
-  assert.equal(render({ ...base, ahead: 4, waiting: [w] }), "↑4 · ↓ review/bob +5 → /braid:merge");
-  assert.equal(render({ ...base, waiting: [w, { ...w, count: 2 }] }), "↓ 2 sessions +7 → /braid:merge");
-  assert.equal(cleanName("\u001b[2Kall clear ✓"), "2Kallclear");
-});
-
-test("published copies drop withheld and unpublished records and keep the tree connected", () => {
-  const chunk: Rec[] = [
-    { type: "message", id: "u1", parentId: null, role: "user", content: "hello" },
-    { type: "custom", id: "c1", parentId: "u1" },
-    { type: "message", id: "a1", parentId: "c1", role: "assistant", content: [{ type: "reasoning", text: "x" }] },
-    { type: "message", id: "a2", parentId: "a1", role: "assistant", content: [{ type: "text", text: "secret AKIAABCDEFGHIJKLMNOP" }] },
-    { type: "message", id: "u2", parentId: "a2", role: "user", content: "withheld" },
-    { type: "message", id: "a3", parentId: "u2", role: "assistant", content: [{ type: "text", text: "after" }], native: { records: [] } },
-  ];
-  const { chunks, counts } = publishedChunks([chunk], new Set(["u2"]));
-  const out = chunks.flat();
-  assert.deepEqual(out.map((r) => r.id), ["u1", "a2", "a3"]);
-  assert.equal(out.find((r) => r.id === "a2")!.parentId, "u1", "custom and reasoning-only records are skipped over");
-  assert.equal(out.find((r) => r.id === "a3")!.parentId, "a2", "withheld records are skipped over");
-  assert.equal(out.find((r) => r.id === "a3")!.native, undefined);
-  assert.equal(counts.get("aws-access-key"), 1);
 });
 
 test("reading a transcript in windows gives the records of reading it whole", () => {
@@ -130,84 +95,6 @@ test("reading a transcript in windows gives the records of reading it whole", ()
   assert.equal(intact(t.path, cursor), false);
 });
 
-test("rules files, .braidignore and home directories", () => {
-  const t = parseToml(`# team rules
-terms = ["Acme Corp",
-  "Project Falcon"]   # names under NDA
-patterns = ['CUST-\\d{6}']
-withhold-session = true
-`);
-  assert.deepEqual(t.terms, ["Acme Corp", "Project Falcon"]);
-  assert.deepEqual(t.patterns, ["CUST-\\d{6}"]);
-  assert.equal(t["withhold-session"], true);
-
-  const rules = parseIgnore(`# .braidignore
-.env
-.env.*
-!.env.example
-*.pem
-/customers/
-data/raw/**
-secrets
-!secrets/README.md
-`);
-  const ignored = (p: string) => ignoredBy(rules, p)?.pattern;
-  assert.equal(ignored(".env"), ".env");
-  assert.equal(ignored("api/.env.local"), ".env.*", "a pattern without a slash matches in any directory");
-  assert.equal(ignored(".env.example"), undefined, "! re-includes");
-  assert.equal(ignored("keys/server.pem"), "*.pem");
-  assert.equal(ignored("keys/server.pem.txt"), undefined);
-  assert.equal(ignored("customers/acme/contract.md"), "/customers/", "everything under an ignored directory");
-  assert.equal(ignored("old/customers/x.md"), undefined, "a leading slash anchors to the root");
-  assert.equal(ignored("data/raw/2026/x.csv"), "data/raw/**");
-  assert.equal(ignored("src/data/raw/x.csv"), undefined, "a slash inside anchors too");
-  assert.equal(ignored("secrets/README.md"), "secrets", "nothing is re-included inside an ignored directory");
-  assert.equal(ignored("src/app.ts"), undefined);
-  const counts = new Map<string, number>();
-  assert.equal(redactString("ran /home/alice/dev/app and C:\\Users\\bob\\x and /Users/carol", counts), "ran ~/dev/app and ~\\x and ~");
-});
-
-test("autopilot by default, and the settings that change it", () => {
-  const dir = mkdtempSync(join(tmpdir(), "braid-config-"));
-  const home = process.env.XDG_CONFIG_HOME;
-  process.env.XDG_CONFIG_HOME = join(dir, "config");
-  try {
-    mkdirSync(join(dir, ".braid"));
-    const repo = { top: dir } as Repo;
-    const write = (text: string) => writeFileSync(join(dir, ".braid", "config.toml"), text);
-    write("");
-    const d = readConfig(repo);
-    assert.deepEqual([d.autopilot, d.autofork, d.autopush, d.link, d.autocommit], [true, true, false, "store", false], "the defaults: autopilot, so no autopush and no trailers");
-    write("autopilot = false\nautopush = false\n");
-    assert.equal(readConfig(repo).autopush, false, "autopush off");
-    write("autopilot = false\n");
-    assert.deepEqual([readConfig(repo).autopush, readConfig(repo).autocommit, readConfig(repo).link], [true, false, "trailer"], "the defaults off autopilot");
-    mkdirSync(join(dir, "config", "braid"), { recursive: true });
-    writeFileSync(join(dir, "config", "braid", "config.toml"), "autocommit = true\nautopush = false\n");
-    assert.deepEqual([readConfig(repo).autopush, readConfig(repo).autocommit], [false, true], "your own settings win");
-    writeFileSync(join(dir, "config", "braid", "config.toml"), "autopilot = true\n");
-    assert.equal(readConfig(repo).autopush, false, "your own autopilot keeps git push from publishing");
-  } finally {
-    if (home === undefined) delete process.env.XDG_CONFIG_HOME;
-    else process.env.XDG_CONFIG_HOME = home;
-  }
-});
-
-test("a session that failed braid verify says so in the status line", () => {
-  const base: Status = { session: "s", enabled: true, saved: true, private: false, local: true, ahead: 0, uncommitted: 0, waiting: [] };
-  assert.equal(render(base), "local");
-  assert.equal(render({ ...base, broken: true }), "⚠ braid verify · local");
-});
-
-test("the status line's colors, and none with NO_COLOR", () => {
-  const base: Status = { session: "s", enabled: true, saved: true, private: false, local: false, ahead: 0, uncommitted: 0, waiting: [] };
-  const { paint, sep } = colors({});
-  assert.equal(render(base, paint, sep), "\x1b[32m✓\x1b[39m");
-  assert.equal(render({ ...base, broken: true, ahead: 2 }, paint, sep), "\x1b[31m⚠ braid verify\x1b[39m\x1b[2m · \x1b[22m\x1b[33m↑2\x1b[39m");
-  const off = colors({ NO_COLOR: "1" });
-  assert.equal(render({ ...base, broken: true, ahead: 2 }, off.paint, off.sep), "⚠ braid verify · ↑2");
-});
-
 test("what a session is about: a name you gave, else the agent's title, else the first prompt; and the newest recap", () => {
   const meta = (title: string, kind: string): Rec => ({ type: "metadata", id: `m-${title}`, title, native: { source: "claude-code", records: [{ type: kind }] } });
   const recap = (text: string, time: string): Rec => ({
@@ -237,24 +124,6 @@ test("how long ago", () => {
   assert.equal(ago("2026-11-14T10:00:00Z", now), "2 hours ago");
   assert.equal(ago("2026-11-13T12:00:00Z", now), "24 hours ago");
   assert.equal(ago("2026-11-11T12:00:00Z", now), "3 days ago");
-});
-
-test("a big turn counts the files Codex patches, as Claude Code's edits", () => {
-  const patch = (...files: string[]) =>
-    `*** Begin Patch\n${files.map((f, i) => (i % 2 ? `*** Update File: ${f}\n@@\n-a\n+b` : `*** Add File: ${f}\n+new`)).join("\n")}\n*** End Patch\n`;
-  assert.deepEqual(patchedFiles("*** Begin Patch\n*** Update File: a.ts\n*** Move to: b.ts\n@@\n*** Delete File: c.ts \n*** End Patch"), ["a.ts", "b.ts", "c.ts"]);
-  assert.deepEqual(patchedFiles("no patch here\n*** Add File: x.ts"), []);
-  const call = (block: object): Rec => ({ type: "message", id: `c${Math.random()}`, role: "assistant", content: [{ type: "tool_call", id: "x", ...block }] });
-  // apply_patch as a custom tool: four files in one patch, a fifth in another.
-  const turn = [call({ name: "apply_patch", kind: "custom", input: patch("a.ts", "b.ts", "c.ts", "d.ts") }), call({ name: "apply_patch", kind: "custom", input: patch("e.ts") })];
-  assert.equal(bigTurn(turn), "5 files edited");
-  assert.equal(bigTurn(turn.slice(0, 1)), undefined, "four files are not a big turn");
-  // apply_patch run through the shell, as exec_command or local_shell.
-  assert.equal(bigTurn([call({ name: "exec_command", kind: "function", arguments: { cmd: `apply_patch <<'EOF'\n${patch("a.ts", "b.ts", "c.ts")}EOF` } }), call({ name: "local_shell", kind: "builtin", arguments: { command: ["apply_patch", patch("d.ts", "e.ts")] } })]), "5 files edited");
-  // Claude Code's edits still count, and the same file twice is one file.
-  const edit = (path: string) => call({ name: "Write", kind: "function", arguments: { file_path: path, content: "x" } });
-  assert.equal(bigTurn([edit("a.ts"), edit("a.ts"), edit("b.ts"), edit("c.ts"), edit("d.ts")]), undefined);
-  assert.equal(bigTurn([edit("a.ts"), edit("b.ts"), edit("c.ts"), edit("d.ts"), edit("e.ts")]), "5 files edited");
 });
 
 test("a turn starts at a prompt you typed, or a merge", () => {
@@ -292,30 +161,59 @@ test("turns are numbered along a session's line: a fork continues the numbering 
   assert.deepEqual(turnsAlong(line, turns).map((t) => [t.session, t.n, t.start?.id]), [["aaaaaaaa-1", 1, "p1"], ["bbbbbbbb-2", 2, "q"], ["bbbbbbbb-2", 3, "m"]]);
 });
 
-test("the settings files list every setting, and what is commented out changes nothing", () => {
-  const dir = mkdtempSync(join(tmpdir(), "braid-settings-"));
-  const home = process.env.XDG_CONFIG_HOME;
-  process.env.XDG_CONFIG_HOME = join(dir, "config");
-  try {
-    // Your own file, as braid init writes it: every setting is there, none of them set.
-    mkdirSync(join(dir, "config", "braid"), { recursive: true });
-    writeFileSync(join(dir, "config", "braid", "config.toml"), USER_TEMPLATE);
-    for (const key of ["autopilot", "autofork", "autocommit", "autopush", "repo", "[paths]"]) assert.match(USER_TEMPLATE, new RegExp(`^# ${key.replace(/[[\]]/g, "\\$&")}`, "m"));
-    assert.deepEqual(userConfig(), { repo: undefined, autopilot: undefined, autofork: undefined, autocommit: undefined, autopush: undefined, paths: [] });
 
-    // A repository's file: each setting braid reads, set or commented out at its default, reads back as written.
-    const top = join(dir, "code");
-    mkdirSync(join(top, ".braid"), { recursive: true });
-    const text = TEMPLATE({ autopilot: false, autofork: true, repo: "auto", "git-hooks": true, autocommit: true, autopush: false });
-    for (const key of ["autopilot", "autofork", "repo", "git-hooks", "autocommit", "autopush", "link", "remote"]) assert.match(text, new RegExp(`^(# )?${key} = `, "m"), key);
-    writeFileSync(join(top, ".braid", "config.toml"), text);
-    const repo = { top, separate: false } as unknown as Repo;
-    assert.deepEqual(readConfig(repo), { autopilot: false, autofork: true, gitHooks: true, autocommit: true, autopush: false, link: "trailer", remote: "origin", repo: undefined });
-    // Uncommenting one sets it.
-    writeFileSync(join(top, ".braid", "config.toml"), text.replace('# link = "trailer"', 'link = "store"'));
-    assert.equal(readConfig(repo).link, "store");
+test("the marks after a session's name in the status line, in color, and without with NO_COLOR", () => {
+  const base: Status = { session: "s", saved: true, waiting: [] };
+  assert.equal(render(base), "", "a session with nothing to say shows nothing more");
+  const w = { session: "01a1bc3e", name: "01a1bc3e", count: 5, head: "r5", base: "e8" };
+  assert.equal(render({ ...base, waiting: [w] }), "↓ 01a1bc3e +5 → /braid:merge");
+  assert.equal(render({ ...base, waiting: [w, { ...w, count: 2 }] }), "↓ 2 sessions +7 → /braid:merge");
+  assert.equal(render({ ...base, broken: true, waiting: [w] }), "⚠ braid verify · ↓ 01a1bc3e +5 → /braid:merge");
+  const { paint, sep } = colors({});
+  assert.equal(render({ ...base, broken: true, waiting: [w] }, paint, sep), "\x1b[31m⚠ braid verify\x1b[39m\x1b[2m · \x1b[22m\x1b[35m↓ 01a1bc3e +5 → /braid:merge\x1b[39m");
+  const off = colors({ NO_COLOR: "1" });
+  assert.equal(render({ ...base, broken: true }, off.paint, off.sep), "⚠ braid verify");
+});
+
+test("what a turn did: the files Claude Code's edits write and a Codex patch names, and its tool calls", () => {
+  const patch = (...files: string[]) =>
+    `*** Begin Patch\n${files.map((f, i) => (i % 2 ? `*** Update File: ${f}\n@@\n-a\n+b` : `*** Add File: ${f}\n+new`)).join("\n")}\n*** End Patch\n`;
+  assert.deepEqual(patchedFiles("*** Begin Patch\n*** Update File: a.ts\n*** Move to: b.ts\n@@\n*** Delete File: c.ts \n*** End Patch"), ["a.ts", "b.ts", "c.ts"]);
+  assert.deepEqual(patchedFiles("no patch here\n*** Add File: x.ts"), []);
+  const call = (block: object): Rec => ({ type: "message", id: `c${Math.random()}`, role: "assistant", content: [{ type: "tool_call", id: "x", ...block }] });
+  assert.equal(turnDetail([call({ name: "apply_patch", kind: "custom", input: patch("a.ts", "b.ts", "c.ts", "d.ts") }), call({ name: "apply_patch", kind: "custom", input: patch("e.ts") })]), "5 files edited, 2 tool calls");
+  assert.equal(turnDetail([call({ name: "exec_command", kind: "function", arguments: { cmd: `apply_patch <<'EOF'\n${patch("a.ts", "b.ts")}EOF` } }), call({ name: "local_shell", kind: "builtin", arguments: { command: ["apply_patch", patch("c.ts")] } })]), "3 files edited, 2 tool calls");
+  const edit = (path: string) => call({ name: "Write", kind: "function", arguments: { file_path: path, content: "x" } });
+  assert.equal(turnDetail([edit("a.ts"), edit("a.ts"), edit("b.ts")]), "2 files edited, 3 tool calls", "the same file twice is one file");
+  assert.equal(turnDetail([call({ name: "Read", kind: "function", arguments: { file_path: "a.ts" } })]), "1 tool call");
+  assert.equal(turnDetail([]), "");
+});
+
+test("a project is a git repository's main checkout, or the folder itself; a session stays where it was first kept", () => {
+  const dir = mkdtempSync(join(tmpdir(), "braid-project-"));
+  const git = (cwd: string, ...args: string[]) => assert.equal(spawnSync("git", args, { cwd, encoding: "utf8" }).status, 0, args.join(" "));
+  const main = join(dir, "main");
+  mkdirSync(main);
+  git(main, "init", "--quiet");
+  git(main, "-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "--quiet", "--allow-empty", "-m", "init");
+  git(main, "worktree", "add", "--quiet", join(dir, "feature"));
+  mkdirSync(join(main, "sub"));
+  const real = (p: string) => spawnSync("realpath", [p], { encoding: "utf8" }).stdout.trim();
+  assert.equal(projectOf(join(main, "sub")), real(main));
+  assert.equal(projectOf(join(dir, "feature")), real(main), "a worktree's conversations are kept in its main checkout");
+  const loose = join(dir, "loose");
+  mkdirSync(loose);
+  assert.equal(projectOf(loose), real(loose), "outside any repository, the folder itself");
+  const data = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = join(dir, "data");
+  try {
+    mkdirSync(join(main, ".braid"));
+    recordSession("5b0e2c1a-0000-4000-8000-000000000000", { project: real(main) });
+    assert.equal(repoFor("5b0e2c1a-0000-4000-8000-000000000000", loose).top, real(main), "a fork opened elsewhere stays with its conversation");
+    assert.equal(repoFor("11111111-0000-4000-8000-000000000000", loose).top, real(loose));
   } finally {
-    if (home === undefined) delete process.env.XDG_CONFIG_HOME;
-    else process.env.XDG_CONFIG_HOME = home;
+    if (data === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = data;
   }
 });
+

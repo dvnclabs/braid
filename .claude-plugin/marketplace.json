@@ -8,7 +8,7 @@
     {
       "name": "braid",
       "source": "./",
-      "description": "braid: efficient session manager. Saves every coding-agent session in git as it happens, so you can go back, fork, edit, merge and share it."
+      "description": "braid: efficient session manager. Saves every Claude Code and Codex session in the project it runs in, as it happens, so you can go back to any turn, fork it into either agent, and merge branches."
     }
   ]
 }

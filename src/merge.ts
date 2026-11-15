@@ -1,13 +1,13 @@
 // Merging another session into the current one: a session waiting in ↓, or any
-// session by id, name or pr:N. The agent writes the summary; braid records it
-// when the turn ends.
+// session by id or name. The agent writes the summary; braid records it when
+// the turn ends.
 import { randomUUID } from "node:crypto";
-import { readRecords } from "./chunks.ts";
-import { conversation, quote, resolve, type Found } from "./load.ts";
+import { readRecords } from "./store.ts";
+import { conversation, quote, resolve, sessionName, type Found } from "./load.ts";
 import { ancestry, braidOf, isTurn, lastTurn, type Rec } from "./records.ts";
-import { storeRef, type Repo } from "./repo.ts";
+import type { Repo } from "./repo.ts";
 import { loadState, saveState } from "./state.ts";
-import { computeStatus, sessionName, type Waiting } from "./status.ts";
+import { computeStatus, type Waiting } from "./status.ts";
 
 export interface Incoming {
   session: string;
@@ -20,14 +20,14 @@ export interface Incoming {
 }
 
 /** What another session has that this one has not merged. */
-function incoming(repo: Repo, session: string, remote: string, found: Found): Incoming {
+function incoming(repo: Repo, session: string, found: Found): Incoming {
   const state = loadState(repo, session);
   const conv = state?.conv ?? session;
-  const mine = readRecords(storeRef(conv, session), { gitDir: repo.store });
-  const all = conversation(repo, conv, remote);
-  if (found.conv !== conv) for (const [id, r] of conversation(repo, found.conv, remote)) if (!all.has(id)) all.set(id, r);
+  const mine = readRecords(repo, session);
+  const all = conversation(repo, conv);
+  if (found.conv !== conv) for (const [id, r] of conversation(repo, found.conv)) if (!all.has(id)) all.set(id, r);
   const parents = new Map([...all.values()].map((r) => [r.id, r.parentId ?? null]));
-  const theirs = readRecords(found.ref, found.opts);
+  const theirs = readRecords(repo, found.session);
   const head = lastTurn(theirs) ?? theirs.at(-1)?.id ?? "";
 
   const myHead = lastTurn(mine);
@@ -41,18 +41,18 @@ function incoming(repo: Repo, session: string, remote: string, found: Found): In
     .reverse()
     .map((id) => all.get(id))
     .filter((r): r is Rec => !!r && isTurn(r) && !covered.has(r.id));
-  return { session: found.session, name: sessionName(theirs, found.session), head, base: cut >= 0 ? path[cut]! : null, records };
+  return { session: found.session, name: sessionName(repo, found.session), head, base: cut >= 0 ? path[cut]! : null, records };
 }
 
 /** Picks the session to merge: the target, or the one session waiting in ↓. */
-export function pick(repo: Repo, session: string, remote: string, target?: string): { waiting: Waiting[]; chosen?: Incoming } {
-  const waiting = computeStatus(repo, session, remote).waiting;
+export function pick(repo: Repo, session: string, target?: string): { waiting: Waiting[]; chosen?: Incoming } {
+  const waiting = computeStatus(repo, session).waiting;
   const name = target ? (waiting.find((w) => w.session.startsWith(target) || w.name === target)?.session ?? target) : waiting.length === 1 ? waiting[0]!.session : undefined;
   if (!name) return { waiting };
-  const found = resolve(repo, name, remote).filter((f) => f.session !== session);
-  if (found.length === 0) throw new Error(`no session matches ${name}; try braid fetch --all, then braid sessions`);
+  const found = resolve(repo, name).filter((f) => f.session !== session);
+  if (found.length === 0) throw new Error(`no session matches ${name}; braid sessions lists them`);
   if (found.length > 1) throw new Error(`${name} matches ${found.length} sessions: ${found.map((f) => f.session.slice(0, 8)).join(", ")}; name one`);
-  return { waiting, chosen: incoming(repo, session, remote, found[0]!) };
+  return { waiting, chosen: incoming(repo, session, found[0]!) };
 }
 
 export function context(chosen: Incoming): string {
