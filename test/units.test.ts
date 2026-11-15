@@ -11,6 +11,7 @@ import { cleanName, colors, render, uncovered, type Status } from "../src/status
 import { intact, readWindow, START } from "../src/transcript.ts";
 import { parseToml } from "../src/rules.ts";
 import { ignoredBy, parseIgnore } from "../src/ignore.ts";
+import { bigTurn, patchedFiles } from "../src/points.ts";
 import { Transcript } from "./helpers.ts";
 
 const example = parseJsonl(readFileSync(join(import.meta.dirname, "..", "examples", "pr-review", "conversation.atxf.jsonl"), "utf8"));
@@ -234,4 +235,22 @@ test("how long ago", () => {
   assert.equal(ago("2026-11-14T10:00:00Z", now), "2 hours ago");
   assert.equal(ago("2026-11-13T12:00:00Z", now), "24 hours ago");
   assert.equal(ago("2026-11-11T12:00:00Z", now), "3 days ago");
+});
+
+test("a big turn counts the files Codex patches, as Claude Code's edits", () => {
+  const patch = (...files: string[]) =>
+    `*** Begin Patch\n${files.map((f, i) => (i % 2 ? `*** Update File: ${f}\n@@\n-a\n+b` : `*** Add File: ${f}\n+new`)).join("\n")}\n*** End Patch\n`;
+  assert.deepEqual(patchedFiles("*** Begin Patch\n*** Update File: a.ts\n*** Move to: b.ts\n@@\n*** Delete File: c.ts \n*** End Patch"), ["a.ts", "b.ts", "c.ts"]);
+  assert.deepEqual(patchedFiles("no patch here\n*** Add File: x.ts"), []);
+  const call = (block: object): Rec => ({ type: "message", id: `c${Math.random()}`, role: "assistant", content: [{ type: "tool_call", id: "x", ...block }] });
+  // apply_patch as a custom tool: four files in one patch, a fifth in another.
+  const turn = [call({ name: "apply_patch", kind: "custom", input: patch("a.ts", "b.ts", "c.ts", "d.ts") }), call({ name: "apply_patch", kind: "custom", input: patch("e.ts") })];
+  assert.equal(bigTurn(turn), "5 files edited");
+  assert.equal(bigTurn(turn.slice(0, 1)), undefined, "four files are not a big turn");
+  // apply_patch run through the shell, as exec_command or local_shell.
+  assert.equal(bigTurn([call({ name: "exec_command", kind: "function", arguments: { cmd: `apply_patch <<'EOF'\n${patch("a.ts", "b.ts", "c.ts")}EOF` } }), call({ name: "local_shell", kind: "builtin", arguments: { command: ["apply_patch", patch("d.ts", "e.ts")] } })]), "5 files edited");
+  // Claude Code's edits still count, and the same file twice is one file.
+  const edit = (path: string) => call({ name: "Write", kind: "function", arguments: { file_path: path, content: "x" } });
+  assert.equal(bigTurn([edit("a.ts"), edit("a.ts"), edit("b.ts"), edit("c.ts"), edit("d.ts")]), undefined);
+  assert.equal(bigTurn([edit("a.ts"), edit("b.ts"), edit("c.ts"), edit("d.ts"), edit("e.ts")]), "5 files edited");
 });

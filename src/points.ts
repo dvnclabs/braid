@@ -12,17 +12,37 @@ export const BIG = { files: 5, calls: 30 };
 
 const EDITS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch", "edit", "write"]);
 
+/** The files a patch in Codex's format adds, updates, deletes or moves to. */
+export function patchedFiles(patch: string): string[] {
+  if (!patch.includes("*** Begin Patch")) return [];
+  return [...patch.matchAll(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+?)\s*$/gm)].map((m) => m[1]!);
+}
+
+type Call = { type?: string; name?: string; input?: unknown; arguments?: Record<string, unknown> };
+
+/** The text a call may carry a patch in: apply_patch's input, or a shell command that runs apply_patch. */
+function patchText(b: Call): string {
+  const a = b.arguments ?? {};
+  for (const v of [b.input, a.input, a.cmd, a.command, a.patch]) {
+    if (typeof v === "string") return v;
+    if (Array.isArray(v)) return v.filter((x) => typeof x === "string").join("\n");
+  }
+  return "";
+}
+
 /** Why the records of a turn make a big change, or undefined when they do not. */
 export function bigTurn(records: Rec[]): string | undefined {
   const files = new Set<string>();
   let calls = 0;
   for (const r of records) {
     if (!Array.isArray(r.content)) continue;
-    for (const b of r.content as { type?: string; name?: string; arguments?: Record<string, unknown> }[]) {
+    for (const b of r.content as Call[]) {
       if (b?.type !== "tool_call") continue;
       calls++;
       const path = b.arguments?.file_path ?? b.arguments?.path ?? b.arguments?.notebook_path;
       if (EDITS.has(String(b.name)) && typeof path === "string") files.add(path);
+      // Codex edits files with patches, which name each file in a header.
+      for (const f of patchedFiles(patchText(b))) files.add(f);
     }
   }
   if (files.size >= BIG.files) return `${files.size} files edited`;

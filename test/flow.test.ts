@@ -1416,3 +1416,29 @@ test("braid init keeps the status line that ran before braid, also over another 
   writeFileSync(saved, JSON.stringify({ previous: "/tmp/elsewhere/.local/bin/braid statusline" }));
   assert.match(line(), /^5b0e2c1a/);
 });
+
+test("autofork marks the point before a Codex turn that patches many files", () => {
+  const s = sandbox();
+  const repo = clone(s, "kim", "kim@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  const codexHome = join(s.root, "codex");
+  const env = { ...s.env, CODEX_HOME: codexHome };
+  braid(env, repo, ["init"]);
+  const ID = "019a0000-0000-7000-8000-00000000c0de";
+  const hook = (name: string, transcript: string | null) =>
+    braid(env, repo, ["hook", name, "--agent", "codex"], JSON.stringify({ session_id: ID, transcript_path: transcript, cwd: repo, hook_event_name: name }));
+  hook("session-start", null);
+  const r = new Rollout(codexHome, ID, repo);
+  r.turn("Look at the project.", repo);
+  r.assistant("It has five modules.");
+  r.end();
+  hook("stop", r.path);
+  // One patch, as apply_patch takes it, edits five files: the turn is big.
+  r.turn("Rename the logger in every module.", repo, false);
+  r.patch(`*** Begin Patch\n${["a", "b", "c", "d", "e"].map((m) => `*** Update File: src/${m}.ts\n@@\n-log\n+logger`).join("\n")}\n*** End Patch\n`, "call_p");
+  r.output("call_p", "Success. Updated the following files:\nM src/a.ts\n", true);
+  r.assistant("Renamed it in five files.");
+  r.end();
+  hook("stop", r.path);
+  assert.match(braid(env, repo, ["log", ID]).stdout, /^@1 +fork +before "Rename the logger in every module\." \(5 files edited\)$/m);
+});

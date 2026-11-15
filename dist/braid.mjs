@@ -2510,6 +2510,18 @@ import { randomUUID as randomUUID2 } from "node:crypto";
 // src/points.ts
 var BIG = { files: 5, calls: 30 };
 var EDITS = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch", "edit", "write"]);
+function patchedFiles(patch) {
+  if (!patch.includes("*** Begin Patch")) return [];
+  return [...patch.matchAll(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+?)\s*$/gm)].map((m) => m[1]);
+}
+function patchText(b) {
+  const a = b.arguments ?? {};
+  for (const v of [b.input, a.input, a.cmd, a.command, a.patch]) {
+    if (typeof v === "string") return v;
+    if (Array.isArray(v)) return v.filter((x) => typeof x === "string").join("\n");
+  }
+  return "";
+}
 function bigTurn(records) {
   const files = /* @__PURE__ */ new Set();
   let calls = 0;
@@ -2520,6 +2532,7 @@ function bigTurn(records) {
       calls++;
       const path2 = b.arguments?.file_path ?? b.arguments?.path ?? b.arguments?.notebook_path;
       if (EDITS.has(String(b.name)) && typeof path2 === "string") files.add(path2);
+      for (const f of patchedFiles(patchText(b))) files.add(f);
     }
   }
   if (files.size >= BIG.files) return `${files.size} files edited`;

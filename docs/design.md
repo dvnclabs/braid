@@ -103,7 +103,7 @@ These settings in `.braid/config.toml` decide what braid does by itself, and you
 | Setting | Default | |
 |---|---|---|
 | `autopilot` | `true` | braid works on this machine only: no pushing, fetching or `gh`, so no autopush, and no trailers (as with `link = "store"`). Off, the settings below decide how sessions are shared. |
-| `autofork` | `true` | before a turn that edits 5 files or makes 30 tool calls, braid tags the session as it stood, a fork point that `braid fork @N` continues from in a new window |
+| `autofork` | `true` | before a turn that edits 5 files or makes 30 tool calls, braid tags the session as it stood, a fork point that `braid fork @N` continues from in a new window. braid counts a turn when it saves it: the files Claude Code's edit tools write, and the files a Codex patch names, whether `apply_patch` or a shell command applies it |
 | `repo` | `auto` | the braid repository conversations are kept in: `auto` is `~/.braid`; a path names another git repository |
 | `autocommit` | `false` | each code commit the agent makes commits its conversation too; off, you commit it with `/braid:commit` after `/braid:edit` |
 | `autopush` | `true`; `braid init` writes `false` in public repositories, and on autopilot | off autopilot, `git push` publishes the committed part of the sessions behind the pushed commits; off, `/braid:push` publishes |
