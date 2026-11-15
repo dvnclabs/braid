@@ -8,7 +8,6 @@ import { recordSession } from "./registry.ts";
 import { register, save } from "./save.ts";
 import { cliPath, writePointer } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
-import { computeStatus } from "./status.ts";
 import type { Format } from "./transcript.ts";
 import { turnName } from "./turns.ts";
 import { verify } from "./verify.ts";
@@ -50,10 +49,9 @@ export function sessionStart(input: HookInput): string {
 export function recap(repo: Repo, session: string, agent: Format): string {
   const state = loadState(repo, session);
   if (!state?.title && !state?.recap) return "";
-  const name = (id: string) => (state.turn ? turnName(id, state.turn) : id.slice(0, 8));
-  // A fork not saved yet stands at the turn it forks from.
-  const fork = state.forkFrom ? `, a fork of ${name(state.forkFrom.session)}` : "";
-  const head = `braid · ${name(session)}${state.title ? ` · ${state.title.text}` : ""}${fork}`;
+  const name = state.turn ? turnName(session, state.turn) : session.slice(0, 8);
+  const fork = state.forkedFrom ? `, a fork of ${turnName(state.forkedFrom.session, state.forkedFrom.turn)}` : "";
+  const head = `braid · ${name}${state.title ? ` · ${state.title.text}` : ""}${fork}`;
   return state.recap && agent === "codex" ? `${head}\nLast recap, ${ago(state.recap.at)}: ${state.recap.text}` : head;
 }
 
@@ -62,16 +60,7 @@ export function stop(input: HookInput): string {
   if (!session) return "";
   const repo = where(input, session);
   save(repo, session, input.transcript_path ?? undefined, { agent: input.agent });
-  // A branch of this conversation with turns to merge: said once, under the reply.
-  const waiting = computeStatus(repo, session).waiting;
-  const signature = waiting.map((w) => `${w.session}:${w.count}`).join(",");
-  const state = loadState(repo, session);
-  if (!state || signature === (state.notified ?? "")) return "";
-  state.notified = signature;
-  saveState(repo, state);
-  if (!signature) return "";
-  const what = waiting.map((w) => `${w.name} +${w.count}`).join(", ");
-  return JSON.stringify({ systemMessage: `braid: ${what} waiting to be merged into this session. /braid:merge to merge.` });
+  return "";
 }
 
 /** SessionEnd: saves the rest, and checks the session. */

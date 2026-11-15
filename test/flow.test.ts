@@ -10,7 +10,7 @@ import { braid, clone, must, Rollout, run, sandbox, saved, Transcript } from "./
 const ALICE = "5b0e2c1a-7f3d-4c2e-9a61-0d8e4b2f6c13";
 const BOB = "01a1bc3e-e950-7c4b-9e7a-62f0e9a7c418";
 
-test("a branch of a conversation waits in ↓ until it is merged back", () => {
+test("a branch made with /branch is a session of its own, its file holding the history it was made from", () => {
   const s = sandbox();
   const repo = clone(s, "dana", "dana@example.com");
   must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
@@ -19,39 +19,25 @@ test("a branch of a conversation waits in ↓ until it is merged back", () => {
   const hookIn = (session: string, tr: Transcript) => JSON.stringify({ session_id: session, transcript_path: tr.path, cwd: repo });
   braid(s.env, repo, ["hook", "session-start"], hookIn(ALICE, t));
   t.user("Plan the cache.");
-  const lru = t.assistant("Use an LRU.");
+  t.assistant("Use an LRU.");
   braid(s.env, repo, ["hook", "stop"], hookIn(ALICE, t));
-  const status = (session: string) => braid(s.env, repo, ["status", "--session", session]).stdout;
-  assert.match(status(ALICE), /^braid · 5b0e2c1a\.1 · Plan the cache\.\n/);
+  assert.match(braid(s.env, repo, ["status", "--session", ALICE]).stdout, /^braid · 5b0e2c1a\.1 · Plan the cache\.\n/);
 
-  // Claude Code's /branch copies the transcript under a new id; braid files the copy as a branch of the same conversation.
+  // Claude Code's /branch copies the transcript under a new id: braid saves the copy whole, a session of its own.
   const BRANCH = "7c1d2e3f-0000-4000-8000-0000000000aa";
   const tb = t.fork(s.root, BRANCH);
   tb.user("Try a TTL cache instead.");
-  const ttl = tb.assistant("A TTL of 60 s fits.");
+  tb.assistant("A TTL of 60 s fits.");
   braid(s.env, repo, ["hook", "stop"], hookIn(BRANCH, tb));
-  const branch = saved(repo, BRANCH).filter((r) => r.type === "message");
-  assert.deepEqual(branch.map((r) => r.id).at(-1), ttl);
-  assert.equal(branch.length, 2, "the copied records are not saved twice");
-  assert.equal(branch[0].parentId, lru, "the branch continues from where it was made");
+  assert.deepEqual(saved(repo, BRANCH).filter((r) => r.type === "message").map((r) => r.content?.[1]?.text ?? r.content), ["Plan the cache.", "Use an LRU.", "Try a TTL cache instead.", "A TTL of 60 s fits."]);
+  assert.equal(saved(repo, ALICE).filter((r) => r.type === "message").length, 2, "the first session is as it was");
+  assert.equal(braid(s.env, repo, ["log", "7c1d2e3f"]).stdout, "7c1d2e3f.1    Plan the cache.\n7c1d2e3f.2    Try a TTL cache instead.\n");
+  const line = braid(s.env, repo, ["statusline"], JSON.stringify({ session_id: BRANCH, workspace: { current_dir: repo } }), { NO_COLOR: "1" }).stdout.trim();
+  assert.equal(line, "braid · 7c1d2e3f.2 · Plan the cache.");
 
-  // braid fork prints how to branch in a new window; your own session forks with Claude Code itself.
+  // braid fork prints how to branch in a new window; a Claude Code session forks with Claude Code itself.
   assert.match(braid(s.env, repo, ["fork", "--session", ALICE]).stdout, new RegExp(`\\n  cd /work && claude --resume ${ALICE} --fork-session\\n`));
   assert.match(braid(s.env, repo, ["fork", "7c1d2e3f", "--session", ALICE]).stdout, new RegExp(`\\n  cd /work && claude --resume ${BRANCH} --fork-session`));
-
-  // Back in the first session, the branch waits in ↓ and merges like a review.
-  assert.match(status(ALICE), /↓ 7c1d2e3f \(7c1d2e3f\) has 2 records this session has not merged/);
-  const line = braid(s.env, repo, ["statusline"], JSON.stringify({ session_id: ALICE, workspace: { current_dir: repo } }), { NO_COLOR: "1" }).stdout.trim();
-  assert.equal(line, "braid · 5b0e2c1a.1 · Plan the cache. · ↓ 7c1d2e3f +2 → /braid:merge");
-  assert.match(braid(s.env, repo, ["merge", "--session", ALICE]).stdout, /TTL of 60 s/);
-  const rec = braid(s.env, repo, ["merge", "--session", ALICE, "--record", "7c1d2e3f", "--instruction", "keep the LRU"], "Keep the LRU; the TTL idea is noted.");
-  assert.equal(rec.status, 0, rec.stderr);
-  t.user("/braid:merge keep the LRU");
-  t.assistant("Kept the LRU.");
-  braid(s.env, repo, ["hook", "stop"], hookIn(ALICE, t));
-  assert.doesNotMatch(status(ALICE), /↓/);
-  const merge = saved(repo, ALICE).find((r) => r.type === "branch_summary");
-  assert.equal(merge.ext.braid.merge.heads[1], ttl);
 });
 
 test("subagents are saved with their session, in the same file", () => {
@@ -190,7 +176,7 @@ test("braid verify: sessions are saved as they happened and load back the same, 
   }
   braid(s.env, repo, ["hook", "stop"], hookIn(BRANCH, tb), small);
   const ids = saved(repo, BRANCH).map((r) => r.id);
-  assert.equal(new Set(ids).size, ids.length, "no record saved twice");
+  assert.equal(new Set(ids).size, ids.length - 1, "each line saved once: the line written twice, twice, as in the original");
   const branch = braid(s.env, repo, ["verify", "--session", BRANCH], undefined, small);
   assert.equal(branch.status, 0, branch.stdout);
 
@@ -411,8 +397,10 @@ test("a fork holds what Claude Code reads to resume: what a compaction kept, par
   const forkIn = JSON.stringify({ session_id: id, transcript_path: file, cwd: repo });
   braid(s.env, repo, ["hook", "session-start"], forkIn);
   braid(s.env, repo, ["hook", "stop"], forkIn);
-  const added = saved(repo, id).filter((x) => x.type !== "transcript");
-  assert.deepEqual(added.map((x) => x.content), ["Next."], "the copied lines are not saved again");
+  const added = saved(repo, id).filter((x) => x.type === "message");
+  assert.equal(added.at(-1)?.content, "Next.", "the fork's file holds its history, then what was added");
+  assert.ok(added.length > 1);
+  assert.equal(braid(s.env, repo, ["verify", "--session", id]).status, 0);
 });
 
 /** The lines of a Claude Code transcript, as said: each message's text, tool calls and results, by response. */
@@ -581,10 +569,11 @@ test("Codex sessions save as they happen, from braid's hooks in Codex, and conti
   const hop = /codex resume (\S+)$/m.exec(braid(env, repo, ["fork", fork.slice(0, 8), "--to", "codex", "--cwd", there]).stdout)![1]!;
   const hopped = rolloutOf(hop);
   const said = (l: { type: string; payload: { type?: string; role?: string; content?: { text: string }[] } }) => `${l.payload.role}: ${l.payload.content?.map((c) => c.text).join("")}`;
-  // The Claude session continued from "Thanks.", the Codex session's head when it was forked.
-  const thanks = rollout.findIndex((l) => l.payload?.content?.[0]?.text === "Thanks.");
-  assert.deepEqual(hopped.slice(1, thanks + 1), rollout.slice(1, thanks + 1).map(moved));
-  assert.deepEqual(hopped.slice(thanks + 1).filter((l) => l.type === "response_item").map(said), ["user: And in Claude?", "assistant: Here too."]);
+  // The Claude session's file holds the conversation as Claude Code read it, so back in Codex it is the same conversation,
+  // without what only Codex keeps (its events and token counts) and what only Claude reads (its signed reasoning); a note
+  // Codex wrote in the user's place, such as a skill's text, comes back as a developer message.
+  const messages = (ls: typeof rollout) => ls.filter((l) => l.type === "response_item" && l.payload?.type === "message" && l.payload.role !== "developer").map(said).filter((m: string) => !/<environment_context>|AGENTS\.md|<skill>/.test(m));
+  assert.deepEqual(messages(hopped), [...messages(rollout), "user: And in Claude?", "assistant: Here too."]);
   assert.equal(hopped[0].payload.id, hop);
 
   // SessionEnd: Codex gives it three seconds, so braid saves and checks the session after the hook returns.
@@ -631,19 +620,17 @@ test("a session continued in Codex is saved where it left off, and comes back to
   braid(env, repo, ["hook", "session-start", "--agent", "codex"], codexIn);
   braid(env, repo, ["hook", "stop", "--agent", "codex"], codexIn);
 
-  // The Codex session continues the conversation: it holds only what Codex added, from the Claude session's head.
+  // The Codex session is a session of its own: its file holds the history it was written from, then what Codex added.
   const sessions = braid(env, repo, ["sessions"]).stdout;
-  assert.match(sessions, new RegExp(`^${id.slice(0, 8)}\\.2 .* codex +just now, in 5b0e2c1a's conversation$`, "m"));
+  assert.match(sessions, new RegExp(`^${id.slice(0, 8)}\\.2 .* codex +just now, a fork of 5b0e2c1a\\.1$`, "m"));
   assert.deepEqual(
-    braid(env, repo, ["log", id, "--records"]).stdout.split("\n").filter(Boolean).map((l) => l.replace(/^\S+\s+/, "")),
-    ["user      Then what?", "assistant Then write the notes."],
+    braid(env, repo, ["log", id, "--records"]).stdout.split("\n").filter(Boolean).map((l) => l.replace(/^\S+\s+/, "")).filter((l) => /^(user|assistant)/.test(l)),
+    ["user      Plan the release.", "assistant First, tag the version.", "user      Then what?", "assistant Then write the notes."],
   );
   const state = JSON.parse(readFileSync(join(repo, ".braid", "sessions", `${id}.json`), "utf8"));
-  assert.deepEqual([state.harness, state.copied], ["codex", copied]);
-  const kept = saved(repo, id);
-  assert.equal(kept.find((x) => x.type === "message")?.parentId === undefined, false);
-  assert.equal(kept[0].parentId, head);
-  assert.equal(kept[0].ext.braid.actor.userAgent, "codex");
+  assert.deepEqual([state.harness, state.forkedFrom], ["codex", { session: ALICE, turn: 1 }]);
+  assert.ok(copied > 0 && head);
+  assert.equal(saved(repo, id).at(-1).ext.braid.actor.userAgent, "codex");
   const v = braid(env, repo, ["verify", "--session", id]);
   assert.equal(v.status, 0, v.stdout);
 
@@ -652,7 +639,8 @@ test("a session continued in Codex is saved where it left off, and comes back to
   assert.equal(back.status, 0, back.stderr);
   const fork = /claude --resume (\S+)$/m.exec(back.stdout)![1]!;
   const path = join(s.env.HOME!, ".claude", "projects", realpathSync(repo).replace(/[^A-Za-z0-9]/g, "-"), `${fork}.jsonl`);
-  assert.deepEqual(claudeSaid(path), ["user: Plan the release.", "thinking", "assistant: First, tag the version.", "user: Then what?", "assistant: Then write the notes."]);
+  // Claude's signed reasoning stayed behind when the conversation went through Codex; the rest comes back as it was said.
+  assert.deepEqual(claudeSaid(path), ["user: Plan the release.", "assistant: First, tag the version.", "user: Then what?", "assistant: Then write the notes."]);
 });
 
 test("braid shows what a session is about: its title in the status line and braid status, and where it stands when it resumes", () => {
@@ -734,7 +722,7 @@ test("braid init keeps the status line that ran before braid, also over another 
   assert.match(line(), /^braid · 5b0e2c1a/);
 });
 
-test("every turn has a name, <session>.<n>: braid log lists them, and braid fork takes them", () => {
+test("every turn has a name, <session>.<n>: braid log lists them, braid fork takes them, and a fork continues the numbering", () => {
   const s = sandbox();
   const repo = clone(s, "lea", "lea@example.com");
   must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
@@ -784,12 +772,13 @@ test("every turn has a name, <session>.<n>: braid log lists them, and braid fork
   more("f0000000-0000-4000-8000-000000000001", "f0000000-0000-4000-8000-000000000002", "assistant", [{ type: "text", text: "Switched to an LRU." }]);
   stop(id, file);
   assert.deepEqual(braid(s.env, repo, ["log", id]).stdout.split("\n").filter(Boolean), [
-    "5b0e2c1a.1    Plan the cache.",
-    "5b0e2c1a.2    Write the cache.  (2 files edited, 2 tool calls)",
+    `${id.slice(0, 8)}.1    Plan the cache.`,
+    `${id.slice(0, 8)}.2    Write the cache.  (2 files edited, 2 tool calls)`,
     `${id.slice(0, 8)}.3    Use an LRU instead.`,
   ]);
-  // A turn before the fork is found in the session it forks from; a name you gave works as the session's.
-  assert.match(braid(s.env, repo, ["fork", `${id.slice(0, 8)}.1`, "--session", ALICE, "--new"]).stdout, /up to 5b0e2c1a\.1 as a new/);
+  assert.match(braid(s.env, repo, ["status", "--session", id]).stdout, /\n {2}a fork of 5b0e2c1a\.2\n/);
+  // A fork's file holds the turns before it too; a name you gave works as the session's.
+  assert.match(braid(s.env, repo, ["fork", `${id.slice(0, 8)}.1`, "--session", ALICE, "--new"]).stdout, new RegExp(`up to ${id.slice(0, 8)}\\.1 as a new`));
   t.raw({ type: "custom-title", customTitle: "cache-work", sessionId: ALICE });
   stop(ALICE, t.path);
   assert.match(braid(s.env, repo, ["fork", "cache-work.3", "--session", id]).stdout, /up to 5b0e2c1a\.3 as a new/);
@@ -833,3 +822,24 @@ test("braid migrate moves conversations from braid 0.1's ~/.braid into the proje
   assert.match(braid(s.env, s.root, ["migrate"]).stdout, /left 1 session already moved as it is/);
   assert.equal(saved(repo, ALICE).length, 3);
 });
+
+test("braid init takes out braid 0.1's git hooks and puts back the hooks they wrapped; until then they do nothing", () => {
+  const s = sandbox();
+  const repo = clone(s, "ned", "ned@example.com");
+  const hooks = join(repo, ".git", "hooks");
+  // braid 0.1's pre-push hook, which kept the repository's own hook as pre-push.local and called braid git-hook.
+  writeFileSync(join(hooks, "pre-push.local"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const old = "#!/bin/sh\n# braid hook: runs the hook it replaced (kept as pre-push.local), then braid.\nexec braid git-hook pre-push \"$@\"\n";
+  writeFileSync(join(hooks, "pre-push"), old, { mode: 0o755 });
+  writeFileSync(join(hooks, "post-commit"), old.replace(/pre-push/g, "post-commit"), { mode: 0o755 });
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  const quiet = braid(s.env, repo, ["git-hook", "post-commit"]);
+  assert.deepEqual([quiet.status, quiet.stdout, quiet.stderr], [0, "", ""], "a hook braid 0.1 left does nothing");
+  const init = braid(s.env, repo, ["init"]);
+  assert.match(init.stdout, /took braid 0\.1's post-commit hook out of /);
+  assert.match(init.stdout, /took braid 0\.1's pre-push hook out of /);
+  assert.equal(readFileSync(join(hooks, "pre-push"), "utf8"), "#!/bin/sh\nexit 0\n", "the repository's own hook is back");
+  assert.equal(existsSync(join(hooks, "post-commit")), false);
+  must(s.env, repo, "git", ["push", "--quiet", "origin", "HEAD:main"]);
+});
+

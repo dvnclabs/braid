@@ -4,18 +4,15 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { about, ago, isPrompt, parseJsonl, printable, promptLine, type Rec } from "../src/records.ts";
-import { lineOf, numbering, patchedFiles, turnDetail, turnsAlong } from "../src/turns.ts";
+import { patchedFiles, turnDetail, turnsOf } from "../src/turns.ts";
 import { redactString } from "../src/redact.ts";
 import { projectOf, repoFor } from "../src/repo.ts";
 import { recordSession } from "../src/registry.ts";
 import { spawnSync } from "node:child_process";
-import { colors, render, uncovered, type Status } from "../src/status.ts";
+import { colors, render, type Status } from "../src/status.ts";
 import { intact, readWindow, START } from "../src/transcript.ts";
 import { Transcript } from "./helpers.ts";
 
-const example = parseJsonl(readFileSync(join(import.meta.dirname, "..", "examples", "pr-review", "conversation.atxf.jsonl"), "utf8"));
-const ids = (...list: string[]) => example.filter((r) => list.includes(r.id));
-const range = (prefix: string, from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => `${prefix}${from + i}`);
 
 test("redaction catches credentials and leaves code alone", () => {
   const cases: [string, string][] = [
@@ -40,17 +37,6 @@ test("redaction catches credentials and leaves code alone", () => {
     assert.equal(counts.size, 0);
   }
   assert.equal(redactString(`${homedir()}/work/app.ts`, new Map()), "~/work/app.ts");
-});
-
-test("↓ counts records that no merge covers", () => {
-  const bob = ids(...range("r", 1, 5), "l1");
-  const beforeMerge = ids(...range("e", 1, 12));
-  assert.equal(uncovered(beforeMerge, bob).length, 5);
-  const afterMerge = ids(...range("e", 1, 12), ...range("s", 1, 4), "m1");
-  assert.equal(uncovered(afterMerge, bob).length, 0);
-  const r6: Rec = { ...bob.find((r) => r.id === "r5")!, id: "r6", parentId: "r5" };
-  assert.equal(uncovered(afterMerge, [...bob, r6]).length, 1, "a record after the merged head waits again");
-  assert.equal(uncovered(beforeMerge, bob, ["r5"]).length, 0, "a recorded merge not yet saved covers too");
 });
 
 test("reading a transcript in windows gives the records of reading it whole", () => {
@@ -147,34 +133,6 @@ test("a turn starts at a prompt you typed, or a merge", () => {
   assert.equal(promptLine(user("Add retries.\nAnd tests.")), "Add retries. And tests.");
 });
 
-test("turns are numbered along a session's line: a fork continues the numbering of the session it forks from", () => {
-  const msg = (id: string, parentId: string | null, role: string, content: unknown = "x"): Rec => ({ type: "message", id, parentId, role, content });
-  const a: Rec[] = [msg("p1", null, "user", "Plan."), msg("a1", "p1", "assistant"), msg("p2", "a1", "user", "Build."), msg("a2", "p2", "assistant")];
-  // Forked after turn 1, then a merge.
-  const b: Rec[] = [msg("q", "a1", "user", "Build it differently."), msg("r", "q", "assistant"), { type: "branch_summary", id: "m", parentId: "r", fromId: "a2", summary: "took the tests" }];
-  const sessions = [{ session: "aaaaaaaa-1", records: a }, { session: "bbbbbbbb-2", records: b }];
-  const turns = numbering(sessions);
-  assert.deepEqual([...turns.get("aaaaaaaa-1")!.values()], [1, 1, 2, 2]);
-  assert.deepEqual([...turns.get("bbbbbbbb-2")!.values()], [2, 2, 3]);
-  const line = lineOf(sessions, "bbbbbbbb-2");
-  assert.deepEqual(line.map((s) => [s.session, s.records.map((r) => r.id)]), [["aaaaaaaa-1", ["p1", "a1"]], ["bbbbbbbb-2", ["q", "r", "m"]]]);
-  assert.deepEqual(turnsAlong(line, turns).map((t) => [t.session, t.n, t.start?.id]), [["aaaaaaaa-1", 1, "p1"], ["bbbbbbbb-2", 2, "q"], ["bbbbbbbb-2", 3, "m"]]);
-});
-
-
-test("the marks after a session's name in the status line, in color, and without with NO_COLOR", () => {
-  const base: Status = { session: "s", saved: true, waiting: [] };
-  assert.equal(render(base), "", "a session with nothing to say shows nothing more");
-  const w = { session: "01a1bc3e", name: "01a1bc3e", count: 5, head: "r5", base: "e8" };
-  assert.equal(render({ ...base, waiting: [w] }), "↓ 01a1bc3e +5 → /braid:merge");
-  assert.equal(render({ ...base, waiting: [w, { ...w, count: 2 }] }), "↓ 2 sessions +7 → /braid:merge");
-  assert.equal(render({ ...base, broken: true, waiting: [w] }), "⚠ braid verify · ↓ 01a1bc3e +5 → /braid:merge");
-  const { paint, sep } = colors({});
-  assert.equal(render({ ...base, broken: true, waiting: [w] }, paint, sep), "\x1b[31m⚠ braid verify\x1b[39m\x1b[2m · \x1b[22m\x1b[35m↓ 01a1bc3e +5 → /braid:merge\x1b[39m");
-  const off = colors({ NO_COLOR: "1" });
-  assert.equal(render({ ...base, broken: true }, off.paint, off.sep), "⚠ braid verify");
-});
-
 test("what a turn did: the files Claude Code's edits write and a Codex patch names, and its tool calls", () => {
   const patch = (...files: string[]) =>
     `*** Begin Patch\n${files.map((f, i) => (i % 2 ? `*** Update File: ${f}\n@@\n-a\n+b` : `*** Add File: ${f}\n+new`)).join("\n")}\n*** End Patch\n`;
@@ -215,5 +173,19 @@ test("a project is a git repository's main checkout, or the folder itself; a ses
     if (data === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = data;
   }
+});
+
+test("a session's turns, in the order of its file: each starts at a prompt you typed", () => {
+  const msg = (id: string, role: string, content: unknown = "x"): Rec => ({ type: "message", id, role, content });
+  const records = [{ type: "transcript", id: "h" } as Rec, msg("p1", "user", "Plan."), msg("a1", "assistant"), msg("n1", "user", "<task-notification>done</task-notification>"), msg("p2", "user", "Build."), msg("a2", "assistant")];
+  assert.deepEqual(turnsOf(records).map((t) => [t.n, t.start?.id ?? null, t.records.map((r) => r.id)]), [[0, null, ["h"]], [1, "p1", ["p1", "a1", "n1"]], [2, "p2", ["p2", "a2"]]]);
+});
+
+test("the status line marks a session whose last check failed, in color, and without with NO_COLOR", () => {
+  const base: Status = { session: "s", saved: true };
+  assert.equal(render(base), "", "a session with nothing to say shows nothing more");
+  assert.equal(render({ ...base, broken: true }), "⚠ braid verify");
+  assert.equal(render({ ...base, broken: true }, colors({}).paint), "\x1b[31m⚠ braid verify\x1b[39m");
+  assert.equal(render({ ...base, broken: true }, colors({ NO_COLOR: "1" }).paint), "⚠ braid verify");
 });
 

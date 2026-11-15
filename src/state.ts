@@ -5,20 +5,8 @@ import { ensureStore, type Repo } from "./repo.ts";
 import type { About } from "./records.ts";
 import type { Cursor } from "./transcript.ts";
 
-export interface PendingMerge {
-  id: string;
-  /** The session brought in, and its head when the merge was written. */
-  from: string;
-  fromHead: string;
-  base: string | null;
-  instruction: string;
-  strategy: string;
-  summary: string;
-}
-
 export interface SessionState {
   session: string;
-  conv: string;
   /** The agent the session runs in, whose transcript braid reads. */
   harness: "claude-code" | "codex";
   transcript?: string;
@@ -35,20 +23,10 @@ export interface SessionState {
   userAgent?: string;
   /** Subagent transcripts saved with this session, by agent id. */
   agents?: Record<string, { cursor: Cursor; last?: string; linked?: boolean }>;
-  /** Id of the first message, which a fork's transcript shares with the session it was forked from. */
-  first?: string;
-  /** A session this one forks from, set by `braid fork` before the first save. */
-  /** `lines`: how many lines a replayed fork wrote, all copies of the source. */
-  forkFrom?: { session: string; conv: string; head: string; actor?: string; replayed?: boolean; lines?: number };
-  /** A rollout braid wrote for Codex: its first lines, this many, are copies of the session it continues, saved there. */
-  copied?: number;
+  /** The session and turn `braid fork` wrote this one from; its file holds that history too. */
+  forkedFrom?: { session: string; turn: number };
   /** The last braid verify, run when the session ended. */
   verified?: { ok: boolean; at: string; problems?: string[] };
-  pendingMerge?: PendingMerge;
-  /** Native records whose parent is `from` continue from the merge record `to`. */
-  reparent?: { from: string; to: string };
-  /** What the last after-turn notice reported, so it is not repeated. */
-  notified?: string;
   /** What the session is about, from its records: the status line and braid status show it. */
   title?: About["title"];
   /** The agent's latest recap of the session, shown when the session is resumed. */
@@ -78,7 +56,7 @@ export function saveState(repo: Repo, state: SessionState): void {
 }
 
 export function newState(session: string, transcript?: string, harness: SessionState["harness"] = "claude-code"): SessionState {
-  return { session, conv: session, harness, transcript, chunks: 0 };
+  return { session, harness, transcript, chunks: 0 };
 }
 
 const sleeper = new Int32Array(new SharedArrayBuffer(4));

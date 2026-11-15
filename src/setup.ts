@@ -1,10 +1,11 @@
 // braid init: once per machine, a `braid` command, braid's part of Claude
 // Code's status line, and its hooks in Codex. Each project's .braid folder is
 // made the first time a session there is saved.
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gitMaybe } from "./git.ts";
 import { configDir, ensureStore, locate } from "./repo.ts";
 import { shellWord } from "./replay.ts";
 
@@ -77,6 +78,26 @@ function codexHooks(bin: string, undo: boolean): string[] {
     : [`added braid's hooks to ${file}, so braid saves Codex sessions too: open /hooks in Codex once to trust them`];
 }
 
+/**
+ * braid 0.1's git hooks in a repository, taken out, and the hooks they ran
+ * first (kept as <hook>.local) put back. Hooks a hook manager runs, through
+ * core.hooksPath, are left to it.
+ */
+export function removeOldGitHooks(cwd: string): string[] {
+  const dir = gitMaybe(["rev-parse", "--path-format=absolute", "--git-path", "hooks"], { cwd })?.trim();
+  if (!dir || !existsSync(dir)) return [];
+  if (gitMaybe(["config", "core.hooksPath"], { cwd })?.trim()) return [];
+  const notes: string[] = [];
+  for (const hook of ["prepare-commit-msg", "post-commit", "post-rewrite", "pre-push"]) {
+    const path = join(dir, hook);
+    if (!existsSync(path) || !readFileSync(path, "utf8").includes("# braid hook")) continue;
+    rmSync(path);
+    if (existsSync(`${path}.local`)) renameSync(`${path}.local`, path);
+    notes.push(`took braid 0.1's ${hook} hook out of ${dir}`);
+  }
+  return notes;
+}
+
 /** Whether a status line command is braid's own, wherever that braid is installed. */
 export const isBraidLine = (command?: string): boolean => !!command && /(^|[/\s"'])braid(\.mjs)?["']? statusline\s*$/.test(command.trim());
 
@@ -120,7 +141,7 @@ export function setup(opts: { undo?: boolean } = {}): string[] {
 
 /** `braid init`: the machine, and the .braid folder of the project `cwd` is in. */
 export function init(cwd: string): string[] {
-  const notes = setup();
+  const notes = [...setup(), ...removeOldGitHooks(cwd)];
   const repo = locate(cwd);
   const made = !existsSync(repo.dir);
   ensureStore(repo);

@@ -74,6 +74,16 @@ export function readEntry(session: string): Entry | undefined {
   }
 }
 
+/** Sessions on this machine whose id starts with `prefix`, with the project that keeps each. */
+export function knownSessions(prefix: string): { session: string; project?: string }[] {
+  if (!/^[A-Za-z0-9-]{4,80}$/.test(prefix)) return [];
+  const dir = join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "braid", "sessions");
+  return list(dir)
+    .filter((f) => f.startsWith(prefix) && f.endsWith(".json"))
+    .map((f) => f.slice(0, -".json".length))
+    .map((session) => ({ session, project: readEntry(session)?.project }));
+}
+
 /** Records a session's transcript, or the project that keeps it. */
 export function recordSession(session: string, update: { transcript?: string; project?: string }): void {
   const path = file(session);

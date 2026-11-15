@@ -11,6 +11,7 @@ import { parseJsonl, type Rec } from "./records.ts";
 import { projectOf, repoAt } from "./repo.ts";
 import { recordSession } from "./registry.ts";
 import { loadState, saveState, type SessionState } from "./state.ts";
+import { removeOldGitHooks } from "./setup.ts";
 import { appendRecords, recordsFile } from "./store.ts";
 
 /** Where braid 0.1 kept conversations. */
@@ -34,7 +35,7 @@ function readOld(ref: string, opts: GitOptions): { records: Rec[]; agents: Map<s
   return { records, agents };
 }
 
-const OBSOLETE = ["code", "published", "withheld", "terms", "edits", "private", "review", "commits", "importedSeq"];
+const OBSOLETE = ["code", "published", "withheld", "terms", "edits", "private", "review", "commits", "importedSeq", "conv", "forkFrom", "copied", "first", "pendingMerge", "reparent", "notified"];
 
 export function migrate(home = oldHome()): string[] {
   const store = join(home, ".git", "braid", "store");
@@ -64,9 +65,8 @@ export function migrate(home = oldHome()): string[] {
       }
       const { records, agents } = readOld(ref, opts);
       appendRecords(repo, session, records, agents);
-      const state = { ...(old(session) ?? { session, conv, harness: "claude-code", chunks: 1 }) } as Record<string, unknown>;
+      const state = { ...(old(session) ?? { session, harness: "claude-code", chunks: 1 }) } as Record<string, unknown>;
       for (const key of OBSOLETE) delete state[key];
-      state.conv = conv;
       state.chunks = Math.max(1, Number(state.chunks ?? 1));
       saveState(repo, state as unknown as SessionState);
       recordSession(session, { project });
@@ -74,6 +74,9 @@ export function migrate(home = oldHome()): string[] {
     }
   }
   const notes = [...moved].map(([project, n]) => `moved ${n} session${n === 1 ? "" : "s"} into ${join(project, ".braid")}`);
+  // braid 0.1 installed git hooks in the repositories its sessions ran in: 0.2 has none.
+  const ran = new Set([...byConv.values()].flat().map((s) => old(s.session)?.code).filter((c): c is string => typeof c === "string" && existsSync(c)));
+  for (const code of ran) notes.push(...removeOldGitHooks(code));
   if (kept) notes.push(kept === 1 ? "left 1 session already moved as it is" : `left ${kept} sessions already moved as they are`);
   if (!notes.length) notes.push("nothing to move");
   notes.push(`${home} stays as it was: delete it once you no longer need braid 0.1`);

@@ -18,7 +18,6 @@ import { join } from "node:path";
 import { claudeCode } from "@leostera/atxf/claude-code";
 import { readAgents, readRecords, recordsFile } from "./store.ts";
 import { codexText } from "./harness.ts";
-import { conversation } from "./load.ts";
 import { CODEX_CONTEXT, describe, lastTurn, type Rec } from "./records.ts";
 import { forkRecords, forkText, keptUuids, replayedIds, SOURCE_ONLY, type Line } from "./replay.ts";
 import type { Repo } from "./repo.ts";
@@ -315,11 +314,9 @@ export function verify(repo: Repo, session: string): Verified {
   } catch (err) {
     return { session, problems: [`file: ${recordsFile(repo, session)} does not read back: ${err instanceof Error ? err.message : String(err)}`], checked, notes };
   }
-  const all = conversation(repo, state.conv);
-  const replayed = replayedIds(all.values());
-  // A rollout braid wrote for Codex starts with copies of the session it continues, which are saved there.
-  const copied = (id: string) => codexLine(id) <= (state.copied ?? 0);
-  const elsewhere = (id: string) => all.has(id) || replayed.has(id) || copied(id);
+  // A session's file holds its whole conversation, a fork's the history it was written from too.
+  const all = new Map(stored.map((r) => [r.id, r] as const));
+  const elsewhere = () => false;
 
   const format: Format = state.harness === "codex" ? "codex" : "claude-code";
 
@@ -353,11 +350,11 @@ export function verify(repo: Repo, session: string): Verified {
     const forked = codexHistory(lines);
     if (state.transcript && existsSync(state.transcript)) {
       const rollout = readLines(state.transcript, state.cursor?.offset);
-      // The lines Codex wrote for this session, after its session_meta or the copies braid wrote, end the fork as they are.
-      const own = rollout.slice(state.copied || 1).map(stable);
+      // The lines of the rollout, after its session_meta, end the fork as they are.
+      const own = rollout.slice(1).map(stable);
       const tail = lines.slice(-own.length).map(stable);
       const at = own.findIndex((l, i) => l !== tail[i]);
-      if (lines.length <= own.length || at >= 0) problems.push(`loads: a fork holds the rollout's lines otherwise, from line ${(at < 0 ? 0 : at) + 1 + (state.copied || 1)}: ${(own[at] ?? "").slice(0, 120)}`);
+      if (lines.length <= own.length || at >= 0) problems.push(`loads: a fork holds the rollout's lines otherwise, from line ${(at < 0 ? 0 : at) + 2}: ${(own[at] ?? "").slice(0, 120)}`);
       // What Codex rebuilds to resume the rollout itself, against what it rebuilds from a fork.
       const resumed = codexHistory(rollout);
       const i = resumed.findIndex((l, n) => l !== forked[n]);

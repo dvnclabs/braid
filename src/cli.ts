@@ -5,20 +5,19 @@ import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import { sessionEnd, sessionStart, stop } from "./hooks.ts";
 import { allSessions, resolve } from "./load.ts";
-import { context, pick, record } from "./merge.ts";
 import { migrate, waitingToMove } from "./migrate.ts";
 import { claudeEnv, harness } from "./harness.ts";
 import { launchDir, replay, shellWord } from "./replay.ts";
-import { currentAgent, currentSession, recordSession, transcriptOf } from "./registry.ts";
+import { currentAgent, currentSession, knownSessions, recordSession, transcriptOf } from "./registry.ts";
 import { ago, describe, isTurn, promptLine } from "./records.ts";
-import { configDir, repoFor, type Repo } from "./repo.ts";
+import { configDir, repoAt, repoFor, type Repo } from "./repo.ts";
 import { save } from "./save.ts";
 import { cliPath, init, setup } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
 import { computeStatus } from "./status.ts";
 import { statusline } from "./statusline.ts";
 import { readRecords, recordsFile } from "./store.ts";
-import { conversationSessions, lineOf, numbering, resolveTurn, TURN, turnDetail, turnName, turnsAlong } from "./turns.ts";
+import { findTurn, TURN, turnDetail, turnName, turnsOf } from "./turns.ts";
 import { verify } from "./verify.ts";
 import { VERSION } from "./version.ts";
 
@@ -32,7 +31,7 @@ Codex's $CODEX_THREAD_ID), or the one named with --session <id>.
   braid init                  this machine: the braid command, the status line, braid's hooks in
                               Codex when it is installed; and this project's .braid folder
     --undo                    put back the status line braid replaced, and take braid's hooks out of Codex
-  braid status                this session: its newest turn, what it is about, and branches to merge
+  braid status                this session: its newest turn, what it is about, and where it is kept
   braid sessions              the sessions this project keeps
   braid log [<session>] [--records]   a session's turns, each named <session>.<n>, with what it did;
                               --records: each record, under its turn
@@ -40,9 +39,6 @@ Codex's $CODEX_THREAD_ID), or the one named with --session <id>.
                               of its turn n, in a new window; with none, this one
     --to codex|claude-code    as a new session of that agent's (by default the agent it runs in)
     --new                     another session, even when the same fork was written before
-  braid merge [<session>]     what another session has that this one lacks, for the agent to merge
-  braid merge --record <id> --instruction "<text>"   record a merge; the summary on stdin
-  braid merge --skip <id>     mark a session seen without adopting anything
   braid verify [<session>|--all]   check that a session was saved as it happened and loads back the same
   braid save                  save this session now (the Stop hook does this after each turn)
   braid migrate               move conversations from braid 0.1's ~/.braid into their projects
@@ -91,12 +87,19 @@ const named = (repo: Repo, session: string): string => {
   return turn ? turnName(session, turn) : session.slice(0, 8);
 };
 
-/** One session, found by name, or the session a command runs in. */
-function oneSession(repo: Repo, target: string | undefined, current: string | undefined): string {
-  if (!target) return needSession(current);
+/**
+ * One session, found by name, or the session a command runs in, with the
+ * project that keeps it: this one, or, for a session id this project does not
+ * keep, the project braid noted for it when it saved it.
+ */
+function oneSession(repo: Repo, target: string | undefined, current: string | undefined): { repo: Repo; session: string } {
+  if (!target) return { repo, session: needSession(current) };
   const found = resolve(repo, target);
-  if (found.length !== 1) throw new Error(found.length ? `${target} matches ${found.length} sessions; name one (braid sessions lists them)` : `no session matches ${target}; braid sessions lists them`);
-  return found[0]!.session;
+  if (found.length === 1) return { repo, session: found[0]!.session };
+  if (found.length > 1) throw new Error(`${target} matches ${found.length} sessions; name one (braid sessions lists them)`);
+  const elsewhere = knownSessions(target).filter((k) => k.project && existsSync(join(k.project, ".braid")));
+  if (elsewhere.length === 1) return { repo: repoAt(elsewhere[0]!.project!), session: elsewhere[0]!.session };
+  throw new Error(elsewhere.length ? `${target} matches ${elsewhere.length} sessions; name one` : `no session matches ${target}; braid sessions lists them`);
 }
 
 function main(argv: string[]): number {
@@ -147,6 +150,9 @@ function main(argv: string[]): number {
       }
       return 0;
     }
+    case "git-hook":
+      // braid 0.1's git hooks call this. They do nothing now, and braid init takes them out.
+      return 0;
     case "statusline":
       try {
         out(statusline(readStdin()));
@@ -161,7 +167,7 @@ function main(argv: string[]): number {
       }
       for (const note of init(process.cwd())) out(`braid: ${note}`);
       // Conversations braid 0.1 kept in ~/.braid move into their projects.
-      if (waitingToMove()) for (const note of migrate()) if (/^moved /.test(note)) out(`braid: ${note}`);
+      if (waitingToMove()) for (const note of migrate()) if (/^(moved|took) /.test(note)) out(`braid: ${note}`);
       // The conversation braid init runs in is saved now, from its first turn.
       // A session that started before braid was installed has no BRAID_SESSION and no entry: Claude Code names it.
       const transcript = str("transcript") ?? (current ? transcriptOf(current) : undefined);
@@ -198,9 +204,7 @@ function main(argv: string[]): number {
       out(`  kept in ${recordsFile(repo, session)}`);
       if (state.ran && state.ran !== repo.top) out(`  ran in ${state.ran}`);
       if (s.broken) out(`  ⚠ braid verify found problems when it last ran: ${(state.verified?.problems ?? []).join("; ")}`);
-      for (const w of s.waiting) out(`  ↓ ${w.name} (${w.session.slice(0, 8)}) has ${w.count} records this session has not merged: /braid:merge`);
-      const others = allSessions(repo).filter((f) => f.conv === state.conv && f.session !== session);
-      if (others.length) out(`  this conversation: ${others.map((f) => named(repo, f.session)).join(", ")}`);
+      if (state.forkedFrom) out(`  a fork of ${turnName(state.forkedFrom.session, state.forkedFrom.turn)}`);
       return 0;
     }
     case "sessions": {
@@ -215,34 +219,24 @@ function main(argv: string[]): number {
       for (const { f, state, at } of rows) {
         // The worktree a session ran in, for a project whose worktrees share its sessions.
         const where = state!.ran && state!.ran !== repo.top ? `, in ${basename(state!.ran)}` : "";
-        const fork = f.conv !== f.session ? `, in ${f.conv.slice(0, 8)}'s conversation` : "";
+        const fork = state!.forkedFrom ? `, a fork of ${turnName(state!.forkedFrom.session, state!.forkedFrom.turn)}` : "";
         out(`${named(repo, f.session).padEnd(14)} ${(state!.title?.text ?? "").slice(0, 50).padEnd(50)} ${state!.harness.padEnd(11)} ${ago(at)}${where}${fork}`);
       }
       return 0;
     }
     case "log": {
-      const repo = here();
-      const session = oneSession(repo, args[0], current);
-      const state = loadState(repo, session);
-      if (!state) throw new Error(`${session.slice(0, 8)} is not saved here`);
-      const sessions = conversationSessions(repo, state.conv);
-      const turns = numbering(sessions);
+      const { repo, session } = oneSession(here(), args[0], current);
+      const records = readRecords(repo, session);
+      if (!records.length) throw new Error(`${session.slice(0, 8)} is not saved here`);
       const lines: string[] = [];
-      if (opts.records === true) {
-        // This session's records, each under its turn's name.
-        const mine = turns.get(session);
-        for (const r of readRecords(repo, session)) {
-          if (!isTurn(r)) continue;
-          const kind = r.type === "branch_summary" ? "merge" : (r.role ?? r.type);
-          lines.push(`${turnName(session, mine?.get(r.id) ?? 0).padEnd(12)}  ${kind.padEnd(9)} ${describe(r, 160).split("\n")[0]}`);
-        }
-      } else {
-        // One line per turn along the session's line, the sessions it forks from included, as git log shows history.
-        for (const t of turnsAlong(lineOf(sessions, session), turns)) {
-          if (!t.start) continue;
-          const said = t.start.type === "branch_summary" ? `merge: ${describe(t.start, 100).split("\n")[0]}` : promptLine(t.start);
+      for (const t of turnsOf(records)) {
+        if (!t.start) continue;
+        if (opts.records === true) {
+          // Each record, under its turn's name.
+          for (const r of t.records.filter(isTurn)) lines.push(`${turnName(session, t.n).padEnd(12)}  ${(r.role ?? r.type).padEnd(9)} ${describe(r, 160).split("\n")[0]}`);
+        } else {
           const did = turnDetail(t.records);
-          lines.push(`${turnName(t.session, t.n).padEnd(12)}  ${said}${did ? `  (${did})` : ""}`);
+          lines.push(`${turnName(session, t.n).padEnd(12)}  ${promptLine(t.start)}${did ? `  (${did})` : ""}`);
         }
       }
       page(lines.length ? `${lines.join("\n")}\n` : "");
@@ -264,58 +258,33 @@ function main(argv: string[]): number {
         if (transcript && existsSync(transcript)) save(repo, current, transcript);
       }
       // A turn: <session>.<n>, or .<n> for this session's. A fork continues from the end of that turn.
-      const turn = args[0] && TURN.test(args[0]) ? resolveTurn(repo, args[0], current) : undefined;
-      if (turn) {
-        out(wrote(`the conversation up to ${turnName(turn.found.session, turn.n)}`, replay(repo, turn.found, to, { cwd: str("cwd"), fresh, until: turn.until })));
+      const m = args[0] ? TURN.exec(args[0]) : null;
+      if (m && !(m[1] && resolve(repo, args[0]!).length)) {
+        const { repo: kept, session } = oneSession(repo, m[1] || undefined, current);
+        const turn = findTurn(kept, { session }, Number(m[2]));
+        if (!turn) throw new Error(`${session.slice(0, 8)} has no turn ${m[2]}; braid log lists its turns`);
+        out(wrote(`the conversation up to ${turnName(session, turn.n)}`, replay(kept, { session }, to, { cwd: str("cwd"), fresh, until: turn.until })));
         return 0;
       }
-      const session = oneSession(repo, args[0], current);
-      const state = loadState(repo, session);
+      const { repo: kept, session } = oneSession(repo, args[0], current);
+      const state = loadState(kept, session);
       if (!state || state.chunks === 0) throw new Error(`${session.slice(0, 8)} is not saved yet`);
       // A Claude Code session of this machine, continued in Claude Code: Claude Code forks it, with everything it holds.
       const dir = to.agent === "claude-code" && state.harness === "claude-code" && !str("cwd") && !fresh ? launchDir(state.transcript) : undefined;
       if (dir) {
-        const what = session === current ? "this conversation" : named(repo, session);
-        out([`braid: to branch ${what} into a new window, run in a terminal:`, resume(dir, session), ...(session === current ? ["or /branch to branch it in this window. braid files the branch in this conversation."] : [])].join("\n"));
+        const what = session === current ? "this conversation" : named(kept, session);
+        out([`braid: to branch ${what} into a new window, run in a terminal:`, resume(dir, session), ...(session === current ? ["or /branch to branch it in this window. braid saves the branch as a session of its own."] : [])].join("\n"));
         return 0;
       }
-      const found = allSessions(repo).find((f) => f.session === session)!;
-      out(wrote(session === current ? "this conversation" : named(repo, session), replay(repo, found, to, { cwd: str("cwd"), fresh })));
-      return 0;
-    }
-    case "merge": {
-      const session = needSession(current);
-      const repo = here();
-      const target = str("record") ?? str("skip") ?? args[0];
-      const { waiting, chosen } = pick(repo, session, target);
-      if (!chosen) {
-        if (waiting.length === 0) out("braid: nothing waiting to be merged into this session; name a session to merge (braid sessions lists them)");
-        else out(["braid: several sessions are waiting; name one:", ...waiting.map((w) => `  ${w.session.slice(0, 8)} ${w.name} +${w.count}`)].join("\n"));
-        return 0;
-      }
-      if (chosen.records.length === 0 && !str("skip")) {
-        out(`braid: nothing to merge from ${chosen.name}: this session already has all of it`);
-        return 0;
-      }
-      if (str("skip")) {
-        record(repo, session, chosen, { instruction: "skip", summary: `Skipped ${chosen.name}: seen, nothing adopted.`, strategy: "skip" });
-        out(`braid: ${chosen.name} marked as seen; the merge record is written when this turn ends`);
-      } else if (str("record")) {
-        const summary = readStdin();
-        if (!summary.trim()) throw new Error("the merge summary goes on stdin");
-        record(repo, session, chosen, { instruction: str("instruction") ?? "", summary, strategy: str("strategy") ?? "default" });
-        out(`braid: merge of ${chosen.name} recorded; it is written into this session when this turn ends`);
-      } else {
-        out(context(chosen));
-      }
+      out(wrote(session === current ? "this conversation" : named(kept, session), replay(kept, { session }, to, { cwd: str("cwd"), fresh })));
       return 0;
     }
     case "verify": {
       // Saved as it happened, and loads back as it was saved: this session, one named, or all of them.
       const repo = here();
-      const ids = opts.all === true ? allSessions(repo).filter((f) => (loadState(repo, f.session)?.chunks ?? 0) > 0).map((f) => f.session) : [oneSession(repo, args[0], current)];
+      const ids = opts.all === true ? allSessions(repo).filter((f) => (loadState(repo, f.session)?.chunks ?? 0) > 0).map((f) => ({ repo, session: f.session })) : [oneSession(repo, args[0], current)];
       let bad = 0;
-      for (const id of ids) {
+      for (const { repo, session: id } of ids) {
         const v = verify(repo, id);
         bad += v.problems.length ? 1 : 0;
         const st = loadState(repo, id);

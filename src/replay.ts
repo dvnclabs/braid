@@ -7,12 +7,12 @@ import { closeSync, existsSync, openSync, readSync, realpathSync } from "node:fs
 import { claudeCode, uuidFor } from "@leostera/atxf/claude-code";
 import { readRecords } from "./store.ts";
 import { recordSession } from "./registry.ts";
-import { conversation, type Found } from "./load.ts";
+import type { Found } from "./load.ts";
 import { about, asCodexShowed, braidOf, contextPath, forModel, lastTurn, type Rec } from "./records.ts";
 import type { Harness } from "./harness.ts";
-import type { Repo } from "./repo.ts";
+import { locate, type Repo } from "./repo.ts";
 import { loadState, newState, saveState } from "./state.ts";
-import { conversationSessions, numbering } from "./turns.ts";
+import { startsTurn } from "./turns.ts";
 
 /** The directory a Claude Code session started in, from its transcript: where `claude --resume` finds it. */
 export function launchDir(transcript: string | undefined): string | undefined {
@@ -133,8 +133,8 @@ function asResponses(records: Rec[]): Rec[] {
 /**
  * A Claude Code transcript of a fork under a new session id. Each record goes
  * out as the very line Claude Code wrote, when braid keeps it, so Claude Code
- * resumes the fork as it resumes the source. Records from elsewhere (a
- * published session, a merge, another agent's session) are written by ATXF's
+ * resumes the fork as it resumes the source. Records of another agent's
+ * session are written by ATXF's
  * converter when they are on the context path, as their agent showed them to
  * its model; a record it writes nothing for (another agent's settings, its
  * bookkeeping) passes its place in the chain to its children. Lines keep their
@@ -231,8 +231,9 @@ export interface Replayed {
  * `fresh`, a fork is another session each time.
  */
 export function replay(repo: Repo, found: Found, to: Harness, opts: { cwd?: string; fresh?: boolean; until?: string } = {}): Replayed {
-  const all = conversation(repo, found.conv);
   const read = readRecords(repo, found.session);
+  // A session's file holds its whole conversation.
+  const all = new Map(read.map((r) => [r.id, r] as const));
   // From a turn: the session up to that turn's last record.
   const own = opts.until ? read.slice(0, read.findIndex((r) => r.id === opts.until) + 1) : read;
   if (opts.until && own.length === 0) throw new Error(`session ${found.session.slice(0, 8)} has no record ${opts.until}`);
@@ -249,21 +250,20 @@ export function replay(repo: Repo, found: Found, to: Harness, opts: { cwd?: stri
   const before = opts.fresh ? undefined : to.existing(derived, cwd);
   if (before) return { session: derived, file: before, cwd, records: 0, existing: true };
   // A fork that was continued, saved, and its file then removed keeps its id: this one is another.
-  const session = opts.fresh || (loadState(repo, derived)?.chunks ?? 0) > 0 ? randomUUID() : derived;
+  // The fork is kept in the project it runs in, as any session is, and saved there as a session of its own, its history included.
+  const target = locate(cwd);
+  const session = opts.fresh || (loadState(target, derived)?.chunks ?? 0) > 0 ? randomUUID() : derived;
   const { file, lines } = to.write(fork, all, cwd, pairs, session);
-
-  // The new session continues the source: its first save keeps only what the agent adds after the copy.
-  const state = loadState(repo, session) ?? newState(session, file, to.agent);
-  const first = own.find((r) => braidOf(r).actor);
-  state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : undefined, replayed: true, lines };
-  // The fork is about what its source was about at the point it forks from; from the newest, as it is now.
-  const upTo = head === lastTurn(own) ? own.length - 1 : own.findIndex((r) => r.id === head);
-  Object.assign(state, about(upTo >= 0 ? own.slice(0, upTo + 1) : own, state));
-  // Its turns continue the numbering from the turn it forks at.
-  state.turn = numbering(conversationSessions(repo, found.conv)).get(found.session)?.get(head) ?? 0;
-  // The fork is kept with the session it forks, wherever it runs.
-  saveState(repo, state);
-  recordSession(session, { project: repo.top });
+  const state = loadState(target, session) ?? newState(session, file, to.agent);
+  const upTo = own.findIndex((r) => r.id === head);
+  const turn = own.slice(0, upTo + 1).filter(startsTurn).length;
+  state.forkedFrom = { session: found.session, turn };
+  // Until its first save counts the turns of its own file, a fork stands at the turn it forks from.
+  state.turn = turn;
+  // The fork is about what its source was about at the turn it forks from; from the newest, as it is now.
+  Object.assign(state, about(head === lastTurn(read) ? read : own.slice(0, upTo + 1), state));
+  saveState(target, state);
+  recordSession(session, { project: target.top });
   return { session, file, cwd, records: lines };
 }
 

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>braid: efficient session manager</title>
-<meta name="description" content="braid saves every Claude Code and Codex session as it happens, in the project it runs in. Go back to any turn, continue it in either agent, and merge branches back.">
+<meta name="description" content="braid saves every Claude Code and Codex session as it happens, in the project it runs in. Go back to any turn and continue it in either agent.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
 <style>
@@ -170,9 +170,9 @@
 
   <main>
     <section class="hero">
-      <p class="tag">v0.2 · for Claude Code and Codex</p>
+      <p class="tag">v0.3 · for Claude Code and Codex</p>
       <h1>Every coding-agent session, <span>saved in your project</span> as it happens.</h1>
-      <p class="lede">braid keeps each project&#8217;s agent conversations in its own <code>.braid</code> folder, as plain files you can read and search. Go back to any turn, continue it in Claude Code or Codex, and merge branches back.</p>
+      <p class="lede">braid keeps each project&#8217;s agent conversations in its own <code>.braid</code> folder, as plain files you can read and search. Go back to any turn, and continue it in Claude Code or Codex.</p>
 
       <div class="term">
         <div class="term-head"><span>In Claude Code</span><button class="copy" data-copy="install" type="button">Copy</button></div>
@@ -197,8 +197,8 @@
         <p>Sessions live in <code>.braid/sessions/</code>, one file each, in a folder git does not see. Every worktree of a project saves into the main checkout&#8217;s folder, so deleting a worktree keeps its sessions.</p>
       </article>
       <article class="feature" style="--dot: var(--coral)">
-        <h2>Branch and merge</h2>
-        <p>A branch of a conversation, such as one made with <code>/branch</code>, shows in the status line until you merge it. <code>/braid:merge</code> brings it back into your conversation, following your instruction.</p>
+        <h2>One file per session</h2>
+        <p>Each file holds a whole session. A fork, or a copy made with <code>/branch</code>, is saved as a session of its own with the history it came from, ready to read, search or train on.</p>
       </article>
     </section>
 
@@ -223,7 +223,7 @@ braid verify 9e36aa15.41: ok
 
 <footer>
   <div class="wrap">
-    <span>braid v0.2 · MIT license</span>
+    <span>braid v0.3 · MIT license</span>
     <nav>
       <a href="https://github.com/dvnclabs/braid#readme">README</a>
       <a href="https://github.com/dvnclabs/braid/blob/main/docs/design.md">Design</a>

@@ -6,9 +6,9 @@
 </p>
 <p align="center"><a href="https://dvnclabs.github.io/braid/">dvnclabs.github.io/braid</a></p>
 
-**Efficient session manager.** braid saves every Claude Code and Codex session as it happens, in the project it runs in, as plain files you can read and search. You can go back to any turn, continue it in a new window in either agent, and merge branches back.
+**Efficient session manager.** braid saves every Claude Code and Codex session as it happens, in the project it runs in, as plain files you can read and search. You can go back to any turn and continue it in a new window, in either agent.
 
-> **v0.2, for Claude Code and Codex.** Sessions are kept in each project's `.braid` folder, and nothing leaves your machine. Version 0.1 kept them in a git repository of braid's own and could share them through a code repository's remote; that design is on the [`git-sharing`](https://github.com/dvnclabs/braid/tree/git-sharing) branch. See [Status of v0.2](docs/design.md#status-of-v02).
+> **v0.3, for Claude Code and Codex.** Sessions are kept in each project's `.braid` folder, one self-contained file each, and nothing leaves your machine. Version 0.1 kept them in a git repository of braid's own and could share them through a code repository's remote; that design is on the [`git-sharing`](https://github.com/dvnclabs/braid/tree/git-sharing) branch. See [Status of v0.3](docs/design.md#status-of-v03).
 
 ## Install
 
@@ -30,10 +30,10 @@ When Codex is on the machine, `braid init` also adds braid's hooks to `~/.codex/
 <project>/.braid/
   .gitignore              *   (git does not see the folder; no file of your project changes)
   sessions/<id>.jsonl     the session in ATXF, one record per line, appended after each turn
-  sessions/<id>.json      its state: where saving stopped, its title, its newest turn, the worktree it ran in
+  sessions/<id>.json      its state: where saving stopped, its title, its newest turn, the worktree it ran in, what it was forked from
 ```
 
-A project is a git repository's main checkout, so every worktree of it saves into the same folder, and deleting a worktree keeps its sessions. Outside any repository, a session is kept in the `.braid` folder of the folder it started in. A fork stays with the conversation it came from, wherever you open it. The files are [ATXF](https://github.com/leostera/atxf), an open format for agent transcripts, and every line keeps what the agent wrote, byte for byte.
+A project is a git repository's main checkout, so every worktree of it saves into the same folder, and deleting a worktree keeps its sessions. Outside any repository, a session is kept in the `.braid` folder of the folder it started in. Each file holds a whole session: a fork, or a copy made with `/branch`, is saved as a session of its own, with the history it was made from. The files are [ATXF](https://github.com/leostera/atxf), an open format for agent transcripts, and every line keeps what the agent wrote, byte for byte.
 
 ## Use
 
@@ -47,10 +47,9 @@ braid · 5b0e2c1a.12 · Webhook retries
 |---|---|
 | `5b0e2c1a.12` | this session, at its twelfth turn |
 | `Webhook retries` | what it is about: the name you gave it with `/rename`, else Claude Code's title for it, else its first prompt |
-| `↓ 3f2a91c0 +4` | a branch of this conversation has 4 records you have not merged |
 | `⚠ braid verify` | the last check of this session found a problem: run `braid verify` |
 
-**Go back.** Every turn has a name, `<session>.<n>`: a prompt you typed and everything the agent did until it stopped is one turn, and a merge is one too. `braid log` lists them, with what each did:
+**Go back.** Every turn has a name, `<session>.<n>`: a prompt you typed and everything the agent did until it stopped is one turn. `braid log` lists them, with what each did:
 
 ```
 $ braid log
@@ -59,26 +58,17 @@ $ braid log
 5b0e2c1a.3    Thanks.
 ```
 
-`/braid:fork 5b0e2c1a.2`, or `.2` for the session you are in, gives you the command to continue the conversation from the end of that turn, in a new window. A fork continues the numbering: its first turn here is `.3` of its own. In place of the id, the name you gave a session with `/rename` works too, as in `cache-work.2`. `/braid:fork` alone branches the conversation as it is now, and `braid log --records` lists every record under its turn.
+`/braid:fork 5b0e2c1a.2`, or `.2` for the session you are in, gives you the command to continue the conversation from the end of that turn, in a new window. The fork's file holds turns 1 and 2 too, so it continues the numbering: its first new turn is `.3`. In place of the id, the name you gave a session with `/rename` works too, as in `cache-work.2`. `/braid:fork` alone branches the conversation as it is now, and `braid log --records` lists every record under its turn.
 
-**Claude Code and Codex.** A session is braid's own, whichever agent wrote it, and it continues in either. `braid fork --to codex` writes this conversation, or `braid fork <session> --to codex` another, as a new Codex session, and gives you `cd <dir> && codex resume <id>`. `braid fork <session> --to claude-code` writes a Codex session as a new Claude Code session; a fork continues in the agent you ask from, unless you name another. Asking for the same fork again gives back the session it wrote, and `--new` writes another. Each agent gets the conversation as the other's model read it: messages, tool calls and their results. Reasoning stays behind, since only the provider that wrote it can read it back.
+**Claude Code and Codex.** A session is braid's own, whichever agent wrote it, and it continues in either. `braid fork --to codex` writes this conversation, or `braid fork <session> --to codex` another, as a new Codex session, and gives you `cd <dir> && codex resume <id>`. `braid fork <session> --to claude-code` writes a Codex session as a new Claude Code session; a fork continues in the agent you ask from, unless you name another. Asking for the same fork again gives back the session it wrote, and `--new` writes another. Each agent gets the conversation as the other's model read it: messages, tool calls and their results. Reasoning stays behind, since only the provider that wrote it can read it back, and so does each agent's own bookkeeping, so a session that goes to the other agent and back keeps the conversation without those.
 
-**Come back.** When you resume a session, or open a fork of one, braid shows what it is about: `braid · 5b0e2c1a.12 · Webhook retries`. In Codex, which writes no recaps, it adds Claude Code's latest recap of the session too. `braid status` shows both, where the session is kept and the worktree it ran in, and `braid sessions` lists every session of the project.
-
-**Merge.** A branch, such as one made with `/branch`, shows as `↓` until you merge it. A merge always goes into the conversation you are in; name the other one by session id, by the name you gave it, or leave it out to take the one waiting in `↓`:
-
-```
-> /braid:merge keep my jitter, adopt the time budget
-> /braid:merge cache-ttl take the naming fixes only
-> /braid:merge skip cache-ttl
-```
+**Come back.** When you resume a session, or open a fork of one, braid shows what it is about: `braid · 5b0e2c1a.12 · Webhook retries`. In Codex, which writes no recaps, it adds Claude Code's latest recap of the session too. `braid status` shows both, where the session is kept, the worktree it ran in and what it was forked from, and `braid sessions` lists every session of the project.
 
 | Command | |
 |---|---|
 | `/braid:init` | set up braid on this machine and in this project, and save this conversation |
-| `/braid:status` | this session's newest turn, what it is about, and branches waiting to be merged |
+| `/braid:status` | this session's newest turn, what it is about, and where it is kept |
 | `/braid:fork [session \| session.N \| .N] [--to codex]` | the command to continue this session, another one, or one from the end of its turn N, in a new window, in Claude Code or Codex |
-| `/braid:merge [session] [instruction]` | merge another conversation into this one, or `skip` it |
 
 Asking in plain language works too: "fork this from turn 4 into Codex".
 
@@ -102,7 +92,7 @@ braid verify 9e36aa15.41: ok
 
 ## How it works
 
-braid's hooks in Claude Code and Codex save each turn when it ends: they read only what the agent wrote since the last save, convert it with ATXF's converters, and append it to the session's file. A fork writes the conversation as the target agent writes its own sessions, so the agent resumes it as it resumes its own. braid calls no model; a merge is written by the agent in your session. [docs/design.md](docs/design.md) covers the model, storage, turns, forks, merges and the format.
+braid's hooks in Claude Code and Codex save each turn when it ends: they read only what the agent wrote since the last save, convert it with ATXF's converters, and append it to the session's file. A fork writes the conversation as the target agent writes its own sessions, so the agent resumes it as it resumes its own. braid calls no model of its own. [docs/design.md](docs/design.md) covers the model, storage, turns, forks and the format.
 
 ## Development
 

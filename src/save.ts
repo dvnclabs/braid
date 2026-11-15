@@ -5,13 +5,11 @@ import { join } from "node:path";
 import { appendRecords, readAgents, readRecords } from "./store.ts";
 import { config } from "./git.ts";
 import { about, lastTurn, withBraid, type Actor, type Rec } from "./records.ts";
-import { allSessions, conversation } from "./load.ts";
 import { checkoutOf, ensureStore, type Repo } from "./repo.ts";
 import { recordSession } from "./registry.ts";
-import { replayedIds } from "./replay.ts";
 import { loadState, newState, saveState, withLock, type SessionState } from "./state.ts";
-import { codexLine, formatOf, intact, readWindow, START, type Format, type Window } from "./transcript.ts";
-import { newestTurn, startsTurn } from "./turns.ts";
+import { formatOf, intact, readWindow, START, type Format, type Window } from "./transcript.ts";
+import { startsTurn } from "./turns.ts";
 import { VERSION } from "./version.ts";
 
 export function actorId(repo: Repo): string {
@@ -57,25 +55,6 @@ export interface SaveResult {
   state: SessionState;
 }
 
-/**
- * The conversation this session was copied from. Claude Code's /branch and
- * --fork-session copy the transcript with the same record ids, so a new
- * session whose first message belongs to a saved session is a fork of it.
- */
-function forkSource(repo: Repo, session: string, native: Rec[]): { conv: string; known: Set<string> } | undefined {
-  const firstMessage = native.find((r) => r.type === "message")?.id;
-  if (!firstMessage) return undefined;
-  for (const other of allSessions(repo)) {
-    if (other.session === session) continue;
-    const state = loadState(repo, other.session);
-    if (!state || state.first !== firstMessage || state.chunks === 0) continue;
-    const known = new Set<string>();
-    for (const s of allSessions(repo).filter((s) => s.conv === state.conv)) for (const r of readRecords(repo, s.session)) known.add(r.id);
-    return { conv: state.conv, known };
-  }
-  return undefined;
-}
-
 /** For a file read again from the start: whether a record is past the copies of its id the session holds already. */
 function unsavedOf(saved: Rec[]): (r: Rec) => boolean {
   const left = new Map<string, number>();
@@ -98,6 +77,7 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { a
   return withLock(repo, `save-${session}`, () => {
     const prior = loadState(repo, session);
     const state = prior ?? newState(session, transcript);
+    const firstSave = state.chunks === 0;
     if (transcript) state.transcript = transcript;
     const path = state.transcript;
     state.harness = harnessOf(prior, path, opts.agent);
@@ -114,50 +94,19 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { a
     let cursor = rewritten || !state.cursor ? START : state.cursor;
     // A rewritten file is read again from the start: its first copies of each record are the saved ones.
     const unseen = rewritten ? unsavedOf(readRecords(repo, session)) : undefined;
-    let source: ReturnType<typeof forkSource>;
     let added = 0;
 
     // The lines after the cursor: the window's overlap was read by the save before.
-    const fresh = (w: Window): Rec[] => {
-      const native = unseen ? w.records.slice(w.fresh).filter(unseen) : w.records.slice(w.fresh);
-      // A rollout braid wrote for Codex starts with copies of the source's records: what Codex adds continues the source.
-      if (copiedLines !== undefined) {
-        return native
-          .filter((r) => !(codexLine(r.id) <= copiedLines))
-          .map((r) => (r.parentId && codexLine(r.parentId) <= copiedLines ? { ...r, parentId: state.forkFrom?.head ?? null } : r));
-      }
-      if (replayed) {
-        return native
-          .filter((r) => !replayed.has(r.id) && !copied(r))
-          .map((r) => (r.parentId && replayed.has(r.parentId) ? { ...r, parentId: replayed.get(r.parentId) } : r));
-      }
-      if (source) return native.filter((r) => !source!.known.has(r.id));
-      return native;
-    };
+    const fresh = (w: Window): Rec[] => (unseen ? w.records.slice(w.fresh).filter(unseen) : w.records.slice(w.fresh));
 
     // Codex keeps a subagent in a rollout of its own, which braid does not save yet.
     const agents = format === "claude-code" ? collectAgents(repo, state, path) : new Map<string, NewAgent>();
-    // A replayed session's file starts with copies of the source's records, under uuids derived from their ids;
-    // the copied lines without a uuid (the session's settings) are named after their line, among the first it wrote.
-    // A Codex rollout has no ids: its first lines are the copies.
-    const replaying = state.chunks === 0 && !!state.forkFrom?.replayed;
-    if (replaying && format === "codex") state.copied = state.forkFrom?.lines ?? 0;
-    const copiedLines = format === "codex" ? state.copied : undefined;
-    const replayed = replaying && format === "claude-code" ? replayedIds(conversation(repo, state.forkFrom!.conv).values()) : undefined;
-    const wrote = replayed ? (state.forkFrom?.lines ?? 0) : 0;
-    const copied = (r: Rec) => Number(/^claude-line-(\d+)@/.exec(r.id)?.[1] ?? Infinity) <= wrote;
     const read = () => readWindow(path, cursor, session, {}, format);
     let window = read();
-    if (window && format === "claude-code" && state.chunks === 0 && !state.forkFrom) {
-      source = forkSource(repo, session, window.records);
-      if (source) state.conv = source.conv;
-    }
     for (;;) {
       const records = window ? fresh(window) : [];
       const final = !window?.more;
-      state.first ??= window?.records.find((r) => r.type === "message")?.id;
-      const pending = final && (state.pendingMerge || agents.size > 0);
-      if (records.length > 0 || pending) added += writeChunk(repo, state, records, window?.header, final, final ? agents : new Map());
+      if (records.length > 0 || (final && agents.size > 0)) added += writeChunk(repo, state, records, window?.header, final ? agents : new Map());
       if (window) cursor = window.cursor;
       state.cursor = cursor;
       if (final) break;
@@ -165,20 +114,19 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { a
       if (!window) break;
     }
     saveState(repo, state);
-    // A session's first save, or one saved before braid counted turns: its turns, counted along its line once it is on disk.
-    if (state.chunks > 0 && state.turn === undefined) {
-      state.turn = newestTurn(repo, state.conv, session);
+    // A session's first save, or one saved before braid counted turns: its turns, counted in its file.
+    if (state.chunks > 0 && (firstSave || state.turn === undefined)) {
+      state.turn = readRecords(repo, session).filter(startsTurn).length;
       saveState(repo, state);
     }
     return { added, state };
   });
 }
 
-/** Appends the records of one window to the session's file, and returns how many it wrote. A final one also carries the merge waiting to be written. */
-function writeChunk(repo: Repo, state: SessionState, fresh: Rec[], nativeHeader: Record<string, unknown> | undefined, final: boolean, agents: Map<string, NewAgent>): number {
+/** Appends the records of one window to the session's file, and returns how many it wrote. */
+function writeChunk(repo: Repo, state: SessionState, fresh: Rec[], nativeHeader: Record<string, unknown> | undefined, agents: Map<string, NewAgent>): number {
   const session = state.session;
   const first = state.chunks === 0;
-  if (first && state.forkFrom) state.conv = state.forkFrom.conv;
   for (const r of fresh) {
     state.userAgent = nativeVersion(r) ? `claude-code/${nativeVersion(r)}` : state.userAgent;
     state.model = modelOf(r) ?? state.model;
@@ -191,46 +139,9 @@ function writeChunk(repo: Repo, state: SessionState, fresh: Rec[], nativeHeader:
   const now = new Date().toISOString();
 
   const out: Rec[] = [];
-  if (first && state.conv === session) out.push(header(nativeHeader ?? {}, session));
-  for (const r of fresh) {
-    let rec: Rec = { ...r };
-    // A session forked from another before its first save continues from it.
-    if (first && state.forkFrom && rec.parentId == null) rec.parentId = state.forkFrom.head;
-    if (state.reparent && rec.parentId === state.reparent.from) rec.parentId = state.reparent.to;
-    rec = withBraid(rec, { actor, session });
-    if (state.pendingMerge) rec = withBraid(rec, { partOf: state.pendingMerge.id });
-    out.push(rec);
-  }
+  if (first) out.push(header(nativeHeader ?? {}, session));
+  for (const r of fresh) out.push(withBraid({ ...r }, { actor, session }));
   const lastNative = fresh.at(-1)?.id ?? state.last ?? state.head ?? null;
-  delete state.forkFrom;
-
-  if (final && state.pendingMerge && lastNative) {
-    const pm = state.pendingMerge;
-    out.push({
-      type: "branch_summary",
-      id: pm.id,
-      parentId: lastNative,
-      time: now,
-      fromId: pm.fromHead,
-      summary: pm.summary,
-      ext: {
-        braid: {
-          actor: { actorId: actor.actorId, userAgent: `${actor.userAgent} braid/${VERSION}` },
-          session,
-          merge: {
-            base: pm.base,
-            heads: [lastNative, pm.fromHead],
-            instruction: pm.instruction,
-            strategy: pm.strategy,
-            model: state.model ?? "unknown",
-            conflicts: [],
-          },
-        },
-      },
-    });
-    state.reparent = { from: lastNative, to: pm.id };
-    delete state.pendingMerge;
-  }
 
   const agentRecords = new Map<string, Rec[]>();
   for (const [id, a] of agents) {
