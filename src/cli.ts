@@ -10,7 +10,7 @@ import { postCommit, postRewrite, prePush, prepareCommitMsg } from "./githooks.t
 import { sessionEnd, sessionStart, stop } from "./hooks.ts";
 import { allSessions, briefing, markFork, resolve } from "./load.ts";
 import { context, pick, record } from "./merge.ts";
-import { harness } from "./harness.ts";
+import { claudeEnv, harness } from "./harness.ts";
 import { launchDir, replay, shellWord } from "./replay.ts";
 import { currentAgent, currentSession, recordSession, transcriptOf } from "./registry.ts";
 import { editRecord, hide, lineText, pickLines, renderEdit, editLines, setPrivate, withhold, withholdRecent } from "./edit.ts";
@@ -447,7 +447,7 @@ function main(argv: string[]): number {
       const current = str("session") ?? currentSession();
       // A fork continues in the agent it is asked from, unless another is named.
       const to = harness(str("to") ?? currentAgent());
-      const resume = (dir: string, id: string, fork: boolean) => `  cd ${shellWord(dir)} && claude --resume ${id}${fork ? " --fork-session" : ""}`;
+      const resume = (dir: string, id: string, fork: boolean) => `  cd ${shellWord(dir)} && ${claudeEnv()}claude --resume ${id}${fork ? " --fork-session" : ""}`;
       const fresh = opts.new === true;
       const wrote = (what: string, r: { cwd: string; session: string; existing?: boolean }) =>
         r.existing

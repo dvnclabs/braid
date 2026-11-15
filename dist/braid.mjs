@@ -1180,22 +1180,22 @@ function referencesOf(record2) {
 function hashFromInput(input) {
   return digest(DOMAIN.record, canonicalJson(input));
 }
-function hashInput(record2, transcript, resolve4) {
+function hashInput(record2, transcript, resolve5) {
   const refs = {};
   for (const [field, id] of Object.entries(referencesOf(record2))) {
     if (id === null) {
       refs[field] = null;
       continue;
     }
-    const target = resolve4(id);
+    const target = resolve5(id);
     if (target === void 0)
       throw new Error(`record \`${record2.id}\`: ${field} \`${id}\` has no earlier hashed record`);
     refs[field] = target;
   }
   return { transcript, content: contentDigest(record2), refs };
 }
-function hashRecord(record2, transcript, resolve4) {
-  return hashFromInput(hashInput(record2, transcript, resolve4));
+function hashRecord(record2, transcript, resolve5) {
+  return hashFromInput(hashInput(record2, transcript, resolve5));
 }
 function chainStep(previous2, recordHash) {
   return digest(DOMAIN.chain, `${previous2}
@@ -3843,7 +3843,7 @@ import { join as join12 } from "node:path";
 // src/harness.ts
 import { existsSync as existsSync12, mkdirSync as mkdirSync8, readdirSync as readdirSync4, writeFileSync as writeFileSync8 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { dirname as dirname3, join as join11 } from "node:path";
+import { dirname as dirname3, join as join11, resolve as resolve4 } from "node:path";
 function asClaudeCodeShowed(records) {
   return records.map((r) => {
     const line = ownLine(r);
@@ -3903,6 +3903,9 @@ var asText = (r) => r.role === "tool" && r.isError ? { ...r, isError: void 0 } :
 var claudeHome = () => process.env.CLAUDE_CONFIG_DIR || join11(homedir5(), ".claude");
 var claudeFile = (session, cwd) => join11(claudeHome(), "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"), `${session}.jsonl`);
 var codexHome2 = () => process.env.CODEX_HOME || join11(homedir5(), ".codex");
+var envFor = (name2, fallback) => (dir) => dir && resolve4(dir) !== resolve4(homedir5(), fallback) ? `${name2}=${shellWord(dir)} ` : "";
+var claudeEnv = () => envFor("CLAUDE_CONFIG_DIR", ".claude")(process.env.CLAUDE_CONFIG_DIR);
+var codexEnv = () => envFor("CODEX_HOME", ".codex")(process.env.CODEX_HOME);
 var pad = (n) => String(n).padStart(2, "0");
 var CLAUDE_CODE = {
   agent: "claude-code",
@@ -3916,7 +3919,7 @@ var CLAUDE_CODE = {
     return { session, file: file2, lines: text.split("\n").filter(Boolean).length };
   },
   existing: (session, cwd) => existsSync12(claudeFile(session, cwd)) ? claudeFile(session, cwd) : void 0,
-  resume: (dir, session) => `cd ${shellWord(dir)} && claude --resume ${session}`
+  resume: (dir, session) => `cd ${shellWord(dir)} && ${claudeEnv()}claude --resume ${session}`
 };
 function outputsAnswerCalls(text) {
   const custom = /* @__PURE__ */ new Set();
@@ -3992,7 +3995,7 @@ var CODEX = {
     const name2 = readdirSync4(root, { recursive: true }).map(String).find((f) => f.endsWith(`-${session}.jsonl`));
     return name2 ? join11(root, name2) : void 0;
   },
-  resume: (dir, session) => `cd ${shellWord(dir)} && codex resume ${session}`
+  resume: (dir, session) => `cd ${shellWord(dir)} && ${codexEnv()}codex resume ${session}`
 };
 var HARNESSES = { "claude-code": CLAUDE_CODE, claude: CLAUDE_CODE, codex: CODEX };
 function harness(name2) {
@@ -5798,7 +5801,7 @@ function main(argv) {
       const remote = str("remote") ?? readConfig(repo).remote;
       const current = str("session") ?? currentSession();
       const to = harness(str("to") ?? currentAgent());
-      const resume = (dir2, id, fork) => `  cd ${shellWord(dir2)} && claude --resume ${id}${fork ? " --fork-session" : ""}`;
+      const resume = (dir2, id, fork) => `  cd ${shellWord(dir2)} && ${claudeEnv()}claude --resume ${id}${fork ? " --fork-session" : ""}`;
       const fresh = opts.new === true;
       const wrote = (what, r) => r.existing ? `braid: ${what} is already a ${to.title} session, from an earlier fork. To continue it in a new window, run in a terminal:
   ${to.resume(r.cwd, r.session)}

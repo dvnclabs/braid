@@ -3,7 +3,7 @@
 // for any of these agents, as a new session of theirs that continues it.
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { codex } from "@leostera/atxf/codex";
 import { asCodexShowed, forModel, type Rec } from "./records.ts";
 import { forkText, keptUuids, linear, ownLine, rewrite, shellWord, type ForkRecords, type Line } from "./replay.ts";
@@ -117,6 +117,12 @@ const claudeHome = () => process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".clau
 /** Where Claude Code keeps session `session` of a directory, and finds it to resume it there. */
 const claudeFile = (session: string, cwd: string) => join(claudeHome(), "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"), `${session}.jsonl`);
 const codexHome = () => process.env.CODEX_HOME || join(homedir(), ".codex");
+
+/** "NAME=<dir> " when an agent keeps its sessions elsewhere than its default, so the command finds them from any terminal. */
+const envFor = (name: string, fallback: string) => (dir: string | undefined): string =>
+  dir && resolve(dir) !== resolve(homedir(), fallback) ? `${name}=${shellWord(dir)} ` : "";
+export const claudeEnv = (): string => envFor("CLAUDE_CONFIG_DIR", ".claude")(process.env.CLAUDE_CONFIG_DIR);
+export const codexEnv = (): string => envFor("CODEX_HOME", ".codex")(process.env.CODEX_HOME);
 const pad = (n: number) => String(n).padStart(2, "0");
 
 export const CLAUDE_CODE: Harness = {
@@ -131,7 +137,7 @@ export const CLAUDE_CODE: Harness = {
     return { session, file, lines: text.split("\n").filter(Boolean).length };
   },
   existing: (session, cwd) => (existsSync(claudeFile(session, cwd)) ? claudeFile(session, cwd) : undefined),
-  resume: (dir, session) => `cd ${shellWord(dir)} && claude --resume ${session}`,
+  resume: (dir, session) => `cd ${shellWord(dir)} && ${claudeEnv()}claude --resume ${session}`,
 };
 
 /**
@@ -245,7 +251,7 @@ export const CODEX: Harness = {
     const name = readdirSync(root, { recursive: true }).map(String).find((f) => f.endsWith(`-${session}.jsonl`));
     return name ? join(root, name) : undefined;
   },
-  resume: (dir, session) => `cd ${shellWord(dir)} && codex resume ${session}`,
+  resume: (dir, session) => `cd ${shellWord(dir)} && ${codexEnv()}codex resume ${session}`,
 };
 
 export const HARNESSES: Record<string, Harness> = { "claude-code": CLAUDE_CODE, claude: CLAUDE_CODE, codex: CODEX };

@@ -938,10 +938,10 @@ test("a session continues in Codex: braid fork --to codex writes what the model 
   const r = braid(s.env, repo, ["fork", "5b0e2c1a", "--to", "codex", "--cwd", elsewhere], undefined, { CODEX_HOME: codexHome });
   assert.equal(r.status, 0, r.stderr);
   const id = /codex resume (\S+)$/m.exec(r.stdout)![1]!;
-  assert.match(r.stdout, /^braid: wrote 5b0e2c1a as a new Codex session\. To continue it in a new window, run in a terminal:\n {2}cd \S+\/elsewhere && codex resume [0-9a-f-]{36}\n$/);
+  assert.match(r.stdout, /^braid: wrote 5b0e2c1a as a new Codex session\. To continue it in a new window, run in a terminal:\n {2}cd \S+\/elsewhere && CODEX_HOME=\S+\/codex codex resume [0-9a-f-]{36}\n$/, "a CODEX_HOME other than ~/.codex goes in the command");
   // The same fork asked for again is the same session; --new writes another.
   const twice = braid(s.env, repo, ["fork", "5b0e2c1a", "--to", "codex", "--cwd", elsewhere], undefined, { CODEX_HOME: codexHome });
-  assert.match(twice.stdout, new RegExp(`^braid: 5b0e2c1a is already a Codex session, from an earlier fork\\. To continue it in a new window, run in a terminal:\\n {2}cd \\S+ && codex resume ${id}\\nbraid fork --new writes another\\.\\n$`));
+  assert.match(twice.stdout, new RegExp(`^braid: 5b0e2c1a is already a Codex session, from an earlier fork\\. To continue it in a new window, run in a terminal:\\n {2}cd \\S+ && CODEX_HOME=\\S+ codex resume ${id}\\nbraid fork --new writes another\\.\\n$`));
   const another = braid(s.env, repo, ["fork", "5b0e2c1a", "--to", "codex", "--cwd", elsewhere, "--new"], undefined, { CODEX_HOME: codexHome });
   const other = /codex resume (\S+)$/m.exec(another.stdout)![1]!;
   assert.notEqual(other, id);
@@ -1208,7 +1208,7 @@ test("Codex sessions save as they happen, from braid's hooks in Codex, and conti
   assert.match(braid(env, repo, ["log", ID, "--records"]).stdout, /user {6}Thanks\.\n\S+ +code {6}Add b\.ts \([0-9a-f]{7}\)\n$/);
   // A fork asked for from inside Codex continues in Codex, as a branch of this conversation.
   const branch = braid(inCodex, repo, ["fork"]);
-  assert.match(branch.stdout, /^braid: wrote this conversation as a new Codex session\. To continue it in a new window, run in a terminal:\n {2}cd \S+ && codex resume [0-9a-f-]{36}\n$/);
+  assert.match(branch.stdout, /^braid: wrote this conversation as a new Codex session\. To continue it in a new window, run in a terminal:\n {2}cd \S+ && CODEX_HOME=\S+ codex resume [0-9a-f-]{36}\n$/);
 
   // In Claude Code, as Claude Code writes a conversation: each response one message, results after it, Codex's own
   // context left behind, and what Codex wrote in the user's place a note. Codex's reasoning stays with OpenAI.
@@ -1480,6 +1480,12 @@ test("every turn has a name, <session>.<n>: braid log lists them, braid fork and
   const fork = braid(s.env, repo, ["fork", ".2", "--session", ALICE]);
   assert.equal(fork.status, 0, fork.stderr);
   assert.match(fork.stdout, /^braid: wrote the conversation up to 5b0e2c1a\.2 as a new Claude Code session\./);
+  assert.match(fork.stdout, /&& claude --resume /, "Claude Code's own home needs no setting");
+  // A CLAUDE_CONFIG_DIR other than ~/.claude, as a profile of Orca's sets, goes in the command, so any terminal finds the session.
+  const profile = join(s.root, "profile with space");
+  const elsewhere = braid(s.env, repo, ["fork", ".2", "--session", ALICE], undefined, { CLAUDE_CONFIG_DIR: profile });
+  assert.match(elsewhere.stdout, new RegExp(`&& CLAUDE_CONFIG_DIR='${profile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}' claude --resume [0-9a-f-]{36}`));
+  assert.equal(readdirSync(join(profile, "projects")).length, 1, "and the fork is written there");
   const id = /--resume (\S+)/.exec(fork.stdout)![1]!;
   const file = join(s.env.HOME!, ".claude", "projects", realpathSync(repo).replace(/[^A-Za-z0-9]/g, "-"), `${id}.jsonl`);
   const written = readFileSync(file, "utf8");
