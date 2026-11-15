@@ -785,6 +785,24 @@ test("every turn has a name, <session>.<n>: braid log lists them, braid fork tak
   assert.match(braid(s.env, repo, ["fork", "cache-work.3", "--session", id]).stdout, /up to 5b0e2c1a\.3 as a new/);
   assert.match(braid(s.env, repo, ["fork", ".9", "--session", ALICE]).stderr, /5b0e2c1a has no turn 9; braid log lists its turns/);
 
+  // A prompt, last, is the fork's first message. The fork of .2 was continued, so asked for again it is that session; with
+  // a prompt it is a new direction, a session of its own.
+  assert.match(braid(s.env, repo, ["fork", ".2", "--session", ALICE]).stdout, new RegExp(`already a Claude Code session[\\s\\S]*claude --resume ${id}\n`));
+  const prompted = braid(s.env, repo, ["fork", ".2", "Try a TTL cache instead.", "--session", ALICE]).stdout;
+  const promptedId = /claude --resume (\S+) /.exec(prompted)![1]!;
+  assert.notEqual(promptedId, id);
+  assert.match(prompted, /claude --resume \S+ 'Try a TTL cache instead\.'\n$/);
+  // However long, the prompt reaches the agent whole, as one argument.
+  const long = `Keep the LRU, but:\n- cap it at 10'000 entries\n- log each "eviction" with $KEY and \`time\`\n\n${"Explain why. ".repeat(200)}`;
+  const command = /run in a terminal:\n {2}([\s\S]*)\n$/.exec(braid(s.env, repo, ["fork", ".1", "--session", ALICE, long]).stdout)![1]!;
+  const bin = join(s.root, "stub");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "claude"), `#!/bin/sh\nfor a; do printf '[%s]\\n' "$a"; done\n`, { mode: 0o755 });
+  const args = must({ ...s.env, PATH: `${bin}:${s.env.PATH}` }, repo, "sh", ["-c", command]);
+  assert.equal(args, `[--resume]\n[${/--resume (\S+)/.exec(command)![1]}]\n[${long.trim()}]\n`);
+  // With no session named, a first argument with a space in it is the prompt, for this session.
+  assert.match(braid(s.env, repo, ["fork", "Try a TTL cache instead.", "--session", ALICE]).stdout, /claude --resume 5b0e2c1a-\S+ --fork-session 'Try a TTL cache instead\.'\n/);
+  assert.match(braid(s.env, repo, ["fork", "nosuch", "--session", ALICE]).stderr, /no session matches nosuch/);
 });
 test("braid migrate moves conversations from braid 0.1's ~/.braid into the projects they ran in", () => {
   const s = sandbox();

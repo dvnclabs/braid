@@ -2120,7 +2120,7 @@ function turnDetail(records) {
 }
 
 // src/version.ts
-var VERSION = "0.4.2";
+var VERSION = "0.4.3";
 
 // src/save.ts
 function actorId(repo) {
@@ -2476,10 +2476,11 @@ function replay(repo, found, to, opts = {}) {
   const within = !!from && (from === cwd || cwd.startsWith(`${from}/`) || from.startsWith(`${cwd}/`));
   const pairs = from && !within ? [[from, cwd]] : [];
   const derived = uuidFor(`braid fork ${found.session} ${head} ${to.agent} ${cwd}`);
-  const before = opts.fresh ? void 0 : to.existing(derived, cwd);
-  if (before) return { session: derived, file: before, cwd, records: 0, existing: true };
   const target = locate(cwd);
-  const session = opts.fresh || (loadState(target, derived)?.chunks ?? 0) > 0 ? randomUUID() : derived;
+  const continued = (loadState(target, derived)?.chunks ?? 0) > 0;
+  const before = opts.fresh || opts.prompted && continued ? void 0 : to.existing(derived, cwd);
+  if (before) return { session: derived, file: before, cwd, records: 0, existing: true };
+  const session = opts.fresh || continued ? randomUUID() : derived;
   const { file: file2, lines } = to.write(fork, all, cwd, pairs, session);
   const state = loadState(target, session) ?? newState(session, file2, to.agent);
   const upTo = own.findIndex((r) => r.id === head);
@@ -3275,8 +3276,9 @@ Codex's $CODEX_THREAD_ID), or the one named with --session <id>.
   braid sessions              the sessions this project keeps
   braid log [<session>] [--records]   a session's turns, each named <session>.<n>, with what it did;
                               --records: each record, under its turn
-  braid fork [<session>|<session>.<n>|.<n>]   the command to continue a session, or one from the end
-                              of its turn n, in a new window; with none, this one
+  braid fork [<session>|<session>.<n>|.<n>] [<prompt>]   the command to continue a session, or one from
+                              the end of its turn n, in a new window; with none, this one. A prompt, last,
+                              is the fork's first message: braid fork .5 "try the other approach"
     --to codex|claude-code    as a new session of that agent's (by default the agent it runs in)
     --new                     another session, even when the same fork was written before
   braid verify [<session>|--all]   check that a session was saved as it happened and loads back the same
@@ -3479,25 +3481,29 @@ function main(argv) {
     case "fork": {
       const repo = here();
       const to = harness(str("to") ?? currentAgent());
-      const resume = (dir2, id) => `  cd ${shellWord(dir2)} && ${claudeEnv()}claude --resume ${id} --fork-session`;
+      const first = args[0];
+      const target = first !== void 0 && (!/\s/.test(first) || resolve3(repo, first).length > 0) ? first : void 0;
+      const prompt = (target === void 0 ? args : args.slice(1)).join(" ").trim() || void 0;
+      const start = (command2) => prompt ? `${command2} ${shellWord(prompt)}` : command2;
+      const resume = (dir2, id) => start(`  cd ${shellWord(dir2)} && ${claudeEnv()}claude --resume ${id} --fork-session`);
       const fresh = opts.new === true;
       const wrote = (what, r) => r.existing ? `braid: ${what} is already a ${to.title} session, from an earlier fork. To continue it in a new window, run in a terminal:
-  ${to.resume(r.cwd, r.session)}
+  ${start(to.resume(r.cwd, r.session))}
 braid fork --new writes another.` : `braid: wrote ${what} as a new ${to.title} session. To continue it in a new window, run in a terminal:
-  ${to.resume(r.cwd, r.session)}`;
+  ${start(to.resume(r.cwd, r.session))}`;
       if (current) {
         const transcript = loadState(repo, current)?.transcript ?? transcriptOf(current);
         if (transcript && existsSync14(transcript)) save(repo, current, transcript);
       }
-      const m = args[0] ? TURN.exec(args[0]) : null;
-      if (m && !(m[1] && resolve3(repo, args[0]).length)) {
+      const m = target ? TURN.exec(target) : null;
+      if (m && !(m[1] && resolve3(repo, target).length)) {
         const { repo: kept2, session: session2 } = oneSession(repo, m[1] || void 0, current);
         const turn = findTurn(kept2, { session: session2 }, Number(m[2]));
         if (!turn) throw new Error(`${session2.slice(0, 8)} has no turn ${m[2]}; braid log lists its turns`);
-        out(wrote(`the conversation up to ${turnName(session2, turn.n)}`, replay(kept2, { session: session2 }, to, { cwd: str("cwd"), fresh, until: turn.until })));
+        out(wrote(`the conversation up to ${turnName(session2, turn.n)}`, replay(kept2, { session: session2 }, to, { cwd: str("cwd"), fresh, until: turn.until, prompted: !!prompt })));
         return 0;
       }
-      const { repo: kept, session } = oneSession(repo, args[0], current);
+      const { repo: kept, session } = oneSession(repo, target, current);
       const state = loadState(kept, session);
       if (!state || state.chunks === 0) throw new Error(`${session.slice(0, 8)} is not saved yet`);
       const dir = to.agent === "claude-code" && state.harness === "claude-code" && !str("cwd") && !fresh ? launchDir(state.transcript) : void 0;
@@ -3506,7 +3512,7 @@ braid fork --new writes another.` : `braid: wrote ${what} as a new ${to.title} s
         out([`braid: to branch ${what} into a new window, run in a terminal:`, resume(dir, session), ...session === current ? ["or /branch to branch it in this window. braid saves the branch as a session of its own."] : []].join("\n"));
         return 0;
       }
-      out(wrote(session === current ? "this conversation" : named(kept, session), replay(kept, { session }, to, { cwd: str("cwd"), fresh })));
+      out(wrote(session === current ? "this conversation" : named(kept, session), replay(kept, { session }, to, { cwd: str("cwd"), fresh, prompted: !!prompt })));
       return 0;
     }
     case "verify": {

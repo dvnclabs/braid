@@ -58,7 +58,7 @@ $ braid log
 5b0e2c1a.3    Thanks.
 ```
 
-`/braid:fork 5b0e2c1a.2`, or `.2` for the session you are in, gives you the command to continue the conversation from the end of that turn, in a new window. The fork's file holds turns 1 and 2 too, so it continues the numbering: its first new turn is `.3`. In place of the id, the name you gave a session with `/rename` works too, as in `cache-work.2`. `/braid:fork` alone branches the conversation as it is now, and `braid log --records` lists every record under its turn.
+`/braid:fork 5b0e2c1a.2`, or `.2` for the session you are in, gives you the command to continue the conversation from the end of that turn, in a new window. The fork's file holds turns 1 and 2 too, so it continues the numbering: its first new turn is `.3`. In place of the id, the name you gave a session with `/rename` works too, as in `cache-work.2`. A prompt, last, is the fork's first message, however long: `braid fork .2 "try a TTL cache instead"`. `/braid:fork` alone branches the conversation as it is now, and `braid log --records` lists every record under its turn.
 
 **Claude Code and Codex.** A session is braid's own, whichever agent wrote it, and it continues in either. `braid fork --to codex` writes this conversation, or `braid fork <session> --to codex` another, as a new Codex session, and gives you `cd <dir> && codex resume <id>`. `braid fork <session> --to claude-code` writes a Codex session as a new Claude Code session; a fork continues in the agent you ask from, unless you name another. Asking for the same fork again gives back the session it wrote, and `--new` writes another. Each agent gets the conversation as the other's model read it: messages, tool calls and their results. Reasoning stays behind, since only the provider that wrote it can read it back, and so does each agent's own bookkeeping, so a session that goes to the other agent and back keeps the conversation without those.
 
@@ -68,7 +68,7 @@ $ braid log
 |---|---|
 | `/braid:init` | set up braid on this machine and in this project, and save this conversation |
 | `/braid:status` | this session's newest turn, what it is about, and where it is kept |
-| `/braid:fork [session \| session.N \| .N] [--to codex]` | the command to continue this session, another one, or one from the end of its turn N, in a new window, in Claude Code or Codex |
+| `/braid:fork [session \| session.N \| .N] [--to codex] [prompt]` | the command to continue this session, another one, or one from the end of its turn N, in a new window, in Claude Code or Codex, starting with your prompt when you give one |
 
 Asking in plain language works too: "fork this from turn 4 into Codex".
 

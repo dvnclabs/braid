@@ -228,9 +228,10 @@ export interface Replayed {
  * continues it there. The same fork, of the same point of the same session
  * into the same agent and directory, is one session: asked for again, it is
  * the session written the first time, as it stands, continued or not. With
- * `fresh`, a fork is another session each time.
+ * `fresh`, a fork is another session each time. A fork asked for with a prompt
+ * starts a new direction: one continued already is not given back for it.
  */
-export function replay(repo: Repo, found: Found, to: Harness, opts: { cwd?: string; fresh?: boolean; until?: string } = {}): Replayed {
+export function replay(repo: Repo, found: Found, to: Harness, opts: { cwd?: string; fresh?: boolean; until?: string; prompted?: boolean } = {}): Replayed {
   const read = readRecords(repo, found.session);
   // A session's file holds its whole conversation.
   const all = new Map(read.map((r) => [r.id, r] as const));
@@ -247,12 +248,13 @@ export function replay(repo: Repo, found: Found, to: Harness, opts: { cwd?: stri
   const within = !!from && (from === cwd || cwd.startsWith(`${from}/`) || from.startsWith(`${cwd}/`));
   const pairs: [string, string][] = from && !within ? [[from, cwd]] : [];
   const derived = uuidFor(`braid fork ${found.session} ${head} ${to.agent} ${cwd}`);
-  const before = opts.fresh ? undefined : to.existing(derived, cwd);
-  if (before) return { session: derived, file: before, cwd, records: 0, existing: true };
-  // A fork that was continued, saved, and its file then removed keeps its id: this one is another.
   // The fork is kept in the project it runs in, as any session is, and saved there as a session of its own, its history included.
   const target = locate(cwd);
-  const session = opts.fresh || (loadState(target, derived)?.chunks ?? 0) > 0 ? randomUUID() : derived;
+  const continued = (loadState(target, derived)?.chunks ?? 0) > 0;
+  const before = opts.fresh || (opts.prompted && continued) ? undefined : to.existing(derived, cwd);
+  if (before) return { session: derived, file: before, cwd, records: 0, existing: true };
+  // A fork that was continued, saved, and its file then removed keeps its id: this one is another.
+  const session = opts.fresh || continued ? randomUUID() : derived;
   const { file, lines } = to.write(fork, all, cwd, pairs, session);
   const state = loadState(target, session) ?? newState(session, file, to.agent);
   const upTo = own.findIndex((r) => r.id === head);
