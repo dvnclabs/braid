@@ -5,9 +5,10 @@ description: Edit this agent session before it is committed and published, for p
 
 # Edit this session
 
-1. Run `braid edit`. It prints the session as it would be published, one numbered line per record (subagent records are numbered under the line that spawned them, such as `4.1`), after redaction. Marks: `↑` committed and not published yet, `✗` withheld, `✎` rewritten.
+1. Run `braid edit`. It prints the session as it would be published, one numbered line per record (subagent records are numbered under the line that spawned them, such as `4.1`), after redaction, grouped under each turn's name (`5b0e2c1a.3`). Marks: `↑` committed and not published yet, `✗` withheld, `✎` rewritten.
 2. Show the user the lines that matter, not the whole list, and point out anything that looks private: names of clients or people, credentials, internal URLs, personal remarks. Then apply what the user asks:
    - Remove records: `braid edit 4 7-9 12.3`. A tool call takes its result along, and a subagent goes with all its records.
+   - Remove whole turns: `braid edit .3` or `braid edit .3-5`.
    - Rewrite a record's text: write the new text on stdin, as in `braid edit --rewrite 5 <<'EOF'` followed by the text and `EOF`. Start from the record's text in the listing, and change only what the user asked for. A tool call has no text to rewrite: remove it, or hide text in it.
    - Hide a word or phrase in every record: `braid edit --hide "Acme Corp"`.
    - Remove everything from the last half hour: `braid edit --last 30m`.

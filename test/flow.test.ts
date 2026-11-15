@@ -84,7 +84,7 @@ test("save, publish, review, merge", () => {
   // The status line: Alice's session id and state.
   const line = braid(s.env, alice, ["statusline"], JSON.stringify({ session_id: ALICE, workspace: { current_dir: alice } }));
   // Her first prompt stands for the session until Claude Code titles it; the key in it stays hidden.
-  assert.equal(line.stdout.trim().replace(/\x1b\[[0-9;]*m/g, ""), "5b0e2c1a Add retries to sendWebhook. My key is […" + " · ✓");
+  assert.equal(line.stdout.trim().replace(/\x1b\[[0-9;]*m/g, ""), "5b0e2c1a.1 Add retries to sendWebhook. My key is […" + " · ✓");
   assert.doesNotMatch(line.stdout, /AKIA/);
 
   // Bob clones; his first session sets up the hooks itself and lists Alice's session.
@@ -419,6 +419,9 @@ test("a session publishes to each repository it commits in", () => {
   assert.equal(published("c"), `refs/braid/sessions/${ALICE}/${ALICE}`);
   assert.match(must(s.env, s.root, "git", ["--git-dir", join(s.root, "b.git"), "show", `refs/braid/sessions/${ALICE}/${ALICE}:records/000001.jsonl`]), /Done in both/);
 
+  // The conversation names each commit by its message, from the repository it was made in.
+  assert.equal([...braid(s.env, a, ["log", ALICE]).stdout.matchAll(/commit +Add endpoint \([0-9a-f]{7}\)/g)].length, 2);
+
   // A has no commit from the session, so pushing A publishes nothing.
   must(s.env, a, "git", ["push", "--quiet", "origin", "HEAD:main"]);
   assert.equal(published("remote"), "");
@@ -727,12 +730,12 @@ test("on autopilot, braid keeps conversations on this machine, saves the convers
   t.assistant("Rewrote the parser across five files.");
   braid(s.env, repo, ["hook", "stop"], hookIn);
   const log = braid(s.env, repo, ["log", "--session", ALICE]).stdout;
-  assert.match(log, /@1 +fork +before "Rewrite the parser\." \(5 files edited\)/);
+  assert.match(log, /^5b0e2c1a\.\d+ +Rewrite the parser\. +\(5 files edited, 5 tool calls\)$/m);
   // A small turn marks nothing.
   t.user("Thanks.");
   t.assistant("You're welcome.");
   braid(s.env, repo, ["hook", "stop"], hookIn);
-  assert.doesNotMatch(braid(s.env, repo, ["log", "--session", ALICE]).stdout, /@2/);
+  assert.match(braid(s.env, repo, ["log", "--session", ALICE]).stdout, /^5b0e2c1a\.\d+ +Thanks\.$/m, "a turn that called no tools says nothing more");
 
   // Forking the point writes the conversation as it was, before the rewrite.
   const fork = braid(s.env, repo, ["fork", "@1", "--session", ALICE]);
@@ -1173,7 +1176,7 @@ test("Codex sessions save as they happen, from braid's hooks in Codex, and conti
   assert.equal(hook("stop", r.path, { BRAID_WINDOW_BYTES: "600" }).stdout, "");
 
   // The log lists the conversation, without the instructions, environment and AGENTS.md Codex gave its model.
-  const log = braid(env, repo, ["log", ID]).stdout.split("\n").filter(Boolean).map((l) => l.replace(/^\S+\s+/, ""));
+  const log = braid(env, repo, ["log", ID, "--records"]).stdout.split("\n").filter(Boolean).map((l) => l.replace(/^\S+\s+/, ""));
   assert.deepEqual(log, [
     "user      Fix the bug in a.ts.",
     "assistant ",
@@ -1201,8 +1204,8 @@ test("Codex sessions save as they happen, from braid's hooks in Codex, and conti
   writeFileSync(join(repo, "b.ts"), "export const b = 2;\n");
   must(inCodex, repo, "git", ["add", "b.ts"]);
   must(inCodex, repo, "git", ["commit", "--quiet", "-m", "Add b.ts"]);
-  assert.equal(braid(inCodex, repo, ["save"]).stdout, "braid: saved 4 records\n");
-  assert.match(braid(env, repo, ["log", ID]).stdout, /user {6}Thanks\.\n\S+ +code {6}Add b\.ts \([0-9a-f]{7}\)\n$/);
+  assert.equal(braid(inCodex, repo, ["save"]).stdout, "braid: saved 4 records, up to 01a1d58a.3\n");
+  assert.match(braid(env, repo, ["log", ID, "--records"]).stdout, /user {6}Thanks\.\n\S+ +code {6}Add b\.ts \([0-9a-f]{7}\)\n$/);
   // A fork asked for from inside Codex continues in Codex, as a branch of this conversation.
   const branch = braid(inCodex, repo, ["fork"]);
   assert.match(branch.stdout, /^braid: wrote this conversation as a new Codex session\. To continue it in a new window, run in a terminal:\n {2}cd \S+ && codex resume [0-9a-f-]{36}\n$/);
@@ -1278,7 +1281,7 @@ test("Codex sessions save as they happen, from braid's hooks in Codex, and conti
   assert.equal(hook("session-end", r.path).status, 0);
   for (let i = 0; i < 100 && checked() === before; i++) spawnSync("sleep", ["0.1"]);
   assert.deepEqual(JSON.parse(readFileSync(stateFile, "utf8")).verified?.ok, true);
-  assert.match(braid(env, repo, ["log", ID]).stdout, /assistant You're welcome\.\n$/);
+  assert.match(braid(env, repo, ["log", ID, "--records"]).stdout, /assistant You're welcome\.\n$/);
 });
 
 test("a session continued in Codex is saved where it left off, and comes back to Claude Code", () => {
@@ -1318,7 +1321,7 @@ test("a session continued in Codex is saved where it left off, and comes back to
   const sessions = braid(env, repo, ["sessions"]).stdout;
   assert.match(sessions, new RegExp(`${id.slice(0, 8)}\\s+conv 5b0e2c1a`));
   assert.deepEqual(
-    braid(env, repo, ["log", id]).stdout.split("\n").filter(Boolean).map((l) => l.replace(/^\S+\s+/, "")),
+    braid(env, repo, ["log", id, "--records"]).stdout.split("\n").filter(Boolean).map((l) => l.replace(/^\S+\s+/, "")),
     ["user      Then what?", "assistant Then write the notes."],
   );
   const state = JSON.parse(readFileSync(join(s.env.HOME!, ".braid", ".git", "braid", "sessions", `${id}.json`), "utf8"));
@@ -1354,26 +1357,26 @@ test("braid shows what a session is about: its title in the status line and brai
   t.user("Add retries to the webhook sender");
   t.assistant("Added exponential backoff with jitter.");
   braid(s.env, repo, ["hook", "stop"], hookIn());
-  assert.equal(plain(statusline()), "5b0e2c1a Add retries to the webhook sender · local");
+  assert.equal(plain(statusline()), "5b0e2c1a.2 Add retries to the webhook sender · local", "the newest turn by name: a command you typed is a turn too");
 
   // Claude Code's own title, then the recap it writes when you come back to the session.
   t.raw({ type: "ai-title", aiTitle: "Webhook retries with backoff", sessionId: ALICE });
   t.system("away_summary", "You're adding retries to the webhook sender; backoff is in, next is a time budget.");
   braid(s.env, repo, ["hook", "stop"], hookIn());
-  assert.equal(statusline({ NO_COLOR: "1" }), "5b0e2c1a Webhook retries with backoff · local");
-  assert.equal(statusline(), "\x1b[2m5b0e2c1a\x1b[22m Webhook retries with backoff\x1b[2m · \x1b[22m\x1b[2mlocal\x1b[22m", "the id and quiet marks dimmed");
+  assert.equal(statusline({ NO_COLOR: "1" }), "5b0e2c1a.2 Webhook retries with backoff · local", "a title and a recap start no turn");
+  assert.equal(statusline(), "\x1b[2m5b0e2c1a.2\x1b[22m Webhook retries with backoff\x1b[2m · \x1b[22m\x1b[2mlocal\x1b[22m", "the id and quiet marks dimmed");
   const status = braid(s.env, repo, ["status", "--session", ALICE]).stdout;
   assert.match(status, /\n {2}Webhook retries with backoff\n {2}recap, [^:]+: You're adding retries to the webhook sender; backoff is in, next is a time budget\.\n/);
 
   // Resuming shows what the session is about. Claude Code shows its own recap again, so braid adds none there.
-  assert.equal(started(braid(s.env, repo, ["hook", "session-start"], hookIn("resume")).stdout).systemMessage, "braid · 5b0e2c1a · Webhook retries with backoff");
+  assert.equal(started(braid(s.env, repo, ["hook", "session-start"], hookIn("resume")).stdout).systemMessage, "braid · 5b0e2c1a.2 · Webhook retries with backoff");
   assert.equal(started(braid(s.env, repo, ["hook", "session-start"], hookIn("startup")).stdout).systemMessage, undefined, "a new session has nothing to recap");
 
   // A name you give with /rename wins over Claude Code's titles, also newer ones.
   t.raw({ type: "custom-title", customTitle: "retries-v2", sessionId: ALICE });
   t.raw({ type: "ai-title", aiTitle: "A newer title", sessionId: ALICE });
   braid(s.env, repo, ["hook", "stop"], hookIn());
-  assert.equal(statusline({ NO_COLOR: "1" }), "5b0e2c1a retries-v2 · local");
+  assert.equal(statusline({ NO_COLOR: "1" }), "5b0e2c1a.2 retries-v2 · local");
 
   // A session saved before braid kept titles gets its own back from the store, the name you gave included.
   const statePath = join(s.env.HOME!, ".braid", ".git", "braid", "sessions", `${ALICE}.json`);
@@ -1381,7 +1384,7 @@ test("braid shows what a session is about: its title in the status line and brai
   writeFileSync(statePath, JSON.stringify(older));
   t.raw({ type: "ai-title", aiTitle: "Yet another title", sessionId: ALICE });
   braid(s.env, repo, ["hook", "stop"], hookIn());
-  assert.equal(statusline({ NO_COLOR: "1" }), "5b0e2c1a retries-v2 · local");
+  assert.equal(statusline({ NO_COLOR: "1" }), "5b0e2c1a.2 retries-v2 · local");
 
   // A fork into Codex is about what its source was about. Codex writes no recaps, so braid shows Claude Code's latest.
   const codexHome = join(s.root, "codex");
@@ -1390,7 +1393,7 @@ test("braid shows what a session is about: its title in the status line and brai
   const id = /codex resume (\S+)$/m.exec(r.stdout)![1]!;
   const codexIn = JSON.stringify({ session_id: id, cwd: repo, source: "resume", transcript_path: null });
   const inCodex = started(braid(s.env, repo, ["hook", "session-start", "--agent", "codex"], codexIn, { CODEX_HOME: codexHome }).stdout).systemMessage;
-  assert.equal(inCodex?.split("\n")[0], `braid · ${id.slice(0, 8)} · retries-v2, a fork of 5b0e2c1a`);
+  assert.equal(inCodex?.split("\n")[0], `braid · ${id.slice(0, 8)}.2 · retries-v2, a fork of 5b0e2c1a.2`);
   assert.match(inCodex!, /\nLast recap, [^:]+: You're adding retries to the webhook sender; backoff is in, next is a time budget\.$/);
 });
 
@@ -1440,5 +1443,72 @@ test("autofork marks the point before a Codex turn that patches many files", () 
   r.assistant("Renamed it in five files.");
   r.end();
   hook("stop", r.path);
-  assert.match(braid(env, repo, ["log", ID]).stdout, /^@1 +fork +before "Rename the logger in every module\." \(5 files edited\)$/m);
+  assert.match(braid(env, repo, ["log", ID]).stdout, /^019a0000\.2 +Rename the logger in every module\. +\(5 files edited, 1 tool call\)$/m);
+  // The fork point autofork marked still works.
+  assert.equal(braid(env, repo, ["fork", "@1", "--session", ID, "--to", "codex"]).status, 0);
+});
+
+test("every turn has a name, <session>.<n>: braid log lists them, braid fork and braid edit take them", () => {
+  const s = sandbox();
+  const repo = clone(s, "lea", "lea@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, repo, ["init"]);
+  const t = new Transcript(s.root, ALICE);
+  const stop = (session: string, path: string) => braid(s.env, repo, ["hook", "stop"], JSON.stringify({ session_id: session, transcript_path: path, cwd: repo }));
+  t.user("Plan the cache.");
+  t.assistant("Keep it in memory, with a TTL.");
+  t.user("Write the cache.");
+  t.toolCall("Write", { file_path: join(repo, "cache.ts"), content: "export {}" }, "toolu_w1", "ok");
+  t.toolCall("Edit", { file_path: join(repo, "app.ts"), old_string: "a", new_string: "b" }, "toolu_w2", "ok");
+  t.assistant("Wrote cache.ts and used it in app.ts.");
+  t.user("Thanks.");
+  t.assistant("You're welcome.");
+  stop(ALICE, t.path);
+
+  // One line per turn: its name, the prompt, and what it did.
+  const log = braid(s.env, repo, ["log", ALICE]).stdout;
+  assert.deepEqual(log.split("\n").filter(Boolean), [
+    "5b0e2c1a.1    Plan the cache.",
+    "5b0e2c1a.2    Write the cache.  (2 files edited, 2 tool calls)",
+    "5b0e2c1a.3    Thanks.",
+  ]);
+  assert.match(braid(s.env, repo, ["log", ALICE, "--records"]).stdout, /^5b0e2c1a\.2 +tool +ok$/m, "each record under its turn");
+  const line = braid(s.env, repo, ["statusline"], JSON.stringify({ session_id: ALICE, workspace: { current_dir: repo } }), { NO_COLOR: "1" }).stdout;
+  assert.match(line, /^5b0e2c1a\.3 Plan the cache\. · local/);
+
+  // A fork from the end of turn 2 holds turns 1 and 2, and continues as turn 3 of its own.
+  const fork = braid(s.env, repo, ["fork", ".2", "--session", ALICE]);
+  assert.equal(fork.status, 0, fork.stderr);
+  assert.match(fork.stdout, /^braid: wrote the conversation up to 5b0e2c1a\.2 as a new Claude Code session\./);
+  const id = /--resume (\S+)/.exec(fork.stdout)![1]!;
+  const file = join(s.env.HOME!, ".claude", "projects", realpathSync(repo).replace(/[^A-Za-z0-9]/g, "-"), `${id}.jsonl`);
+  const written = readFileSync(file, "utf8");
+  assert.match(written, /Wrote cache\.ts and used it in app\.ts\./);
+  assert.doesNotMatch(written, /Thanks\./);
+  const last = JSON.parse(written.trim().split("\n").filter((l) => JSON.parse(l).uuid).at(-1)!).uuid;
+  const more = (parentUuid: string, uuid: string, type: "user" | "assistant", content: unknown) =>
+    appendFileSync(file, JSON.stringify({ parentUuid, isSidechain: false, type, uuid, timestamp: "2026-11-14T10:00:00.000Z", cwd: repo, sessionId: id, version: "2.1.319", message: type === "user" ? { role: "user", content } : { id: "msg_f", type: "message", role: "assistant", model: "claude-sonnet-5-5", content, stop_reason: "end_turn" } }) + "\n");
+  more(last, "f0000000-0000-4000-8000-000000000001", "user", "Use an LRU instead.");
+  more("f0000000-0000-4000-8000-000000000001", "f0000000-0000-4000-8000-000000000002", "assistant", [{ type: "text", text: "Switched to an LRU." }]);
+  stop(id, file);
+  assert.deepEqual(braid(s.env, repo, ["log", id]).stdout.split("\n").filter(Boolean), [
+    "5b0e2c1a.1    Plan the cache.",
+    "5b0e2c1a.2    Write the cache.  (2 files edited, 2 tool calls)",
+    `${id.slice(0, 8)}.3    Use an LRU instead.`,
+  ]);
+  // A turn before the fork is found in the session it forks from; a name you gave works as the session's.
+  assert.match(braid(s.env, repo, ["fork", `${id.slice(0, 8)}.1`, "--session", ALICE, "--new"]).stdout, /up to 5b0e2c1a\.1 as a new/);
+  t.raw({ type: "custom-title", customTitle: "cache-work", sessionId: ALICE });
+  stop(ALICE, t.path);
+  assert.match(braid(s.env, repo, ["fork", "cache-work.3", "--session", id]).stdout, /up to 5b0e2c1a\.3 as a new/);
+  assert.match(braid(s.env, repo, ["fork", ".9", "--session", ALICE]).stderr, /5b0e2c1a has no turn 9; braid log lists its turns/);
+
+  // braid edit lists records under their turns, and withholds a whole turn by its number.
+  const listing = braid(s.env, repo, ["edit", "--session", ALICE]).stdout;
+  assert.match(listing, /\n5b0e2c1a\.2\n +\d+ +you +Write the cache\./);
+  assert.equal(braid(s.env, repo, ["edit", ".3", "--session", ALICE]).status, 0);
+  const after = braid(s.env, repo, ["edit", "--session", ALICE]).stdout;
+  assert.match(after, /✗ you +Thanks\. +\[withheld\]/);
+  assert.match(after, /✗ agent +You're welcome\. +\[withheld\]/);
+  assert.doesNotMatch(after, /✗ you +Write the cache/);
 });

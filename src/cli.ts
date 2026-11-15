@@ -15,9 +15,10 @@ import { launchDir, replay, shellWord } from "./replay.ts";
 import { currentAgent, currentSession, recordSession, transcriptOf } from "./registry.ts";
 import { editRecord, hide, lineText, pickLines, renderEdit, editLines, setPrivate, withhold, withholdRecent } from "./edit.ts";
 import { importOpenclaw, openclawDatabases } from "./openclaw.ts";
-import { points } from "./points.ts";
+import { points, turnDetail } from "./points.ts";
 import { publish, view, type PublishResult } from "./publish.ts";
-import { ago, braidOf, describe, isTurn, type Rec } from "./records.ts";
+import { ago, braidOf, describe, isTurn, promptLine, type Rec } from "./records.ts";
+import { conversationSessions, lineOf, numbering, resolveTurn, TURN, turnName, turnsAlong } from "./turns.ts";
 import { findRepo, isEnabled, locate, readConfig, type Repo } from "./repo.ts";
 import { save } from "./save.ts";
 import { cliPath, configDir, init, setup } from "./setup.ts";
@@ -57,7 +58,7 @@ Everyday
   braid edit --undo ...       put back records, text (--undo --hide), a record's own text (--undo --rewrite 5) or the session (--undo --all)
   braid commit -m "<message>" commit the conversation: publishing goes up to the last commit
   braid push [--dry-run]      publish the committed part now (git push does this with autopush)
-  braid fork [<session>|@N]   the command to continue a session, or fork point N, in a new window; with none, this one
+  braid fork [<session>|<session>.<n>|.<n>]   the command to continue a session, or one from the end of its turn n, in a new window; with none, this one
     --to codex|claude-code    as a new session of that agent's (by default the agent it runs in, else Claude Code)
     --new                     another session, even when the same fork was written before
   braid fork <session> --here continue from another session in this one, before its first turn is saved
@@ -72,7 +73,7 @@ Everyday
 Other
   braid show <session>        read a session as a briefing, without linking to it
   braid sessions              every session braid can see here
-  braid log [<session>]       the turns and commits of a session
+  braid log [<session>] [--records]   a session's turns along its line, each named <session>.<n>, with what it did and its commits; --records: each record of the session
   braid verify [<session>|--all]   check that a session was saved as it happened and loads back the same
   braid fetch [--all]         fetch published sessions
   braid import openclaw [--session <key|id>] [--db <path>]   import OpenClaw sessions
@@ -215,6 +216,7 @@ function main(argv: string[]): number {
       repo: { type: "string" },
       here: { type: "boolean" },
       new: { type: "boolean" },
+      records: { type: "boolean" },
       autocommit: { type: "boolean" },
       "no-autocommit": { type: "boolean" },
       autopush: { type: "boolean" },
@@ -309,7 +311,7 @@ function main(argv: string[]): number {
       const session = needSession(str("session"));
       const known = loadState(repo, session)?.transcript;
       const r = save(repo, session, str("transcript") ?? (known ? undefined : transcriptOf(session)));
-      out(`braid: saved ${r.added} records`);
+      out(`braid: saved ${r.added} records${r.state.turn ? `, up to ${turnName(session, r.state.turn)}` : ""}`);
       return 0;
     }
     case "commit": {
@@ -396,14 +398,37 @@ function main(argv: string[]): number {
       const remote = str("remote") ?? readConfig(repo).remote;
       const found = resolve(repo, args[0] ?? needSession(str("session")), remote);
       if (found.length !== 1) throw new Error(found.length ? "more than one session matches" : "no such session");
-      for (const p of found[0]!.opts.gitDir ? points(repo, found[0]!.session) : []) out(`${`@${p.n}`.padEnd(12)}  ${"fork".padEnd(9)} ${p.what}`);
-      for (const r of readRecords(found[0]!.ref, found[0]!.opts)) {
+      const f = found[0]!;
+      const sessions = conversationSessions(repo, f.conv, remote);
+      const turns = numbering(sessions);
+      const commitLine = (r: Rec): string | undefined => {
         const code = r.type === "label" ? braidOf(r).code : undefined;
         const commit = r.type === "label" ? (braidOf(r).commit ?? code) : undefined;
-        if (!isTurn(r) && !commit) continue;
-        const kind = code ? "code" : commit ? "commit" : r.type === "branch_summary" ? "merge" : (r.role ?? r.type);
-        const text = commit ? `${String(r.label)}${commit.sha ? ` (${commit.sha.slice(0, 7)})` : ""}` : describe(r, 160).split("\n")[0];
-        out(`${r.id.slice(0, 12)}  ${kind.padEnd(9)} ${text}`);
+        if (!commit) return undefined;
+        return `${(code ? "code" : "commit").padEnd(9)} ${String(r.label)}${commit.sha ? ` (${commit.sha.slice(0, 7)})` : ""}`;
+      };
+      if (opts.records === true) {
+        // This session's records, each under its turn's name.
+        const mine = turns.get(f.session);
+        for (const r of readRecords(f.ref, f.opts)) {
+          const c = commitLine(r);
+          if (!isTurn(r) && !c) continue;
+          const kind = r.type === "branch_summary" ? "merge" : (r.role ?? r.type);
+          out(`${turnName(f.session, mine?.get(r.id) ?? 0).padEnd(12)}  ${c ?? `${kind.padEnd(9)} ${describe(r, 160).split("\n")[0]}`}`);
+        }
+        return 0;
+      }
+      // One line per turn along the session's line, the sessions it forks from included, as git log shows history.
+      for (const t of turnsAlong(lineOf(sessions, f.session), turns)) {
+        if (t.start) {
+          const said = t.start.type === "branch_summary" ? describe(t.start, 100).split("\n")[0] : promptLine(t.start);
+          const did = turnDetail(t.records);
+          out(`${turnName(t.session, t.n).padEnd(12)}  ${t.start.type === "branch_summary" ? `merge: ${said}` : said}${did ? `  (${did})` : ""}`);
+        }
+        for (const r of t.records) {
+          const c = commitLine(r);
+          if (c) out(`${"".padEnd(12)}  ${c}`);
+        }
       }
       return 0;
     }
@@ -444,6 +469,18 @@ function main(argv: string[]): number {
         if (own.length !== 1) throw new Error(`this session (${current.slice(0, 8)}) is not saved yet`);
         out(wrote("this conversation", replay(repo, own[0]!, remote, to, { cwd: str("cwd"), fresh })));
         return 0;
+      }
+      // A turn: <session>.<n>, or .<n> for this session's. A fork continues from the end of that turn.
+      if (TURN.test(args[0])) {
+        if (current) {
+          const transcript = loadState(repo, current)?.transcript ?? transcriptOf(current);
+          if (transcript && existsSync(transcript)) save(repo, current, transcript);
+        }
+        const turn = resolveTurn(repo, args[0], current, remote);
+        if (turn) {
+          out(wrote(`the conversation up to ${turnName(turn.found.session, turn.n)}`, replay(repo, turn.found, remote, to, { cwd: str("cwd"), fresh, until: turn.until })));
+          return 0;
+        }
       }
       const at = /^(.*)@(\d+)$/.exec(args[0]);
       if (at) {

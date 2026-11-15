@@ -160,6 +160,35 @@ function blockText(block: unknown, max: number): string {
   return "";
 }
 
+/** What an agent writes in the user's place: command output, reminders, notices, an interruption. */
+const NOT_TYPED = /^\s*(<(task-notification|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder|bash-stdout|bash-stderr|user-prompt-submit-hook)>|\[Request interrupted)/;
+
+/**
+ * A prompt you typed, which starts a turn. The agent writes other messages in
+ * your place: tool results, its context, reminders, notices, a skill's text.
+ * Claude Code marks most of them on the line it writes; the rest open with a
+ * tag of the agent's.
+ */
+export function isPrompt(r: Rec): boolean {
+  if (r.type !== "message" || r.role !== "user" || r.display === false || isCodexContext(r)) return false;
+  const line = nativeLine(r);
+  if (line && sourceOf(r) === "claude-code") {
+    const origin = (line.origin as { kind?: string } | undefined)?.kind;
+    if (line.isMeta === true || line.isCompactSummary === true || line.toolUseResult !== undefined || (origin && origin !== "human")) return false;
+  }
+  if (Array.isArray(r.content) && r.content.some((b) => (b as { type?: string })?.type === "tool_result")) return false;
+  const text = textOf(r.content);
+  return !NOT_TYPED.test(text) && !CODEX_NOTE.test(text);
+}
+
+/** A prompt on one line, a command as you typed it: "/braid:fork .3" for Claude Code's tags around it. */
+export function promptLine(r: Rec, max = 100): string {
+  const text = describe(r, 4000);
+  const command = /<command-name>\s*([^<]*?)\s*<\/command-name>/.exec(text);
+  const args = /<command-args>\s*([\s\S]*?)\s*<\/command-args>/.exec(text)?.[1];
+  return clip(command ? `${command[1]}${args ? ` ${args}` : ""}` : text, max);
+}
+
 /** What a session is about: its title, and the agent's latest recap of it. */
 export interface About {
   /** `user`: named with /rename; `agent`: the agent's own title; `prompt`: the first prompt, when the agent gave none. */

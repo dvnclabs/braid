@@ -4,7 +4,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { publishedChunks } from "../src/publish.ts";
-import { about, ago, parseJsonl, printable, type Rec } from "../src/records.ts";
+import { about, ago, isPrompt, parseJsonl, printable, promptLine, type Rec } from "../src/records.ts";
+import { lineOf, numbering, turnsAlong } from "../src/turns.ts";
 import { redactString } from "../src/redact.ts";
 import { readConfig, type Repo } from "../src/repo.ts";
 import { cleanName, colors, render, uncovered, type Status } from "../src/status.ts";
@@ -253,4 +254,39 @@ test("a big turn counts the files Codex patches, as Claude Code's edits", () => 
   const edit = (path: string) => call({ name: "Write", kind: "function", arguments: { file_path: path, content: "x" } });
   assert.equal(bigTurn([edit("a.ts"), edit("a.ts"), edit("b.ts"), edit("c.ts"), edit("d.ts")]), undefined);
   assert.equal(bigTurn([edit("a.ts"), edit("b.ts"), edit("c.ts"), edit("d.ts"), edit("e.ts")]), "5 files edited");
+});
+
+test("a turn starts at a prompt you typed, or a merge", () => {
+  const user = (content: unknown, extra: object = {}): Rec => ({ type: "message", id: `u${Math.random()}`, role: "user", content, ...extra });
+  const claude = (line: object): object => ({ native: { source: "claude-code", records: [line] } });
+  assert.equal(isPrompt(user("Add retries.")), true);
+  assert.equal(isPrompt(user("<command-message>braid:init</command-message>\n<command-name>/braid:init</command-name>")), true, "a command you typed");
+  assert.equal(isPrompt(user([{ type: "tool_result", tool_use_id: "t", content: "ok" }])), false);
+  assert.equal(isPrompt(user("Base directory for this skill", { display: false })), false);
+  assert.equal(isPrompt(user("<task-notification>done</task-notification>")), false);
+  assert.equal(isPrompt(user("[Request interrupted by user]")), false);
+  assert.equal(isPrompt(user("<local-command-stdout>ok</local-command-stdout>")), false);
+  assert.equal(isPrompt(user("Background task finished", claude({ type: "user", origin: { kind: "task-notification" } }))), false);
+  assert.equal(isPrompt(user("Summary of the session", claude({ type: "user", isCompactSummary: true }))), false);
+  const codex = (text: string): Rec => ({ type: "message", id: `c${Math.random()}`, role: "user", content: [{ type: "text", text }], native: { source: "codex", format: "codex-rollout", records: [{}] } });
+  assert.equal(isPrompt(codex("Fix the bug.")), true);
+  assert.equal(isPrompt(codex("<environment_context>\n<cwd>/w</cwd>\n</environment_context>")), false);
+  assert.equal(isPrompt(codex("<skill>\n<name>tests</name>\n</skill>")), false);
+  assert.equal(isPrompt({ type: "message", id: "a", role: "assistant", content: "Done." }), false);
+  assert.equal(promptLine(user("<command-message>braid:fork</command-message>\n<command-name>/braid:fork</command-name>\n<command-args>.3 --to codex</command-args>")), "/braid:fork .3 --to codex");
+  assert.equal(promptLine(user("Add retries.\nAnd tests.")), "Add retries. And tests.");
+});
+
+test("turns are numbered along a session's line: a fork continues the numbering of the session it forks from", () => {
+  const msg = (id: string, parentId: string | null, role: string, content: unknown = "x"): Rec => ({ type: "message", id, parentId, role, content });
+  const a: Rec[] = [msg("p1", null, "user", "Plan."), msg("a1", "p1", "assistant"), msg("p2", "a1", "user", "Build."), msg("a2", "p2", "assistant")];
+  // Forked after turn 1, then a merge.
+  const b: Rec[] = [msg("q", "a1", "user", "Build it differently."), msg("r", "q", "assistant"), { type: "branch_summary", id: "m", parentId: "r", fromId: "a2", summary: "took the tests" }];
+  const sessions = [{ session: "aaaaaaaa-1", records: a }, { session: "bbbbbbbb-2", records: b }];
+  const turns = numbering(sessions);
+  assert.deepEqual([...turns.get("aaaaaaaa-1")!.values()], [1, 1, 2, 2]);
+  assert.deepEqual([...turns.get("bbbbbbbb-2")!.values()], [2, 2, 3]);
+  const line = lineOf(sessions, "bbbbbbbb-2");
+  assert.deepEqual(line.map((s) => [s.session, s.records.map((r) => r.id)]), [["aaaaaaaa-1", ["p1", "a1"]], ["bbbbbbbb-2", ["q", "r", "m"]]]);
+  assert.deepEqual(turnsAlong(line, turns).map((t) => [t.session, t.n, t.start?.id]), [["aaaaaaaa-1", 1, "p1"], ["bbbbbbbb-2", 2, "q"], ["bbbbbbbb-2", 3, "m"]]);
 });

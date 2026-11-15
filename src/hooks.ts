@@ -17,6 +17,7 @@ import { loadState, saveState } from "./state.ts";
 import { computeStatus, sessionName } from "./status.ts";
 import type { Format } from "./transcript.ts";
 import { verify } from "./verify.ts";
+import { turnName } from "./turns.ts";
 
 export interface HookInput {
   session_id?: string;
@@ -99,8 +100,10 @@ export function sessionStart(input: HookInput): string {
 export function recap(repo: Repo, session: string, agent: Format): string {
   const state = loadState(repo, session);
   if (!state?.title && !state?.recap) return "";
-  const fork = state.forkFrom ? `, a fork of ${state.forkFrom.session.slice(0, 8)}` : "";
-  const head = `braid · ${session.slice(0, 8)}${state.title ? ` · ${state.title.text}` : ""}${fork}`;
+  const name = (id: string) => (state.turn ? turnName(id, state.turn) : id.slice(0, 8));
+  // A fork not saved yet stands at the turn it forks from.
+  const fork = state.forkFrom ? `, a fork of ${name(state.forkFrom.session)}` : "";
+  const head = `braid · ${name(session)}${state.title ? ` · ${state.title.text}` : ""}${fork}`;
   return state.recap && agent === "codex" ? `${head}\nLast recap, ${ago(state.recap.at)}: ${state.recap.text}` : head;
 }
 

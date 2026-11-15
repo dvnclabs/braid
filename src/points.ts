@@ -30,8 +30,8 @@ function patchText(b: Call): string {
   return "";
 }
 
-/** Why the records of a turn make a big change, or undefined when they do not. */
-export function bigTurn(records: Rec[]): string | undefined {
+/** What the records of a turn did: the files edited, and the tool calls made. */
+export function turnStats(records: Rec[]): { files: number; calls: number } {
   const files = new Set<string>();
   let calls = 0;
   for (const r of records) {
@@ -45,9 +45,22 @@ export function bigTurn(records: Rec[]): string | undefined {
       for (const f of patchedFiles(patchText(b))) files.add(f);
     }
   }
-  if (files.size >= BIG.files) return `${files.size} files edited`;
+  return { files: files.size, calls };
+}
+
+/** Why the records of a turn make a big change, or undefined when they do not. */
+export function bigTurn(records: Rec[]): string | undefined {
+  const { files, calls } = turnStats(records);
+  if (files >= BIG.files) return `${files} files edited`;
   if (calls >= BIG.calls) return `${calls} tool calls`;
   return undefined;
+}
+
+/** "5 files edited, 6 tool calls", or "" for a turn that called no tools. */
+export function turnDetail(records: Rec[]): string {
+  const { files, calls } = turnStats(records);
+  const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+  return [files ? `${plural(files, "file")} edited` : "", calls ? plural(calls, "tool call") : ""].filter(Boolean).join(", ");
 }
 
 export interface Point {

@@ -236,6 +236,24 @@ function blockText(block, max) {
   }
   return "";
 }
+var NOT_TYPED = /^\s*(<(task-notification|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder|bash-stdout|bash-stderr|user-prompt-submit-hook)>|\[Request interrupted)/;
+function isPrompt(r) {
+  if (r.type !== "message" || r.role !== "user" || r.display === false || isCodexContext(r)) return false;
+  const line = nativeLine(r);
+  if (line && sourceOf(r) === "claude-code") {
+    const origin = line.origin?.kind;
+    if (line.isMeta === true || line.isCompactSummary === true || line.toolUseResult !== void 0 || origin && origin !== "human") return false;
+  }
+  if (Array.isArray(r.content) && r.content.some((b) => b?.type === "tool_result")) return false;
+  const text = textOf(r.content);
+  return !NOT_TYPED.test(text) && !CODEX_NOTE.test(text);
+}
+function promptLine(r, max = 100) {
+  const text = describe(r, 4e3);
+  const command = /<command-name>\s*([^<]*?)\s*<\/command-name>/.exec(text);
+  const args = /<command-args>\s*([\s\S]*?)\s*<\/command-args>/.exec(text)?.[1];
+  return clip(command ? `${command[1]}${args ? ` ${args}` : ""}` : text, max);
+}
 var RANK = { prompt: 0, agent: 1, user: 2 };
 function printable(s, max) {
   return clip(s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/[\x00-\x1f\x7f-\x9f]/g, " "), max);
@@ -1994,8 +2012,11 @@ function resolve2(repo, target, remote) {
     return sessions.filter((s) => convs.has(s.conv));
   }
   const byId = sessions.filter((s) => s.session.startsWith(target));
-  if (byId.length > 0 || target.length >= 8) return byId;
-  return sessions.filter((s) => sessionName(readRecords(s.ref, s.opts), s.session) === target);
+  if (byId.length > 0 || /^[0-9a-f-]{8,}$/.test(target)) return byId;
+  return sessions.filter((s) => {
+    const named = s.opts.gitDir ? loadState(repo, s.session)?.title : void 0;
+    return named?.by === "user" && named.text === target || sessionName(readRecords(s.ref, s.opts), s.session) === target;
+  });
 }
 function conversation(repo, conv, remote) {
   const byId = /* @__PURE__ */ new Map();
@@ -2063,6 +2084,96 @@ function markFork(repo, current, b) {
   const first = own.find((r) => braidOf(r).actor);
   state.forkFrom = { session: b.found.session, conv: b.found.conv, head: b.head, actor: first ? braidOf(first).actor?.actorId : void 0 };
   saveState(repo, state);
+}
+
+// src/turns.ts
+var startsTurn = (r) => isPrompt(r) || r.type === "branch_summary";
+function numbering(sessions) {
+  const owner = /* @__PURE__ */ new Map();
+  for (const s of sessions) for (const r of s.records) if (!owner.has(r.id)) owner.set(r.id, s.session);
+  const bySession = new Map(sessions.map((s) => [s.session, s]));
+  const out = /* @__PURE__ */ new Map();
+  const open = /* @__PURE__ */ new Set();
+  const of = (session) => {
+    const done = out.get(session);
+    if (done) return done;
+    open.add(session);
+    const s = bySession.get(session);
+    const ids = new Set(s.records.map((r) => r.id));
+    const join17 = s.records.find((r) => r.parentId && !ids.has(r.parentId) && owner.has(r.parentId));
+    const from = join17 ? owner.get(join17.parentId) : void 0;
+    let n = from && !open.has(from) ? of(from).get(join17.parentId) ?? 0 : 0;
+    const turns = /* @__PURE__ */ new Map();
+    for (const r of s.records) {
+      if (startsTurn(r)) n++;
+      turns.set(r.id, n);
+    }
+    open.delete(session);
+    out.set(session, turns);
+    return turns;
+  };
+  for (const s of sessions) of(s.session);
+  return out;
+}
+function conversationSessions(repo, conv, remote) {
+  return allSessions(repo, remote).filter((f) => f.conv === conv).sort((a, b) => Number(!!b.opts.gitDir) - Number(!!a.opts.gitDir)).map((found) => ({ session: found.session, records: readRecords(found.ref, found.opts), found }));
+}
+function newestTurn(repo, conv, session, remote) {
+  const turns = numbering(conversationSessions(repo, conv, remote)).get(session);
+  return turns ? Math.max(0, ...turns.values()) : 0;
+}
+var turnName = (session, n) => `${session.slice(0, 8)}.${n}`;
+var TURN = /^(.*)\.(\d+)$/;
+function lineOf(sessions, session) {
+  const bySession = new Map(sessions.map((s2) => [s2.session, s2]));
+  const line = [];
+  let s = bySession.get(session);
+  let limit;
+  while (s && !line.some((l) => l.session === s.session)) {
+    const records = limit ? s.records.slice(0, s.records.findIndex((r) => r.id === limit) + 1) : s.records;
+    line.unshift({ ...s, records });
+    const ids = new Set(s.records.map((r) => r.id));
+    const join17 = s.records.find((r) => r.parentId && !ids.has(r.parentId));
+    const from = join17 ? sessions.find((o) => o.session !== s.session && o.records.some((r) => r.id === join17.parentId)) : void 0;
+    if (!from) break;
+    limit = join17.parentId;
+    s = from;
+  }
+  return line;
+}
+function turnsAlong(line, turns) {
+  const out = /* @__PURE__ */ new Map();
+  for (const seg of line) {
+    for (const r of seg.records) {
+      const n = turns.get(seg.session)?.get(r.id) ?? 0;
+      let t = out.get(n);
+      if (!t) out.set(n, t = { n, session: seg.session, records: [] });
+      if (!t.start && startsTurn(r)) Object.assign(t, { start: r, session: seg.session });
+      t.records.push(r);
+    }
+  }
+  return [...out.values()].sort((a, b) => a.n - b.n);
+}
+function findTurn(repo, found, n, remote) {
+  const sessions = conversationSessions(repo, found.conv, remote);
+  const line = lineOf(sessions, found.session);
+  const t = turnsAlong(line, numbering(sessions)).find((t2) => t2.n === n && t2.start);
+  if (!t) return void 0;
+  const seg = [...line].reverse().find((s) => t.records.some((r) => s.records.includes(r) && s.records.some((x) => x.id === r.id)));
+  const of = t.records.filter((r) => seg.records.includes(r));
+  const head = lastTurn(of);
+  return head ? { found: seg.found, n, until: of.at(-1).id, head } : void 0;
+}
+function resolveTurn(repo, name2, current, remote) {
+  const m = TURN.exec(name2);
+  if (!m || m[1] && resolve2(repo, name2, remote).length > 0) return void 0;
+  const target = m[1] || current;
+  if (!target) throw new Error(`no session: name one, as in braid fork <id>.${m[2]}, or run inside an agent session`);
+  const found = resolve2(repo, target, remote);
+  if (found.length !== 1) throw new Error(found.length ? `${target} matches ${found.length} sessions; name one` : `no session matches ${target}`);
+  const turn = findTurn(repo, found[0], Number(m[2]), remote);
+  if (!turn) throw new Error(`${found[0].session.slice(0, 8)} has no turn ${m[2]}; braid log lists its turns`);
+  return turn;
 }
 
 // src/replay.ts
@@ -2143,19 +2254,19 @@ function forkText(fork, session, cwd, pairs = []) {
   const encoded = claudeCode.fromAtxf({ header: header2, records: linear(asResponses(forModel(rewrite(asCodexShowed(path2, "claude-code"), pairs), "anthropic"))) }, { carry: false, sessionId: session }).split("\n").filter(Boolean).map((l) => JSON.parse(l));
   const byUuid = new Map(encoded.map((l) => [l.uuid, l]));
   const lines = [];
-  const lineOf = /* @__PURE__ */ new Map();
+  const lineOf2 = /* @__PURE__ */ new Map();
   for (const r of records) {
     const own = ownLine(r);
     const of = readWith(r);
     if (own) lines.push({ r, line: rewrite(own, pairs) });
-    else if (of && lineOf.has(of)) {
-      lineOf.set(r.id, lineOf.get(of));
+    else if (of && lineOf2.has(of)) {
+      lineOf2.set(r.id, lineOf2.get(of));
       continue;
     } else {
       const line = byUuid.get(uuidFor(r.id));
       if (!line) {
-        const parent = r.parentId ? lineOf.get(r.parentId) : void 0;
-        if (parent) lineOf.set(r.id, parent);
+        const parent = r.parentId ? lineOf2.get(r.parentId) : void 0;
+        if (parent) lineOf2.set(r.id, parent);
         continue;
       }
       lines.push({ r, line });
@@ -2163,13 +2274,13 @@ function forkText(fork, session, cwd, pairs = []) {
       for (let n = 2; byUuid.has(uuidFor(`${r.id}#${n}`)); n++) {
         const id = `${r.id}#${n}`;
         lines.push({ r: { ...r, id, parentId: last }, line: byUuid.get(uuidFor(id)) });
-        lineOf.set(id, uuidFor(id));
+        lineOf2.set(id, uuidFor(id));
         last = id;
       }
-      lineOf.set(r.id, uuidFor(last));
+      lineOf2.set(r.id, uuidFor(last));
       continue;
     }
-    lineOf.set(r.id, uuidFor(r.id));
+    lineOf2.set(r.id, uuidFor(r.id));
   }
   const renamed = new Map(lines.flatMap(({ r, line }) => typeof line.uuid === "string" ? [[line.uuid, uuidFor(r.id)]] : []));
   const rename = (v) => typeof v === "string" ? renamed.get(v) ?? v : Array.isArray(v) ? v.map(rename) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, rename(x)])) : v;
@@ -2178,7 +2289,7 @@ function forkText(fork, session, cwd, pairs = []) {
     const next = { ...Object.fromEntries(Object.entries(line).map(([k, v]) => [k, k === "message" ? v : rename(v)])), sessionId: session };
     if ("uuid" in next) {
       const kept = typeof line.parentUuid === "string" && !renamed.has(line.parentUuid) ? line.parentUuid : previous2;
-      const parent = r.parentId == null ? null : lineOf.get(r.parentId) ?? lineOf.get(r.parentId.split(":")[0]) ?? kept;
+      const parent = r.parentId == null ? null : lineOf2.get(r.parentId) ?? lineOf2.get(r.parentId.split(":")[0]) ?? kept;
       Object.assign(next, { parentUuid: parent, uuid: uuidFor(r.id), isSidechain: false });
       previous2 = next.uuid;
     }
@@ -2198,7 +2309,9 @@ function sourceCwd(records) {
 }
 function replay(repo, found, remote, to, opts = {}) {
   const all = conversation(repo, found.conv, remote);
-  const own = readRecords(found.ref, found.opts);
+  const read = readRecords(found.ref, found.opts);
+  const own = opts.until ? read.slice(0, read.findIndex((r) => r.id === opts.until) + 1) : read;
+  if (opts.until && own.length === 0) throw new Error(`session ${found.session.slice(0, 8)} has no record ${opts.until}`);
   const head = lastTurn(own) ?? own.at(-1)?.id;
   if (!head) throw new Error(`session ${found.session.slice(0, 8)} has no records to replay`);
   const fork = forkRecords(all, own, head);
@@ -2216,6 +2329,7 @@ function replay(repo, found, remote, to, opts = {}) {
   state.forkFrom = { session: found.session, conv: found.conv, head, actor: first ? braidOf(first).actor?.actorId : void 0, replayed: true, lines };
   const upTo = head === lastTurn(own) ? own.length - 1 : own.findIndex((r) => r.id === head);
   Object.assign(state, about(upTo >= 0 ? own.slice(0, upTo + 1) : own, state));
+  state.turn = numbering(conversationSessions(repo, found.conv, remote)).get(found.session)?.get(head) ?? 0;
   saveState(repo, state);
   return { session, file: file2, cwd, records: lines };
 }
@@ -2522,7 +2636,7 @@ function patchText(b) {
   }
   return "";
 }
-function bigTurn(records) {
+function turnStats(records) {
   const files = /* @__PURE__ */ new Set();
   let calls = 0;
   for (const r of records) {
@@ -2535,9 +2649,18 @@ function bigTurn(records) {
       for (const f of patchedFiles(patchText(b))) files.add(f);
     }
   }
-  if (files.size >= BIG.files) return `${files.size} files edited`;
+  return { files: files.size, calls };
+}
+function bigTurn(records) {
+  const { files, calls } = turnStats(records);
+  if (files >= BIG.files) return `${files} files edited`;
   if (calls >= BIG.calls) return `${calls} tool calls`;
   return void 0;
+}
+function turnDetail(records) {
+  const { files, calls } = turnStats(records);
+  const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
+  return [files ? `${plural(files, "file")} edited` : "", calls ? plural(calls, "tool call") : ""].filter(Boolean).join(", ");
 }
 var prefix = (session) => `refs/tags/points/${session}`;
 function points(repo, session) {
@@ -3193,6 +3316,7 @@ function save(repo, session, transcript, opts = {}) {
       window = read();
       if (!window) break;
     }
+    if (state.chunks > 0 && state.turn === void 0) state.turn = newestTurn(repo, state.conv, session, readConfig(repo).remote);
     saveState(repo, state);
     if (state.chunks > 0 && state.chunks % 50 === 0) gitMaybe(["gc", "--auto", "--quiet"], { gitDir: repo.store });
     return { added, state };
@@ -3284,7 +3408,9 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
   }
   if (final) {
     const target = lastTurn(out) ?? state.head;
-    const commits = codeCommits.map((sha) => ({ sha, message: gitMaybe(["log", "-1", "--format=%s", sha], { cwd: repo.top })?.trim() ?? "" }));
+    const tops = [repo.top, ...readEntry(session)?.repos ?? []];
+    const messageOf = (sha) => tops.map((top) => gitMaybe(["log", "-1", "--format=%s", sha], { cwd: top })?.trim()).find(Boolean) ?? "";
+    const commits = codeCommits.map((sha) => ({ sha, message: messageOf(sha) }));
     if (opts.commit !== void 0) commits.push({ sha: "", message: opts.commit });
     if (opts.commit !== void 0 && !target) throw new Error("nothing to commit: this session has no saved turns yet");
     const autocommit = codeCommits.length > 0 && readConfig(repo).autocommit;
@@ -3306,6 +3432,7 @@ function writeChunk(repo, state, fresh, nativeHeader, final, opts, agents) {
   appendChunk(storeRef(state.conv, session), out, { time: now, head, commits: codeCommits }, { gitDir: repo.store }, agentRecords);
   state.last = fresh.at(-1)?.id ?? state.last;
   state.head = lastTurn(out) ?? state.head;
+  if (state.turn !== void 0) state.turn += out.filter(startsTurn).length;
   state.chunks += 1;
   if (final) state.commits = [];
   return out.length;
@@ -4222,8 +4349,9 @@ export PATH="${bin}:$PATH"
 function recap(repo, session, agent) {
   const state = loadState(repo, session);
   if (!state?.title && !state?.recap) return "";
-  const fork = state.forkFrom ? `, a fork of ${state.forkFrom.session.slice(0, 8)}` : "";
-  const head = `braid \xB7 ${session.slice(0, 8)}${state.title ? ` \xB7 ${state.title.text}` : ""}${fork}`;
+  const name2 = (id) => state.turn ? turnName(id, state.turn) : id.slice(0, 8);
+  const fork = state.forkFrom ? `, a fork of ${name2(state.forkFrom.session)}` : "";
+  const head = `braid \xB7 ${name2(session)}${state.title ? ` \xB7 ${state.title.text}` : ""}${fork}`;
   return state.recap && agent === "codex" ? `${head}
 Last recap, ${ago(state.recap.at)}: ${state.recap.text}` : head;
 }
@@ -4347,6 +4475,8 @@ function editLines(repo, v, remote) {
     [...readRecords(tracking, { cwd: repo.top }), ...[...readAgents(tracking, { cwd: repo.top }).values()].flat()].map((r) => r.id)
   );
   const agents = new Map([...v.agents].map(([id, c]) => [id, c.flat()]));
+  const turns = numbering(conversationSessions(repo, v.state.conv, remote)).get(v.state.session);
+  let turn;
   const out = [];
   const add = (num, r, committed, agent) => {
     const c = clean(r);
@@ -4364,7 +4494,8 @@ function editLines(repo, v, remote) {
       redactions: [...counts.values()].reduce((a, b) => a + b, 0),
       withheld: v.withheld.get(r.id),
       committed,
-      published: published.has(r.id)
+      published: published.has(r.id),
+      turn: agent ? turn : turn = turns?.get(r.id)
     });
     return true;
   };
@@ -4402,12 +4533,17 @@ function renderEdit(v, lines, width) {
   else if (v.rules.withholdSession && v.pathCounts.size > 0) head.push("None of this session is published: it touched a path in .braidignore, and redact.toml sets withhold-session.");
   if (s.terms?.length) head.push(`Hidden text: ${s.terms.map((t) => JSON.stringify(t)).join(", ")}`);
   head.push("Publishing goes up to the last commit. \u2191 committed, not published yet \xB7 \u2717 withheld \xB7 \u270E rewritten");
+  head.push(`Records are grouped by turn: braid edit .3 withholds turn ${s.session.slice(0, 8)}.3.`);
   const w = Math.max(...lines.map((l) => l.num.length), 2);
-  const body = lines.map((l) => {
+  let turn;
+  const body = lines.flatMap((l) => {
     const mark = l.withheld ? "\u2717" : l.edited ? "\u270E" : l.committed && !l.published ? "\u2191" : " ";
     const why = l.withheld ? `  [${l.withheld === "you" ? "withheld" : l.withheld}]` : "";
     const prefix2 = `${l.num.padStart(w)} ${mark} ${l.who.padEnd(7)}`;
-    return `${prefix2}${clip2(l.text, Math.max(20, width - prefix2.length - why.length))}${why}`;
+    const line = `${prefix2}${clip2(l.text, Math.max(20, width - prefix2.length - why.length))}${why}`;
+    const starts = !l.agent && l.turn !== void 0 && l.turn > 0 && l.turn !== turn;
+    if (!l.agent) turn = l.turn;
+    return starts ? [`${turnName(s.session, l.turn)}`, line] : [line];
   });
   return [...head, "", ...body];
 }
@@ -4420,6 +4556,14 @@ function pickLines(lines, tokens) {
     picked.set(num, l);
   };
   for (const token of tokens.flatMap((t) => t.split(",")).filter(Boolean)) {
+    const turns = /^\.(\d+)(?:-\.?(\d+))?$/.exec(token);
+    if (turns) {
+      const [from2, to2] = [Number(turns[1]), Number(turns[2] ?? turns[1])];
+      const of = lines.filter((l) => l.turn !== void 0 && l.turn >= from2 && l.turn <= to2);
+      if (!of.length) throw new Error(`no turn ${token.slice(1)} in this session (braid edit lists them)`);
+      for (const l of of) picked.set(l.num, l);
+      continue;
+    }
     const m = /^(?:([\w-]+)\.)?(\d+)(?:-(?:\1\.)?(\d+))?$/.exec(token);
     if (!m) throw new Error(`not a record number or range: ${token}`);
     const [, group, from, to] = m;
@@ -5247,8 +5391,9 @@ function statusline(stdin) {
   if (pr) parts.push(pr);
   const repo = locate(dir);
   if (repo) {
-    const title = loadState(repo, session)?.title?.text;
-    if (title) head += ` ${printable(title, 40)}`;
+    const state = loadState(repo, session);
+    if (state?.turn) head = dim(`${session.slice(0, 8)}.${state.turn}`);
+    if (state?.title) head += ` ${printable(state.title.text, 40)}`;
     const remote = readConfig(repo).remote;
     const part = braidPart(repo, session, remote);
     if (part) parts.push(part);
@@ -5291,7 +5436,7 @@ Everyday
   braid edit --undo ...       put back records, text (--undo --hide), a record's own text (--undo --rewrite 5) or the session (--undo --all)
   braid commit -m "<message>" commit the conversation: publishing goes up to the last commit
   braid push [--dry-run]      publish the committed part now (git push does this with autopush)
-  braid fork [<session>|@N]   the command to continue a session, or fork point N, in a new window; with none, this one
+  braid fork [<session>|<session>.<n>|.<n>]   the command to continue a session, or one from the end of its turn n, in a new window; with none, this one
     --to codex|claude-code    as a new session of that agent's (by default the agent it runs in, else Claude Code)
     --new                     another session, even when the same fork was written before
   braid fork <session> --here continue from another session in this one, before its first turn is saved
@@ -5306,7 +5451,7 @@ Everyday
 Other
   braid show <session>        read a session as a briefing, without linking to it
   braid sessions              every session braid can see here
-  braid log [<session>]       the turns and commits of a session
+  braid log [<session>] [--records]   a session's turns along its line, each named <session>.<n>, with what it did and its commits; --records: each record of the session
   braid verify [<session>|--all]   check that a session was saved as it happened and loads back the same
   braid fetch [--all]         fetch published sessions
   braid import openclaw [--session <key|id>] [--db <path>]   import OpenClaw sessions
@@ -5425,6 +5570,7 @@ function main(argv) {
       repo: { type: "string" },
       here: { type: "boolean" },
       new: { type: "boolean" },
+      records: { type: "boolean" },
       autocommit: { type: "boolean" },
       "no-autocommit": { type: "boolean" },
       autopush: { type: "boolean" },
@@ -5518,7 +5664,7 @@ function main(argv) {
       const session = needSession(str("session"));
       const known = loadState(repo, session)?.transcript;
       const r = save(repo, session, str("transcript") ?? (known ? void 0 : transcriptOf(session)));
-      out(`braid: saved ${r.added} records`);
+      out(`braid: saved ${r.added} records${r.state.turn ? `, up to ${turnName(session, r.state.turn)}` : ""}`);
       return 0;
     }
     case "commit": {
@@ -5605,14 +5751,35 @@ function main(argv) {
       const remote = str("remote") ?? readConfig(repo).remote;
       const found = resolve2(repo, args[0] ?? needSession(str("session")), remote);
       if (found.length !== 1) throw new Error(found.length ? "more than one session matches" : "no such session");
-      for (const p of found[0].opts.gitDir ? points(repo, found[0].session) : []) out(`${`@${p.n}`.padEnd(12)}  ${"fork".padEnd(9)} ${p.what}`);
-      for (const r of readRecords(found[0].ref, found[0].opts)) {
+      const f = found[0];
+      const sessions = conversationSessions(repo, f.conv, remote);
+      const turns = numbering(sessions);
+      const commitLine = (r) => {
         const code = r.type === "label" ? braidOf(r).code : void 0;
         const commit = r.type === "label" ? braidOf(r).commit ?? code : void 0;
-        if (!isTurn(r) && !commit) continue;
-        const kind = code ? "code" : commit ? "commit" : r.type === "branch_summary" ? "merge" : r.role ?? r.type;
-        const text = commit ? `${String(r.label)}${commit.sha ? ` (${commit.sha.slice(0, 7)})` : ""}` : describe(r, 160).split("\n")[0];
-        out(`${r.id.slice(0, 12)}  ${kind.padEnd(9)} ${text}`);
+        if (!commit) return void 0;
+        return `${(code ? "code" : "commit").padEnd(9)} ${String(r.label)}${commit.sha ? ` (${commit.sha.slice(0, 7)})` : ""}`;
+      };
+      if (opts.records === true) {
+        const mine = turns.get(f.session);
+        for (const r of readRecords(f.ref, f.opts)) {
+          const c = commitLine(r);
+          if (!isTurn(r) && !c) continue;
+          const kind = r.type === "branch_summary" ? "merge" : r.role ?? r.type;
+          out(`${turnName(f.session, mine?.get(r.id) ?? 0).padEnd(12)}  ${c ?? `${kind.padEnd(9)} ${describe(r, 160).split("\n")[0]}`}`);
+        }
+        return 0;
+      }
+      for (const t of turnsAlong(lineOf(sessions, f.session), turns)) {
+        if (t.start) {
+          const said2 = t.start.type === "branch_summary" ? describe(t.start, 100).split("\n")[0] : promptLine(t.start);
+          const did = turnDetail(t.records);
+          out(`${turnName(t.session, t.n).padEnd(12)}  ${t.start.type === "branch_summary" ? `merge: ${said2}` : said2}${did ? `  (${did})` : ""}`);
+        }
+        for (const r of t.records) {
+          const c = commitLine(r);
+          if (c) out(`${"".padEnd(12)}  ${c}`);
+        }
       }
       return 0;
     }
@@ -5650,6 +5817,17 @@ braid fork --new writes another.` : `braid: wrote ${what} as a new ${to.title} s
         if (own2.length !== 1) throw new Error(`this session (${current.slice(0, 8)}) is not saved yet`);
         out(wrote("this conversation", replay(repo, own2[0], remote, to, { cwd: str("cwd"), fresh })));
         return 0;
+      }
+      if (TURN.test(args[0])) {
+        if (current) {
+          const transcript = loadState(repo, current)?.transcript ?? transcriptOf(current);
+          if (transcript && existsSync17(transcript)) save(repo, current, transcript);
+        }
+        const turn = resolveTurn(repo, args[0], current, remote);
+        if (turn) {
+          out(wrote(`the conversation up to ${turnName(turn.found.session, turn.n)}`, replay(repo, turn.found, remote, to, { cwd: str("cwd"), fresh, until: turn.until })));
+          return 0;
+        }
       }
       const at = /^(.*)@(\d+)$/.exec(args[0]);
       if (at) {

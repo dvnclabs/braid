@@ -31,7 +31,7 @@ braid starts on autopilot: it does everything by itself and nothing leaves your 
 | Setting | Default | What it does |
 |---|---|---|
 | `autopilot` | on | braid keeps conversations on this machine, in the braid repository, and never pushes, fetches or asks GitHub anything. Off, it can share them through the code repository's remote. |
-| `autofork` | on | before a turn that changes a lot (5 files edited, or 30 tool calls), braid marks the conversation as it stood, so you can fork from there: `braid fork @1`. |
+| `autofork` | on | before a turn that changes a lot (5 files edited, or 30 tool calls), braid marks the conversation as it stood (`braid fork @1`). Every turn has a name to fork from too, below. |
 | `repo` | `auto` | the braid repository, which keeps every conversation apart from the code: `auto` is `~/.braid`; a path such as `~/work-convos` names another. |
 | `autocommit` | off | each commit the agent makes commits the conversation too. Off, you commit it with `/braid:commit` after `/braid:edit`. |
 | `autopush` | on in private repositories, off in public ones | off autopilot, `git push` publishes the committed part of the sessions behind the pushed commits. Off, `/braid:push` publishes. |
@@ -43,12 +43,12 @@ braid starts on autopilot: it does everything by itself and nothing leaves your 
 Work with Claude Code as usual. The status line shows what your session is about and where it stands:
 
 ```
-5b0e2c1a Webhook retries · local
+5b0e2c1a.12 Webhook retries · local
 ```
 
 | | |
 |---|---|
-| `5b0e2c1a` | this session |
+| `5b0e2c1a.12` | this session, at its twelfth turn |
 | `Webhook retries` | what it is about: the name you gave it with `/rename`, else Claude Code's title for it, else its first prompt |
 | `local` | saved on this machine only |
 | `↑4` | 4 committed records not published yet |
@@ -61,7 +61,17 @@ Marks are in color: amber for work not yet published, magenta for a session wait
 
 **Come back.** When you resume a session, or open a fork of one, braid shows what it is about: `braid · 5b0e2c1a · Webhook retries`. In Codex, which writes no recaps, it adds Claude Code's latest recap of the session too. `braid status` shows the title and the latest recap.
 
-**Go back.** `braid log` lists the fork points autofork marked, and `/braid:fork @2` gives you the command to continue the conversation as it was before that turn, in a new window. `/braid:fork` alone branches the conversation as it is now.
+**Go back.** Every turn has a name, `<session>.<n>`: a prompt you typed and everything the agent did until it stopped is one turn, and a merge is one too. `braid log` lists them, with what each did:
+
+```
+$ braid log
+5b0e2c1a.1    Plan the cache.
+5b0e2c1a.2    Write the cache.  (2 files edited, 2 tool calls)
+              commit    Add the cache (3f9c2e1)
+5b0e2c1a.3    Thanks.
+```
+
+`/braid:fork 5b0e2c1a.2`, or `.2` for the session you are in, gives you the command to continue the conversation from the end of that turn, in a new window. A fork continues the numbering: its first turn here is `.3` of its own. In place of the id, the name you gave a session with `/rename` works too, as in `cache-work.2`. `/braid:fork` alone branches the conversation as it is now, and `braid log --records` lists every record under its turn.
 
 **Claude Code and Codex.** A session is braid's own, whichever agent wrote it, and it continues in either. `braid fork --to codex` writes this conversation, or `braid fork <session> --to codex` another, as a new Codex session, and gives you `cd <dir> && codex resume <id>`. `braid fork <session> --to claude-code` writes a Codex session as a new Claude Code session, and gives you `cd <dir> && claude --resume <id>`; a fork continues in the agent you ask from, unless you name another. Asking for the same fork again gives back the session it wrote, and `--new` writes another. Each agent gets the conversation as the other's model read it: messages, tool calls and their results. Reasoning stays behind, since only the provider that wrote it can read it back, and so do the instructions and environment each agent gives its own model. A session continued in the other agent is saved as part of the same conversation.
 
@@ -83,6 +93,7 @@ braid edit 2-3                 # withhold records; a tool call takes its result 
 braid edit --rewrite 4         # rewrite a record in your editor; empty it to withhold it
 braid edit --hide "Acme"       # hide a word in every record
 braid edit --all               # keep the whole session back
+braid edit .3                  # withhold a whole turn
 braid edit --undo 2            # put any of it back
 ```
 
@@ -111,7 +122,7 @@ $ git push                             # with autopush, publishes the conversati
 | `/braid:edit` | the session as it would be published; remove, rewrite or hide parts of it |
 | `/braid:commit [message]` | commit the conversation; publishing goes up to the last commit |
 | `/braid:push` | publish the committed part of this session now |
-| `/braid:fork [session \| @N] [--to codex]` | the command to continue this session, another one, or a fork point, in a new window, in Claude Code or Codex |
+| `/braid:fork [session \| session.N \| .N] [--to codex]` | the command to continue this session, another one, or one from the end of its turn N, in a new window, in Claude Code or Codex |
 | `/braid:merge [session] [instruction]` | merge another conversation into this one, or `skip` it |
 | `/braid:review <N>` | review pull request N with the sessions behind it |
 

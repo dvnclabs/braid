@@ -13,6 +13,8 @@ import { markIfBig } from "./points.ts";
 import { loadState, newState, saveState, withLock, type SessionState } from "./state.ts";
 import { codexLine, formatOf, intact, readWindow, START, type Format, type Window } from "./transcript.ts";
 import { VERSION } from "./version.ts";
+import { newestTurn, startsTurn } from "./turns.ts";
+import { readEntry } from "./registry.ts";
 
 export function actorId(repo: Repo): string {
   return config("user.email", { cwd: repo.top }) ?? `${userInfo().username}@${hostname()}`;
@@ -173,6 +175,8 @@ export function save(repo: Repo, session: string, transcript?: string, opts: { c
       window = read();
       if (!window) break;
     }
+    // A session's first save, or one saved before braid counted turns: its turns, counted along its line once.
+    if (state.chunks > 0 && state.turn === undefined) state.turn = newestTurn(repo, state.conv, session, readConfig(repo).remote);
     saveState(repo, state);
     if (state.chunks > 0 && state.chunks % 50 === 0) gitMaybe(["gc", "--auto", "--quiet"], { gitDir: repo.store });
     return { added, state };
@@ -285,7 +289,10 @@ function writeChunk(
   // Commit labels go last, so the agent links written in this chunk fall within the commit.
   if (final) {
     const target = lastTurn(out) ?? state.head;
-    const commits = codeCommits.map((sha) => ({ sha, message: gitMaybe(["log", "-1", "--format=%s", sha], { cwd: repo.top })?.trim() ?? "" }));
+    // A session commits in other repositories than the one it runs in: each commit's message is in one of them.
+    const tops = [repo.top, ...(readEntry(session)?.repos ?? [])];
+    const messageOf = (sha: string) => tops.map((top) => gitMaybe(["log", "-1", "--format=%s", sha], { cwd: top })?.trim()).find(Boolean) ?? "";
+    const commits = codeCommits.map((sha) => ({ sha, message: messageOf(sha) }));
     if (opts.commit !== undefined) commits.push({ sha: "", message: opts.commit });
     if (opts.commit !== undefined && !target) throw new Error("nothing to commit: this session has no saved turns yet");
     // A code commit commits the conversation too only with autocommit on; otherwise it is noted, for links.
@@ -310,6 +317,7 @@ function writeChunk(
   appendChunk(storeRef(state.conv, session), out, { time: now, head, commits: codeCommits }, { gitDir: repo.store }, agentRecords);
   state.last = fresh.at(-1)?.id ?? state.last;
   state.head = lastTurn(out) ?? state.head;
+  if (state.turn !== undefined) state.turn += out.filter(startsTurn).length;
   state.chunks += 1;
   if (final) state.commits = [];
   return out.length;

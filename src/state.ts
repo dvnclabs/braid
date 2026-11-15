@@ -69,6 +69,8 @@ export interface SessionState {
   title?: About["title"];
   /** The agent's latest recap of the session, shown when the session is resumed. */
   recap?: About["recap"];
+  /** The number of the session's newest turn, counted along its line from the conversation's first prompt. */
+  turn?: number;
 }
 
 function path(repo: Repo, session: string): string {

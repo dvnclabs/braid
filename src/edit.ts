@@ -8,6 +8,7 @@ import { braidOf, describe, type Rec } from "./records.ts";
 import { remoteRefs, type Repo } from "./repo.ts";
 import { loadState, saveState, withLock, type SessionState } from "./state.ts";
 import { sessionTitle } from "./status.ts";
+import { conversationSessions, numbering, turnName } from "./turns.ts";
 
 export interface Line {
   /** "12", or "12.3" for the third record of the subagent spawned at 12. */
@@ -24,6 +25,8 @@ export interface Line {
   withheld?: string;
   committed: boolean;
   published: boolean;
+  /** The turn the record is part of; a subagent's records are part of the turn that spawned it. */
+  turn?: number;
 }
 
 function who(r: Rec, agent: string | undefined): string {
@@ -50,6 +53,8 @@ export function editLines(repo: Repo, v: View, remote: string): Line[] {
     [...readRecords(tracking, { cwd: repo.top }), ...[...readAgents(tracking, { cwd: repo.top }).values()].flat()].map((r) => r.id),
   );
   const agents = new Map([...v.agents].map(([id, c]) => [id, c.flat()]));
+  const turns = numbering(conversationSessions(repo, v.state.conv, remote)).get(v.state.session);
+  let turn: number | undefined;
   const out: Line[] = [];
   const add = (num: string, r: Rec, committed: boolean, agent?: string) => {
     const c = clean(r);
@@ -68,6 +73,7 @@ export function editLines(repo: Repo, v: View, remote: string): Line[] {
       withheld: v.withheld.get(r.id),
       committed,
       published: published.has(r.id),
+      turn: agent ? turn : (turn = turns?.get(r.id)),
     });
     return true;
   };
@@ -110,17 +116,23 @@ export function renderEdit(v: View, lines: Line[], width: number): string[] {
   else if (v.rules.withholdSession && v.pathCounts.size > 0) head.push("None of this session is published: it touched a path in .braidignore, and redact.toml sets withhold-session.");
   if (s.terms?.length) head.push(`Hidden text: ${s.terms.map((t) => JSON.stringify(t)).join(", ")}`);
   head.push("Publishing goes up to the last commit. ↑ committed, not published yet · ✗ withheld · ✎ rewritten");
+  head.push(`Records are grouped by turn: braid edit .3 withholds turn ${s.session.slice(0, 8)}.3.`);
   const w = Math.max(...lines.map((l) => l.num.length), 2);
-  const body = lines.map((l) => {
+  let turn: number | undefined;
+  const body = lines.flatMap((l) => {
     const mark = l.withheld ? "✗" : l.edited ? "✎" : l.committed && !l.published ? "↑" : " ";
     const why = l.withheld ? `  [${l.withheld === "you" ? "withheld" : l.withheld}]` : "";
     const prefix = `${l.num.padStart(w)} ${mark} ${l.who.padEnd(7)}`;
-    return `${prefix}${clip(l.text, Math.max(20, width - prefix.length - why.length))}${why}`;
+    const line = `${prefix}${clip(l.text, Math.max(20, width - prefix.length - why.length))}${why}`;
+    // Each turn under its name.
+    const starts = !l.agent && l.turn !== undefined && l.turn > 0 && l.turn !== turn;
+    if (!l.agent) turn = l.turn;
+    return starts ? [`${turnName(s.session, l.turn!)}`, line] : [line];
   });
   return [...head, "", ...body];
 }
 
-/** Lines picked by numbers and ranges: 4, 7-9, 12.3, 12.3-5. */
+/** Lines picked by numbers and ranges: 4, 7-9, 12.3, 12.3-5; and whole turns: .3, .3-5. */
 export function pickLines(lines: Line[], tokens: string[]): Line[] {
   const byNum = new Map(lines.map((l) => [l.num, l]));
   const picked = new Map<string, Line>();
@@ -130,6 +142,14 @@ export function pickLines(lines: Line[], tokens: string[]): Line[] {
     picked.set(num, l);
   };
   for (const token of tokens.flatMap((t) => t.split(",")).filter(Boolean)) {
+    const turns = /^\.(\d+)(?:-\.?(\d+))?$/.exec(token);
+    if (turns) {
+      const [from, to] = [Number(turns[1]), Number(turns[2] ?? turns[1])];
+      const of = lines.filter((l) => l.turn !== undefined && l.turn >= from && l.turn <= to);
+      if (!of.length) throw new Error(`no turn ${token.slice(1)} in this session (braid edit lists them)`);
+      for (const l of of) picked.set(l.num, l);
+      continue;
+    }
     const m = /^(?:([\w-]+)\.)?(\d+)(?:-(?:\1\.)?(\d+))?$/.exec(token);
     if (!m) throw new Error(`not a record number or range: ${token}`);
     const [, group, from, to] = m;

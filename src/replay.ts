@@ -11,6 +11,7 @@ import { about, asCodexShowed, braidOf, contextPath, forModel, lastTurn, type Re
 import type { Harness } from "./harness.ts";
 import { userConfig, type Repo } from "./repo.ts";
 import { loadState, newState, saveState } from "./state.ts";
+import { conversationSessions, numbering } from "./turns.ts";
 
 /** The directory a Claude Code session started in, from its transcript: where `claude --resume` finds it. */
 export function launchDir(transcript: string | undefined): string | undefined {
@@ -228,9 +229,12 @@ export interface Replayed {
  * the session written the first time, as it stands, continued or not. With
  * `fresh`, a fork is another session each time.
  */
-export function replay(repo: Repo, found: Found, remote: string, to: Harness, opts: { cwd?: string; fresh?: boolean } = {}): Replayed {
+export function replay(repo: Repo, found: Found, remote: string, to: Harness, opts: { cwd?: string; fresh?: boolean; until?: string } = {}): Replayed {
   const all = conversation(repo, found.conv, remote);
-  const own = readRecords(found.ref, found.opts);
+  const read = readRecords(found.ref, found.opts);
+  // From a turn: the session up to that turn's last record.
+  const own = opts.until ? read.slice(0, read.findIndex((r) => r.id === opts.until) + 1) : read;
+  if (opts.until && own.length === 0) throw new Error(`session ${found.session.slice(0, 8)} has no record ${opts.until}`);
   const head = lastTurn(own) ?? own.at(-1)?.id;
   if (!head) throw new Error(`session ${found.session.slice(0, 8)} has no records to replay`);
   const fork = forkRecords(all, own, head);
@@ -254,6 +258,8 @@ export function replay(repo: Repo, found: Found, remote: string, to: Harness, op
   // The fork is about what its source was about at the point it forks from; from the newest, as it is now.
   const upTo = head === lastTurn(own) ? own.length - 1 : own.findIndex((r) => r.id === head);
   Object.assign(state, about(upTo >= 0 ? own.slice(0, upTo + 1) : own, state));
+  // Its turns continue the numbering from the turn it forks at.
+  state.turn = numbering(conversationSessions(repo, found.conv, remote)).get(found.session)?.get(head) ?? 0;
   saveState(repo, state);
   return { session, file, cwd, records: lines };
 }

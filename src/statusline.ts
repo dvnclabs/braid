@@ -103,8 +103,10 @@ export function statusline(stdin: string): string {
   if (pr) parts.push(pr);
   const repo = locate(dir);
   if (repo) {
-    const title = loadState(repo, session)?.title?.text;
-    if (title) head += ` ${printable(title, 40)}`;
+    const state = loadState(repo, session);
+    // The session's newest turn by name, as braid fork takes it: 5b0e2c1a.12.
+    if (state?.turn) head = dim(`${session.slice(0, 8)}.${state.turn}`);
+    if (state?.title) head += ` ${printable(state.title.text, 40)}`;
     const remote = readConfig(repo).remote;
     const part = braidPart(repo, session, remote);
     if (part) parts.push(part);

@@ -50,7 +50,7 @@ function prSessions(repo: Repo, n: string, remote: string): Set<string> {
   return ids;
 }
 
-/** Finds sessions by id prefix, by name, or as pr:<n> / #<n>. */
+/** Finds sessions by id prefix, by name (braid's, or the one you gave a session of yours with /rename), or as pr:<n> / #<n>. */
 export function resolve(repo: Repo, target: string, remote: string): Found[] {
   const sessions = allSessions(repo, remote);
   const pr = /^(?:pr:|#)(\d+)$/.exec(target);
@@ -61,8 +61,11 @@ export function resolve(repo: Repo, target: string, remote: string): Found[] {
     return sessions.filter((s) => convs.has(s.conv));
   }
   const byId = sessions.filter((s) => s.session.startsWith(target));
-  if (byId.length > 0 || target.length >= 8) return byId;
-  return sessions.filter((s) => sessionName(readRecords(s.ref, s.opts), s.session) === target);
+  if (byId.length > 0 || /^[0-9a-f-]{8,}$/.test(target)) return byId;
+  return sessions.filter((s) => {
+    const named = s.opts.gitDir ? loadState(repo, s.session)?.title : undefined;
+    return (named?.by === "user" && named.text === target) || sessionName(readRecords(s.ref, s.opts), s.session) === target;
+  });
 }
 
 /** All records of a conversation, preferring your own unredacted copies, and of a line written twice under one id, the first. */
