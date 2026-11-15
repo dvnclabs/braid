@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { gunzipSync as gunzip, gzipSync as gzip } from "node:zlib";
 import { braid, clone, must, Rollout, run, sandbox, saved, Transcript } from "./helpers.ts";
 
 const ALICE = "5b0e2c1a-7f3d-4c2e-9a61-0d8e4b2f6c13";
@@ -92,7 +93,7 @@ test("each project keeps its sessions in .braid, which git does not see; its wor
   t.user("Plan the cache.");
   t.assistant("An LRU.");
   braid(s.env, repo, ["hook", "stop"], hookIn(ALICE, t, repo));
-  assert.deepEqual(readdirSync(join(repo, ".braid", "sessions")).filter((f) => f.startsWith(ALICE)).sort(), [`${ALICE}.json`, `${ALICE}.jsonl`]);
+  assert.deepEqual(readdirSync(join(repo, ".braid", "sessions")).filter((f) => f.startsWith(ALICE)).sort(), [`${ALICE}.json`, `${ALICE}.jsonl.gz`]);
   assert.equal(must(s.env, repo, "git", ["status", "--porcelain"]), "", "git does not see the folder, and no file of the project changed");
 
   // A session in a worktree is kept in the main checkout's folder, with the worktree it ran in.
@@ -103,7 +104,7 @@ test("each project keeps its sessions in .braid, which git does not see; its wor
   tb.user("Write the tests.");
   tb.assistant("Wrote them.");
   braid(s.env, feature, ["hook", "stop"], hookIn(BOB, tb, feature));
-  assert.ok(existsSync(join(repo, ".braid", "sessions", `${BOB}.jsonl`)));
+  assert.ok(existsSync(join(repo, ".braid", "sessions", `${BOB}.jsonl.gz`)));
   assert.equal(existsSync(join(feature, ".braid")), false, "nothing in the worktree, which can go away");
   const sessions = braid(s.env, feature, ["sessions"]).stdout;
   assert.match(sessions, /^01a1bc3e\.1 +Write the tests\. +claude-code +just now, in ivy-feature$/m);
@@ -119,7 +120,7 @@ test("each project keeps its sessions in .braid, which git does not see; its wor
   tc.user("Summarize my notes.");
   tc.assistant("Done.");
   braid(s.env, loose, ["hook", "stop"], hookIn(CAROL, tc, loose));
-  assert.ok(existsSync(join(loose, ".braid", "sessions", `${CAROL}.jsonl`)));
+  assert.ok(existsSync(join(loose, ".braid", "sessions", `${CAROL}.jsonl.gz`)));
 });
 
 test("/braid:init saves the conversation it runs in, also one that started before braid was installed", () => {
@@ -136,7 +137,7 @@ test("/braid:init saves the conversation it runs in, also one that started befor
   const claude = { CLAUDE_CODE_SESSION_ID: ALICE };
   const init = braid(s.env, repo, ["init"], undefined, claude);
   assert.equal(init.status, 0, init.stderr);
-  assert.match(init.stdout, /saved this conversation \(5b0e2c1a\.1\), 3 records, in \S+\/fay\/\.braid\/sessions\/5b0e2c1a-[0-9a-f-]+\.jsonl/);
+  assert.match(init.stdout, /saved this conversation \(5b0e2c1a\.1\), 3 records, in \S+\/fay\/\.braid\/sessions\/5b0e2c1a-[0-9a-f-]+\.jsonl\.gz/);
   t.user("Thanks.");
   t.assistant("You're welcome.");
   assert.match(braid(s.env, repo, ["save"], undefined, claude).stdout, /saved 2 records/);
@@ -841,5 +842,48 @@ test("braid init takes out braid 0.1's git hooks and puts back the hooks they wr
   assert.equal(readFileSync(join(hooks, "pre-push"), "utf8"), "#!/bin/sh\nexit 0\n", "the repository's own hook is back");
   assert.equal(existsSync(join(hooks, "post-commit")), false);
   must(s.env, repo, "git", ["push", "--quiet", "origin", "HEAD:main"]);
+});
+
+test("a session's file is gzip, one member per save, which zcat reads whole; braid 0.2's plain files are compressed on their next save; a save cut short is reported", () => {
+  const s = sandbox();
+  const repo = clone(s, "ola", "ola@example.com");
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, repo, ["init"]);
+  const t = new Transcript(s.root, ALICE);
+  const stop = () => braid(s.env, repo, ["hook", "stop"], JSON.stringify({ session_id: ALICE, transcript_path: t.path, cwd: repo }));
+  const file = join(repo, ".braid", "sessions", `${ALICE}.jsonl.gz`);
+  t.user("Plan the cache.");
+  t.assistant("An LRU.");
+  stop();
+  const first = readFileSync(file);
+  const once = first.length;
+  t.user("Thanks.");
+  t.assistant("You're welcome.");
+  stop();
+  const bytes = readFileSync(file);
+  assert.ok(bytes.subarray(0, once).equals(first), "what the first save wrote is as it was");
+  assert.equal(bytes.subarray(once, once + 2).toString("hex"), "1f8b", "the second save appended a gzip member, and rewrote nothing");
+  const zcat = must(s.env, repo, "sh", ["-c", `gzip -dc '${file}' | wc -l`]).trim();
+  assert.equal(Number(zcat), saved(repo, ALICE).length, "any gzip reader reads every record");
+  assert.match(braid(s.env, repo, ["log", ALICE]).stdout, /5b0e2c1a\.2 +Thanks\./);
+
+  // A session braid 0.2 kept uncompressed reads as it is, and is compressed whole on its next save.
+  const plain = join(repo, ".braid", "sessions", `${ALICE}.jsonl`);
+  writeFileSync(plain, gunzip(readFileSync(file)));
+  rmSync(file);
+  assert.match(braid(s.env, repo, ["log", ALICE]).stdout, /5b0e2c1a\.2 +Thanks\./);
+  t.user("One more.");
+  t.assistant("Sure.");
+  stop();
+  assert.equal(existsSync(plain), false);
+  assert.match(braid(s.env, repo, ["log", ALICE]).stdout, /5b0e2c1a\.3 +One more\.\n$/);
+
+  // A save cut short, as by a crash while it wrote: what was written whole reads back, and braid verify says so.
+  const whole = readFileSync(file);
+  writeFileSync(file, Buffer.concat([whole, gzip(Buffer.from('{"type":"message","id":"x"}\n'.repeat(50))).subarray(0, 30)]));
+  assert.match(braid(s.env, repo, ["log", ALICE]).stdout, /5b0e2c1a\.3 +One more\.\n$/);
+  const v = braid(s.env, repo, ["verify", "--session", ALICE]);
+  assert.equal(v.status, 1);
+  assert.match(v.stdout, /✗ file: the last save was cut short/);
 });
 

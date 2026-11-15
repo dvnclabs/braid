@@ -16,7 +16,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { claudeCode } from "@leostera/atxf/claude-code";
-import { readAgents, readRecords, recordsFile } from "./store.ts";
+import { readAgents, readChecked, readRecords, sessionFile } from "./store.ts";
 import { codexText } from "./harness.ts";
 import { CODEX_CONTEXT, describe, lastTurn, type Rec } from "./records.ts";
 import { forkRecords, forkText, keptUuids, replayedIds, SOURCE_ONLY, type Line } from "./replay.ts";
@@ -312,7 +312,7 @@ export function verify(repo: Repo, session: string): Verified {
     stored = readRecords(repo, session);
     agents = readAgents(repo, session);
   } catch (err) {
-    return { session, problems: [`file: ${recordsFile(repo, session)} does not read back: ${err instanceof Error ? err.message : String(err)}`], checked, notes };
+    return { session, problems: [`file: ${sessionFile(repo, session)} does not read back: ${err instanceof Error ? err.message : String(err)}`], checked, notes };
   }
   // A session's file holds its whole conversation, a fork's the history it was written from too.
   const all = new Map(stored.map((r) => [r.id, r] as const));
@@ -391,6 +391,7 @@ export function verify(repo: Repo, session: string): Verified {
   const ids = new Set([...all.keys(), ...[...agents.values()].flat().map((r) => r.id)]);
   const orphans = [...stored, ...[...agents.values()].flat()].filter((r) => typeof r.parentId === "string" && !ids.has(r.parentId));
   if (orphans.length) problems.push(`file: ${orphans.length} records have a parent that is not saved, from: ${describe(orphans[0]!, 80)}`);
+  if (readChecked(repo, session).truncated) problems.push("file: the last save was cut short; what it wrote whole reads back, the rest does not");
   checked.push(`file: ${stored.length} records, each with its parent`);
   return { session, problems, checked, notes };
 }

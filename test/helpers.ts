@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 const CLI = resolve(import.meta.dirname, "..", "src", "cli.ts");
 
@@ -35,9 +36,10 @@ export function sandbox(): Env {
 /** A session's saved records, from the project's .braid folder: its own, or one subagent's. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function saved(project: string, session: string, agent?: string): any[] {
-  const file = join(project, ".braid", "sessions", `${session}.jsonl`);
+  const file = join(project, ".braid", "sessions", `${session}.jsonl.gz`);
   if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8")
+  return gunzipSync(readFileSync(file))
+    .toString("utf8")
     .split("\n")
     .filter(Boolean)
     .map((l) => JSON.parse(l))

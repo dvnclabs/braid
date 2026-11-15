@@ -7,7 +7,7 @@ description: Set up braid, the efficient session manager, on this machine (the b
 
 1. Run `braid init`. braid:
    - installs a `braid` command in `~/.local/bin` and adds braid's part to the Claude Code status line, running any existing status line first
-   - makes this project's `.braid` folder, where every session of the project is kept as it happens: `.braid/sessions/<id>.jsonl`, one record per line. A `.gitignore` inside the folder keeps git from seeing it, so no file of the project changes. A project is a git repository's main checkout, so its worktrees share one folder; outside any repository, it is the folder itself.
+   - makes this project's `.braid` folder, where every session of the project is kept as it happens: `.braid/sessions/<id>.jsonl.gz`, one record per line, gzip-compressed (`zcat` reads it). A `.gitignore` inside the folder keeps git from seeing it, so no file of the project changes. A project is a git repository's main checkout, so its worktrees share one folder; outside any repository, it is the folder itself.
    - moves conversations braid 0.1 kept in `~/.braid` into the projects they ran in
    - saves this conversation, from its first turn
    - when Codex is on the machine, adds braid's hooks to `~/.codex/hooks.json`, so Codex sessions are saved too. Tell the user to open `/hooks` in Codex once and trust braid's three hooks: Codex runs a new hook only after that.

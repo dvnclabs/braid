@@ -16,7 +16,7 @@ import { cliPath, init, setup } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
 import { computeStatus } from "./status.ts";
 import { statusline } from "./statusline.ts";
-import { readRecords, recordsFile } from "./store.ts";
+import { readRecords, sessionFile } from "./store.ts";
 import { findTurn, TURN, turnDetail, turnName, turnsOf } from "./turns.ts";
 import { verify } from "./verify.ts";
 import { VERSION } from "./version.ts";
@@ -175,7 +175,7 @@ function main(argv: string[]): number {
         const repo = here();
         recordSession(current, { transcript });
         const r = save(repo, current, transcript);
-        out(`braid: saved this conversation (${named(repo, current)}), ${r.added} records, in ${recordsFile(repo, current)}`);
+        out(`braid: saved this conversation (${named(repo, current)}), ${r.added} records, in ${sessionFile(repo, current)}`);
       }
       return 0;
     }
@@ -201,7 +201,7 @@ function main(argv: string[]): number {
       const s = computeStatus(repo, session);
       out(`braid · ${named(repo, session)}${state.title ? ` · ${state.title.text}` : ""}`);
       if (state.recap) out(`  recap, ${ago(state.recap.at)}: ${state.recap.text}`);
-      out(`  kept in ${recordsFile(repo, session)}`);
+      out(`  kept in ${sessionFile(repo, session)}`);
       if (state.ran && state.ran !== repo.top) out(`  ran in ${state.ran}`);
       if (s.broken) out(`  ⚠ braid verify found problems when it last ran: ${(state.verified?.problems ?? []).join("; ")}`);
       if (state.forkedFrom) out(`  a fork of ${turnName(state.forkedFrom.session, state.forkedFrom.turn)}`);
@@ -211,7 +211,7 @@ function main(argv: string[]): number {
       // Newest first, each with its newest turn, what it is about, its agent and when it was last saved.
       const repo = here();
       const rows = allSessions(repo)
-        .map((f) => ({ f, state: loadState(repo, f.session), file: recordsFile(repo, f.session) }))
+        .map((f) => ({ f, state: loadState(repo, f.session), file: sessionFile(repo, f.session) }))
         .filter((x) => x.state && x.state.chunks > 0 && existsSync(x.file))
         .map((x) => ({ ...x, at: statSync(x.file).mtime.toISOString() }))
         .sort((a, b) => b.at.localeCompare(a.at));

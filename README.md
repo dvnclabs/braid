@@ -8,7 +8,7 @@
 
 **Efficient session manager.** braid saves every Claude Code and Codex session as it happens, in the project it runs in, as plain files you can read and search. You can go back to any turn and continue it in a new window, in either agent.
 
-> **v0.3, for Claude Code and Codex.** Sessions are kept in each project's `.braid` folder, one self-contained file each, and nothing leaves your machine. Version 0.1 kept them in a git repository of braid's own and could share them through a code repository's remote; that design is on the [`git-sharing`](https://github.com/dvnclabs/braid/tree/git-sharing) branch. See [Status of v0.3](docs/design.md#status-of-v03).
+> **v0.4, for Claude Code and Codex.** Sessions are kept in each project's `.braid` folder, one compressed, self-contained file each, and nothing leaves your machine. Version 0.1 kept them in a git repository of braid's own and could share them through a code repository's remote; that design is on the [`git-sharing`](https://github.com/dvnclabs/braid/tree/git-sharing) branch. See [Status of v0.4](docs/design.md#status-of-v04).
 
 ## Install
 
@@ -29,11 +29,11 @@ When Codex is on the machine, `braid init` also adds braid's hooks to `~/.codex/
 ```
 <project>/.braid/
   .gitignore              *   (git does not see the folder; no file of your project changes)
-  sessions/<id>.jsonl     the session in ATXF, one record per line, appended after each turn
+  sessions/<id>.jsonl.gz  the session in ATXF, one record per line, gzip-compressed, appended after each turn
   sessions/<id>.json      its state: where saving stopped, its title, its newest turn, the worktree it ran in, what it was forked from
 ```
 
-A project is a git repository's main checkout, so every worktree of it saves into the same folder, and deleting a worktree keeps its sessions. Outside any repository, a session is kept in the `.braid` folder of the folder it started in. Each file holds a whole session: a fork, or a copy made with `/branch`, is saved as a session of its own, with the history it was made from. The files are [ATXF](https://github.com/leostera/atxf), an open format for agent transcripts, and every line keeps what the agent wrote, byte for byte.
+A project is a git repository's main checkout, so every worktree of it saves into the same folder, and deleting a worktree keeps its sessions. Outside any repository, a session is kept in the `.braid` folder of the folder it started in. Each file holds a whole session: a fork, or a copy made with `/branch`, is saved as a session of its own, with the history it was made from. The files are [ATXF](https://github.com/leostera/atxf), an open format for agent transcripts, and every line keeps what the agent wrote, byte for byte. Each save appends one gzip member, so nothing written is ever rewritten, and any gzip reader reads a file whole: `zcat`, `zgrep`, `gzip -dc <file> | jq`, Python's `gzip`, a browser. A session takes about a third of its transcript's size.
 
 ## Use
 

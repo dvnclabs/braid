@@ -14,7 +14,7 @@ export interface Repo {
   top: string;
   /** braid's folder in it, `.braid`. */
   dir: string;
-  /** Each session's records, `<id>.jsonl`, and its state, `<id>.json`. */
+  /** Each session's records, `<id>.jsonl.gz`, and its state, `<id>.json`. */
   sessions: string;
   /** What the status line caches. */
   cache: string;

@@ -12,7 +12,7 @@ import { projectOf, repoAt } from "./repo.ts";
 import { recordSession } from "./registry.ts";
 import { loadState, saveState, type SessionState } from "./state.ts";
 import { removeOldGitHooks } from "./setup.ts";
-import { appendRecords, recordsFile } from "./store.ts";
+import { appendRecords, sessionFile } from "./store.ts";
 
 /** Where braid 0.1 kept conversations. */
 export const oldHome = (): string => process.env.BRAID_HOME || join(homedir(), ".braid");
@@ -59,7 +59,7 @@ export function migrate(home = oldHome()): string[] {
     const project = projectOf(code ?? homedir());
     const repo = repoAt(project);
     for (const { session, ref } of sessions) {
-      if (existsSync(recordsFile(repo, session)) || (loadState(repo, session)?.chunks ?? 0) > 0) {
+      if (existsSync(sessionFile(repo, session)) || (loadState(repo, session)?.chunks ?? 0) > 0) {
         kept++;
         continue;
       }

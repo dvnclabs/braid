@@ -1,8 +1,8 @@
 # Design
 
-braid is an efficient session manager: it saves every coding-agent session as it happens, in the project it runs in, and lets you go back to any turn and continue it in Claude Code or Codex. This document describes its design; [Status of v0.3](#status-of-v03) lists what is built and what comes next. The [README](../README.md) covers installation and use.
+braid is an efficient session manager: it saves every coding-agent session as it happens, in the project it runs in, and lets you go back to any turn and continue it in Claude Code or Codex. This document describes its design; [Status of v0.4](#status-of-v04) lists what is built and what comes next. The [README](../README.md) covers installation and use.
 
-Version 0.1 kept every conversation in a git repository of braid's own, `~/.braid`, and could publish sessions to a code repository's remote for teammates and pull request reviews. Version 0.2 kept each project's sessions as plain files in the project, and left sharing out for now; version 0.3 makes each file a whole session, and leaves out merging and the links between sessions that came with it. Sharing's design is that design is on the [`git-sharing`](https://github.com/dvnclabs/braid/tree/git-sharing) branch. `braid migrate` moves 0.1's conversations into their projects.
+Version 0.1 kept every conversation in a git repository of braid's own, `~/.braid`, and could publish sessions to a code repository's remote for teammates and pull request reviews. Version 0.2 kept each project's sessions as plain files in the project, and left sharing out for now; version 0.3 made each file a whole session, and left out merging and the links between sessions that came with it; version 0.4 compresses the files. Sharing's design is that design is on the [`git-sharing`](https://github.com/dvnclabs/braid/tree/git-sharing) branch. `braid migrate` moves 0.1's conversations into their projects.
 
 - [Model](#model)
 - [Storage](#storage)
@@ -13,7 +13,7 @@ Version 0.1 kept every conversation in a git repository of braid's own, `~/.brai
 - [CLI](#cli)
 - [Prior art](#prior-art)
 - [Distribution](#distribution)
-- [Status of v0.3](#status-of-v03)
+- [Status of v0.4](#status-of-v04)
 
 ## Model
 
@@ -34,7 +34,7 @@ Each project keeps its sessions in a `.braid` folder:
 ```
 <project>/.braid/
   .gitignore                    *: git does not see the folder, and no file of the project changes
-  sessions/<id>.jsonl           the session's records in ATXF, one per line, appended each turn; its subagents' too
+  sessions/<id>.jsonl.gz        the session's records in ATXF, one per line, gzip-compressed, appended each turn; its subagents' too
   sessions/<id>.json            its state: where the last save stopped, its title and recap, its newest turn,
                                 the checkout it ran in, what it was forked from, the last braid verify
   cache/                        what the status line caches
@@ -42,7 +42,7 @@ Each project keeps its sessions in a `.braid` folder:
 
 A **project** is a git repository's main checkout, the one that holds the `.git` its worktrees share, so a session in any worktree is kept in the main checkout's folder, and deleting a worktree keeps its sessions. For worktrees of a bare repository, the folder is inside the bare repository. Outside any repository, the project is the folder a session started in. A session stays in the project where it was first saved, which braid notes in `~/.local/share/braid/sessions/<id>.json`; commands that name a session another project keeps find it there.
 
-The files are plain JSON lines, so anything can read them: `grep`, an editor, a web interface, a training pipeline. Nothing leaves the machine, and braid calls no model of its own.
+The files are JSON lines in gzip, so anything can read them: `zcat`, `zgrep`, Python's `gzip`, a browser's `DecompressionStream`, a web interface, a training pipeline. Each save appends one gzip member, which compresses on its own, so nothing written is ever rewritten, and a gzip reader reads the members as one stream. A session takes about a third of its transcript's size (each record keeps the agent's line and its ATXF form, about one and a half times the transcript, which gzip shrinks about 3.4 times), and a 100 MB session reads back in about a tenth of a second. A save cut short, as by a crash while it wrote, leaves a last member that does not decode whole: braid reads what decodes, and `braid verify` reports it. A session braid 0.2 kept uncompressed, `<id>.jsonl`, reads as it is, and is compressed whole on its next save. Nothing leaves the machine, and braid calls no model of its own.
 
 ### Saving
 
@@ -161,11 +161,11 @@ braid adds session ids and turn names as handles, and forks between Claude Code 
 
 braid ships as a Claude Code plugin served from this repository. The plugin carries the hooks, the skills and the CLI, which is one bundled file (`dist/braid.mjs`, built from `src/` with esbuild) that needs only Node 22. Installing the plugin is the whole install, and `/braid:init` adds the `braid` command and the status line. `claude plugin update` installs a new version when the version number changes. `braid init` adds braid's hooks to Codex, which reads the same skills and Claude-style plugin manifests, so the skills come to Codex next.
 
-## Status of v0.3
+## Status of v0.4
 
 Built, for Claude Code and Codex:
 
-- **Saving:** each turn is appended to the session's file in the project's `.braid` folder, read incrementally in bounded windows; Claude Code's subagents are saved with their session. Codex sessions are saved through braid's hooks in Codex. Every file holds a whole session. Worktrees share their main checkout's folder. `braid verify` checks that a session was saved as it happened, and that a fork written from its file holds the lines the agent reads to resume it; it runs when each session ends. `npm run check:resume` resumes a session and its fork against local servers and compares the requests, byte for byte within an agent and item by item across them.
+- **Saving:** each turn is appended to the session's file in the project's `.braid` folder, as a gzip member, read incrementally in bounded windows; Claude Code's subagents are saved with their session. Codex sessions are saved through braid's hooks in Codex. Every file holds a whole session. Worktrees share their main checkout's folder. `braid verify` checks that a session was saved as it happened, and that a fork written from its file holds the lines the agent reads to resume it; it runs when each session ends. `npm run check:resume` resumes a session and its fork against local servers and compares the requests, byte for byte within an agent and item by item across them.
 - **Turns:** every turn has a name, `<session>.<n>`, numbered in the session's file. `braid log` lists them with what each did, and the status line names the newest.
 - **Forks:** `/braid:fork` prints the command that continues this session, another, or any turn of either, in a new window, in Claude Code or Codex; a fork, and a copy made with `/branch`, is saved as a session of its own.
 - **Titles and recaps:** the status line and `braid status` show what a session is about, and resuming a session shows it too.
