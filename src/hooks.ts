@@ -1,11 +1,14 @@
-// Agent hooks, Claude Code's and Codex's: SessionStart registers the session,
-// Stop saves each turn, SessionEnd saves the rest and checks the session.
-import { appendFileSync } from "node:fs";
+// Agent hooks, Claude Code's and Codex's: SessionStart registers the session
+// and saves what sessions that crashed left unsaved, PostToolUse saves a turn
+// as it goes, Stop saves each turn, SessionEnd saves the rest and checks the
+// session.
+import { spawn } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ago } from "./records.ts";
 import { repoFor, type Repo } from "./repo.ts";
 import { recordSession } from "./registry.ts";
-import { register, save } from "./save.ts";
+import { behind, register, save } from "./save.ts";
 import { cliPath, writePointer } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
 import type { Format } from "./transcript.ts";
@@ -23,6 +26,14 @@ export interface HookInput {
 
 const where = (input: HookInput, session: string): Repo => repoFor(session, input.cwd ?? process.cwd());
 
+/** Runs braid in the background, so the hook returns at once. BRAID_BACKGROUND=0 runs nothing there, as braid's tests do. */
+export function inBackground(args: string[], input?: HookInput): void {
+  if (process.env.BRAID_BACKGROUND === "0") return;
+  const cwd = input?.cwd && existsSync(input.cwd) ? input.cwd : undefined;
+  const env = { ...process.env, ...(input ? { BRAID_HOOK_INPUT: JSON.stringify(input) } : {}) };
+  spawn(process.execPath, [cliPath(), ...args], { detached: true, stdio: "ignore", cwd, env }).unref();
+}
+
 export function sessionStart(input: HookInput): string {
   const session = input.session_id;
   if (!session) return "";
@@ -36,6 +47,8 @@ export function sessionStart(input: HookInput): string {
   }
   const repo = where(input, session);
   register(repo, session, transcript, input.agent, input.cwd);
+  // A session that crashed, or was force-quit, before its hooks saved its last lines: saved now, whichever it was.
+  inBackground(["save", "--pending"]);
   // Coming back to a session: what it is about, for you. The model gets none of it.
   const message = input.source === "resume" ? recap(repo, session, input.agent ?? "claude-code") : "";
   return message ? JSON.stringify({ systemMessage: message }) : "";
@@ -60,6 +73,25 @@ export function stop(input: HookInput): string {
   if (!session) return "";
   const repo = where(input, session);
   save(repo, session, input.transcript_path ?? undefined, { agent: input.agent });
+  return "";
+}
+
+/**
+ * PostToolUse: what the turn wrote so far, saved in the background, at most
+ * every ten seconds, so a crash or a force quit in the middle of a turn loses
+ * at most those seconds, which the next session's start saves.
+ */
+export function postToolUse(input: HookInput): string {
+  const session = input.session_id;
+  if (!session) return "";
+  const repo = where(input, session);
+  const state = loadState(repo, session);
+  if (!state || !behind(state, input.transcript_path ?? state.transcript)) return "";
+  const stamp = join(repo.cache, `${session}.saving`);
+  if (existsSync(stamp) && Date.now() - statSync(stamp).mtimeMs < 10_000) return "";
+  mkdirSync(repo.cache, { recursive: true });
+  writeFileSync(stamp, "");
+  inBackground(["hook", "stop", ...(input.agent ? ["--agent", input.agent] : []), "--detached"], input);
   return "";
 }
 

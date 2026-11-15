@@ -38,12 +38,13 @@ const codexHome = () => process.env.CODEX_HOME || join(homedir(), ".codex");
 type HookGroup = { matcher?: string; hooks?: { type?: string; command?: string; timeout?: number }[] };
 
 /** braid's own hook commands in Codex's hooks.json, by the command they run. */
-const isBraidHook = (h: { command?: string }) => / hook (session-start|stop|session-end) --agent codex$/.test(h.command ?? "");
+const isBraidHook = (h: { command?: string }) => / hook (session-start|post-tool-use|stop|session-end) --agent codex$/.test(h.command ?? "");
 
 /**
  * braid's hooks in Codex's hooks.json, when Codex is on this machine: Stop
- * saves each turn, SessionStart registers a session, SessionEnd saves the rest
- * and checks it (Codex gives it three seconds, so braid does that work after).
+ * saves each turn, PostToolUse a turn as it goes, SessionStart registers a
+ * session and saves what crashed sessions left unsaved, SessionEnd saves the
+ * rest and checks it (Codex gives it three seconds, so braid does that work after).
  * `undo` takes them out. Other hooks stay as they are.
  */
 function codexHooks(bin: string, undo: boolean): string[] {
@@ -67,6 +68,7 @@ function codexHooks(bin: string, undo: boolean): string[] {
     const command = (name: string) => `${shellWord(bin)} hook ${name} --agent codex`;
     const add = (event: string, name: string, timeout: number) => (hooks[event] = [...(hooks[event] ?? []), { hooks: [{ type: "command", command: command(name), timeout }] }]);
     add("SessionStart", "session-start", 15);
+    add("PostToolUse", "post-tool-use", 10);
     add("Stop", "stop", 30);
     add("SessionEnd", "session-end", 3);
   }

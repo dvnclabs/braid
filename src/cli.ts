@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
-import { sessionEnd, sessionStart, stop } from "./hooks.ts";
+import { postToolUse, sessionEnd, sessionStart, stop } from "./hooks.ts";
 import { allSessions, resolve } from "./load.ts";
 import { migrate, waitingToMove } from "./migrate.ts";
 import { claudeEnv, harness } from "./harness.ts";
@@ -11,7 +11,7 @@ import { launchDir, replay, shellWord } from "./replay.ts";
 import { currentAgent, currentSession, knownSessions, recordSession, transcriptOf } from "./registry.ts";
 import { ago, describe, isTurn, printable, promptLine } from "./records.ts";
 import { configDir, repoAt, repoFor, type Repo } from "./repo.ts";
-import { save, saveAll, unsaved } from "./save.ts";
+import { save, saveAll, savePending, unsaved } from "./save.ts";
 import { cliPath, init, setup } from "./setup.ts";
 import { loadState, saveState } from "./state.ts";
 import { computeStatus } from "./status.ts";
@@ -44,6 +44,8 @@ Codex's $CODEX_THREAD_ID), or the one named with --session <id>.
   braid save                  save this session now (the Stop hook does this after each turn)
     --all                     every session on this machine that ran in this project, in any of its
                               worktrees, as those from before braid was installed
+    --pending                 every session on this machine its agent wrote more of since braid last
+                              saved it, as one that crashed; each session's start runs this
   braid migrate               move conversations from braid 0.1's ~/.braid into their projects
 
   <session> is a session id or its first characters, or the name you gave it with /rename.
@@ -122,6 +124,7 @@ function main(argv: string[]): number {
       instruction: { type: "string" },
       strategy: { type: "string" },
       all: { type: "boolean" },
+      pending: { type: "boolean" },
       undo: { type: "boolean" },
       new: { type: "boolean" },
       records: { type: "boolean" },
@@ -146,7 +149,7 @@ function main(argv: string[]): number {
           spawn(process.execPath, [cliPath(), "hook", "session-end", "--agent", agent, "--detached"], { detached: true, stdio: "ignore", env }).unref();
           return 0;
         }
-        const handlers: Record<string, (i: typeof input) => string> = { "session-start": sessionStart, stop, "session-end": sessionEnd };
+        const handlers: Record<string, (i: typeof input) => string> = { "session-start": sessionStart, "post-tool-use": postToolUse, stop, "session-end": sessionEnd };
         out(handlers[args[0] ?? ""]?.({ ...input, ...(agent ? { agent } : {}) }) ?? "");
       } catch (err) {
         logError(err);
@@ -189,6 +192,12 @@ function main(argv: string[]): number {
       for (const note of migrate()) out(`braid: ${note}`);
       return 0;
     case "save": {
+      if (opts.pending === true) {
+        // Sessions that crashed or were force-quit before their hooks saved their last lines.
+        for (const r of savePending())
+          out(r.error ? `braid: ${r.session.slice(0, 8)} not saved: ${r.error}` : `braid: saved ${r.added} records of ${named(r.repo, r.session)}, which its agent wrote after braid last saved it`);
+        return 0;
+      }
       if (opts.all === true) {
         const { project, saved } = saveAll(process.cwd());
         if (saved.length === 0) {

@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { spawn, spawnSync as spawnSync3 } from "node:child_process";
-import { appendFileSync as appendFileSync3, existsSync as existsSync14, mkdirSync as mkdirSync6, readFileSync as readFileSync9, statSync as statSync2 } from "node:fs";
+import { spawn as spawn2, spawnSync as spawnSync3 } from "node:child_process";
+import { appendFileSync as appendFileSync3, existsSync as existsSync15, mkdirSync as mkdirSync7, readFileSync as readFileSync9, statSync as statSync5 } from "node:fs";
 import { basename as basename2, join as join12 } from "node:path";
 import { parseArgs } from "node:util";
 
 // src/hooks.ts
-import { appendFileSync as appendFileSync2 } from "node:fs";
+import { spawn } from "node:child_process";
+import { appendFileSync as appendFileSync2, existsSync as existsSync11, mkdirSync as mkdirSync6, statSync as statSync4, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname4, join as join9 } from "node:path";
 
 // src/redact.ts
@@ -419,6 +420,10 @@ function readEntry(session) {
     return void 0;
   }
 }
+function knownEntries() {
+  const dir = join(process.env.XDG_DATA_HOME || join(homedir2(), ".local", "share"), "braid", "sessions");
+  return list(dir).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -".json".length)).map((session) => ({ session, ...readEntry(session) }));
+}
 function knownSessions(prefix) {
   if (!/^[A-Za-z0-9-]{4,80}$/.test(prefix)) return [];
   const dir = join(process.env.XDG_DATA_HOME || join(homedir2(), ".local", "share"), "braid", "sessions");
@@ -469,7 +474,7 @@ function configDir() {
 }
 
 // src/save.ts
-import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync4 } from "node:fs";
+import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join as join5 } from "node:path";
 
@@ -2126,7 +2131,7 @@ function turnDetail(records) {
 }
 
 // src/version.ts
-var VERSION = "0.4.4";
+var VERSION = "0.4.5";
 
 // src/save.ts
 function actorId(repo) {
@@ -2329,6 +2334,31 @@ function projectSessions(cwd) {
 function unsaved(cwd) {
   return projectSessions(cwd).sessions.filter((s) => !((loadState(repoFor(s.session, s.cwd), s.session)?.chunks ?? 0) > 0));
 }
+function behind(state, transcript = state.transcript) {
+  if (!transcript || !existsSync6(transcript)) return false;
+  if (statSync2(transcript).size > (state.cursor?.offset ?? 0)) return true;
+  if (state.harness !== "claude-code") return false;
+  const dir = join5(transcript.replace(/\.jsonl$/, ""), "subagents");
+  if (!existsSync6(dir)) return false;
+  return readdirSync2(dir).some((f) => {
+    const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(f)?.[1];
+    return !!id && statSync2(join5(dir, f)).size > (state.agents?.[id]?.cursor.offset ?? 0);
+  });
+}
+function savePending() {
+  return knownEntries().flatMap(({ session, project }) => {
+    if (!project || !existsSync6(join5(project, ".braid"))) return [];
+    const repo = repoAt(project);
+    const state = loadState(repo, session);
+    const continued = state?.written !== void 0 && !!state.transcript && existsSync6(state.transcript) && statSync2(state.transcript).size > state.written;
+    if (!state || !(state.chunks > 0 || state.ran || continued) || !behind(state)) return [];
+    try {
+      return [{ session, repo, ...save(repo, session) }];
+    } catch (err) {
+      return [{ session, repo, added: 0, error: err instanceof Error ? err.message : String(err) }];
+    }
+  });
+}
 
 // src/setup.ts
 import { chmodSync, existsSync as existsSync8, mkdirSync as mkdirSync4, readFileSync as readFileSync5, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync5 } from "node:fs";
@@ -2338,7 +2368,7 @@ import { fileURLToPath } from "node:url";
 
 // src/replay.ts
 import { randomUUID } from "node:crypto";
-import { closeSync as closeSync3, existsSync as existsSync7, openSync as openSync3, readSync as readSync3, realpathSync as realpathSync2 } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync7, openSync as openSync3, readSync as readSync3, realpathSync as realpathSync2, statSync as statSync3 } from "node:fs";
 function launchDir(transcript) {
   if (!transcript || !existsSync7(transcript)) return void 0;
   const buf = Buffer.alloc(256 * 1024);
@@ -2492,6 +2522,7 @@ function replay(repo, found, to, opts = {}) {
   const upTo = own.findIndex((r) => r.id === head);
   const turn = own.slice(0, upTo + 1).filter(startsTurn).length;
   state.forkedFrom = { session: found.session, turn };
+  state.written = statSync3(file2).size;
   state.turn = turn;
   Object.assign(state, about(head === lastTurn(read) ? read : own.slice(0, upTo + 1), state));
   saveState(target, state);
@@ -2526,7 +2557,7 @@ cli="\${XDG_CONFIG_HOME:-$HOME/.config}/braid/cli"
 exec node "$(cat "$cli")" "$@"
 `;
 var codexHome = () => process.env.CODEX_HOME || join6(homedir4(), ".codex");
-var isBraidHook = (h) => / hook (session-start|stop|session-end) --agent codex$/.test(h.command ?? "");
+var isBraidHook = (h) => / hook (session-start|post-tool-use|stop|session-end) --agent codex$/.test(h.command ?? "");
 function codexHooks(bin, undo) {
   const home = codexHome();
   if (!existsSync8(home)) return [];
@@ -2548,6 +2579,7 @@ function codexHooks(bin, undo) {
     const command = (name) => `${shellWord(bin)} hook ${name} --agent codex`;
     const add = (event, name, timeout) => hooks[event] = [...hooks[event] ?? [], { hooks: [{ type: "command", command: command(name), timeout }] }];
     add("SessionStart", "session-start", 15);
+    add("PostToolUse", "post-tool-use", 10);
     add("Stop", "stop", 30);
     add("SessionEnd", "session-end", 3);
   }
@@ -3071,6 +3103,12 @@ function verify(repo, session) {
 
 // src/hooks.ts
 var where = (input, session) => repoFor(session, input.cwd ?? process.cwd());
+function inBackground(args, input) {
+  if (process.env.BRAID_BACKGROUND === "0") return;
+  const cwd = input?.cwd && existsSync11(input.cwd) ? input.cwd : void 0;
+  const env = { ...process.env, ...input ? { BRAID_HOOK_INPUT: JSON.stringify(input) } : {} };
+  spawn(process.execPath, [cliPath(), ...args], { detached: true, stdio: "ignore", cwd, env }).unref();
+}
 function sessionStart(input) {
   const session = input.session_id;
   if (!session) return "";
@@ -3086,6 +3124,7 @@ export PATH="${bin}:$PATH"
   }
   const repo = where(input, session);
   register(repo, session, transcript, input.agent, input.cwd);
+  inBackground(["save", "--pending"]);
   const message = input.source === "resume" ? recap(repo, session, input.agent ?? "claude-code") : "";
   return message ? JSON.stringify({ systemMessage: message }) : "";
 }
@@ -3105,6 +3144,19 @@ function stop(input) {
   save(repo, session, input.transcript_path ?? void 0, { agent: input.agent });
   return "";
 }
+function postToolUse(input) {
+  const session = input.session_id;
+  if (!session) return "";
+  const repo = where(input, session);
+  const state = loadState(repo, session);
+  if (!state || !behind(state, input.transcript_path ?? state.transcript)) return "";
+  const stamp = join9(repo.cache, `${session}.saving`);
+  if (existsSync11(stamp) && Date.now() - statSync4(stamp).mtimeMs < 1e4) return "";
+  mkdirSync6(repo.cache, { recursive: true });
+  writeFileSync7(stamp, "");
+  inBackground(["hook", "stop", ...input.agent ? ["--agent", input.agent] : [], "--detached"], input);
+  return "";
+}
 function sessionEnd(input) {
   const session = input.session_id;
   if (!session) return "";
@@ -3119,9 +3171,9 @@ function sessionEnd(input) {
 }
 
 // src/load.ts
-import { existsSync as existsSync11, readdirSync as readdirSync5 } from "node:fs";
+import { existsSync as existsSync12, readdirSync as readdirSync5 } from "node:fs";
 function allSessions(repo) {
-  if (!existsSync11(repo.sessions)) return [];
+  if (!existsSync12(repo.sessions)) return [];
   return readdirSync5(repo.sessions).filter((f) => f.endsWith(".json")).flatMap((f) => {
     const state = loadState(repo, f.slice(0, -".json".length));
     return state ? [{ session: state.session }] : [];
@@ -3138,7 +3190,7 @@ function resolve3(repo, target) {
 }
 
 // src/migrate.ts
-import { existsSync as existsSync12, readdirSync as readdirSync6, readFileSync as readFileSync7 } from "node:fs";
+import { existsSync as existsSync13, readdirSync as readdirSync6, readFileSync as readFileSync7 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { join as join10 } from "node:path";
 var oldHome = () => process.env.BRAID_HOME || join10(homedir6(), ".braid");
@@ -3159,11 +3211,11 @@ var OBSOLETE = ["code", "published", "withheld", "terms", "edits", "private", "r
 function migrate(home = oldHome()) {
   const store = join10(home, ".git", "braid", "store");
   const states = join10(home, ".git", "braid", "sessions");
-  if (!existsSync12(join10(store, "HEAD"))) return [`nothing to move: ${home} holds no conversations of braid 0.1`];
+  if (!existsSync13(join10(store, "HEAD"))) return [`nothing to move: ${home} holds no conversations of braid 0.1`];
   const opts = { gitDir: store };
   const old = (session) => {
     const file2 = join10(states, `${session}.json`);
-    return existsSync12(file2) ? JSON.parse(readFileSync7(file2, "utf8")) : void 0;
+    return existsSync13(file2) ? JSON.parse(readFileSync7(file2, "utf8")) : void 0;
   };
   const byConv = /* @__PURE__ */ new Map();
   for (const { ref } of forEachRef(["refs/sessions/"], opts)) {
@@ -3173,11 +3225,11 @@ function migrate(home = oldHome()) {
   const moved = /* @__PURE__ */ new Map();
   let kept = 0;
   for (const [conv, sessions] of byConv) {
-    const code = [conv, ...sessions.map((s) => s.session)].map((id) => old(id)?.code).find((c) => typeof c === "string" && existsSync12(c));
+    const code = [conv, ...sessions.map((s) => s.session)].map((id) => old(id)?.code).find((c) => typeof c === "string" && existsSync13(c));
     const project = projectOf(code ?? homedir6());
     const repo = repoAt(project);
     for (const { session, ref } of sessions) {
-      if (existsSync12(sessionFile(repo, session)) || (loadState(repo, session)?.chunks ?? 0) > 0) {
+      if (existsSync13(sessionFile(repo, session)) || (loadState(repo, session)?.chunks ?? 0) > 0) {
         kept++;
         continue;
       }
@@ -3192,7 +3244,7 @@ function migrate(home = oldHome()) {
     }
   }
   const notes = [...moved].map(([project, n]) => `moved ${n} session${n === 1 ? "" : "s"} into ${join10(project, ".braid")}`);
-  const ran = new Set([...byConv.values()].flat().map((s) => old(s.session)?.code).filter((c) => typeof c === "string" && existsSync12(c)));
+  const ran = new Set([...byConv.values()].flat().map((s) => old(s.session)?.code).filter((c) => typeof c === "string" && existsSync13(c)));
   for (const code of ran) notes.push(...removeOldGitHooks(code));
   if (kept) notes.push(kept === 1 ? "left 1 session already moved as it is" : `left ${kept} sessions already moved as they are`);
   if (!notes.length) notes.push("nothing to move");
@@ -3201,7 +3253,7 @@ function migrate(home = oldHome()) {
 }
 function waitingToMove(home = oldHome()) {
   const states = join10(home, ".git", "braid", "sessions");
-  if (!existsSync12(join10(home, ".git", "braid", "store", "HEAD")) || !existsSync12(states)) return false;
+  if (!existsSync13(join10(home, ".git", "braid", "store", "HEAD")) || !existsSync13(states)) return false;
   return readdirSync6(states).some((f) => {
     if (!f.endsWith(".json")) return false;
     try {
@@ -3235,11 +3287,11 @@ function render(s, paint = plain) {
 
 // src/statusline.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync13, readFileSync as readFileSync8 } from "node:fs";
+import { existsSync as existsSync14, readFileSync as readFileSync8 } from "node:fs";
 import { join as join11 } from "node:path";
 function previous(stdin) {
   const file2 = join11(configDir(), "statusline.json");
-  if (!existsSync13(file2)) return "";
+  if (!existsSync14(file2)) return "";
   const { previous: previous2 } = JSON.parse(readFileSync8(file2, "utf8"));
   if (!previous2 || isBraidLine(previous2)) return "";
   const r = spawnSync2("sh", ["-c", previous2], { input: stdin, encoding: "utf8", timeout: 3e3 });
@@ -3291,6 +3343,8 @@ Codex's $CODEX_THREAD_ID), or the one named with --session <id>.
   braid save                  save this session now (the Stop hook does this after each turn)
     --all                     every session on this machine that ran in this project, in any of its
                               worktrees, as those from before braid was installed
+    --pending                 every session on this machine its agent wrote more of since braid last
+                              saved it, as one that crashed; each session's start runs this
   braid migrate               move conversations from braid 0.1's ~/.braid into their projects
 
   <session> is a session id or its first characters, or the name you gave it with /rename.
@@ -3305,7 +3359,7 @@ function readStdin() {
 }
 function logError(err) {
   try {
-    mkdirSync6(configDir(), { recursive: true });
+    mkdirSync7(configDir(), { recursive: true });
     appendFileSync3(join12(configDir(), "errors.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${err instanceof Error ? err.stack : String(err)}
 `);
   } catch {
@@ -3334,7 +3388,7 @@ function oneSession(repo, target, current) {
   const found = resolve3(repo, target);
   if (found.length === 1) return { repo, session: found[0].session };
   if (found.length > 1) throw new Error(`${target} matches ${found.length} sessions; name one (braid sessions lists them)`);
-  const elsewhere = knownSessions(target).filter((k) => k.project && existsSync14(join12(k.project, ".braid")));
+  const elsewhere = knownSessions(target).filter((k) => k.project && existsSync15(join12(k.project, ".braid")));
   if (elsewhere.length === 1) return { repo: repoAt(elsewhere[0].project), session: elsewhere[0].session };
   throw new Error(elsewhere.length ? `${target} matches ${elsewhere.length} sessions; name one` : `no session matches ${target}; braid sessions lists them`);
 }
@@ -3355,6 +3409,7 @@ function main(argv) {
       instruction: { type: "string" },
       strategy: { type: "string" },
       all: { type: "boolean" },
+      pending: { type: "boolean" },
       undo: { type: "boolean" },
       new: { type: "boolean" },
       records: { type: "boolean" },
@@ -3373,10 +3428,10 @@ function main(argv) {
         const agent = str("agent") === "codex" ? "codex" : void 0;
         if (args[0] === "session-end" && agent && opts.detached !== true) {
           const env = { ...process.env, BRAID_HOOK_INPUT: JSON.stringify(input) };
-          spawn(process.execPath, [cliPath(), "hook", "session-end", "--agent", agent, "--detached"], { detached: true, stdio: "ignore", env }).unref();
+          spawn2(process.execPath, [cliPath(), "hook", "session-end", "--agent", agent, "--detached"], { detached: true, stdio: "ignore", env }).unref();
           return 0;
         }
-        const handlers = { "session-start": sessionStart, stop, "session-end": sessionEnd };
+        const handlers = { "session-start": sessionStart, "post-tool-use": postToolUse, stop, "session-end": sessionEnd };
         out(handlers[args[0] ?? ""]?.({ ...input, ...agent ? { agent } : {} }) ?? "");
       } catch (err) {
         logError(err);
@@ -3402,7 +3457,7 @@ function main(argv) {
         for (const note of migrate()) if (/^(moved|took) /.test(note)) out(`braid: ${note}`);
       }
       const transcript = str("transcript") ?? (current ? transcriptOf(current) : void 0);
-      if (current && transcript && existsSync14(transcript)) {
+      if (current && transcript && existsSync15(transcript)) {
         const repo = here();
         recordSession(current, { transcript });
         const r = save(repo, current, transcript);
@@ -3416,6 +3471,11 @@ function main(argv) {
       for (const note of migrate()) out(`braid: ${note}`);
       return 0;
     case "save": {
+      if (opts.pending === true) {
+        for (const r2 of savePending())
+          out(r2.error ? `braid: ${r2.session.slice(0, 8)} not saved: ${r2.error}` : `braid: saved ${r2.added} records of ${named(r2.repo, r2.session)}, which its agent wrote after braid last saved it`);
+        return 0;
+      }
       if (opts.all === true) {
         const { project, saved } = saveAll(process.cwd());
         if (saved.length === 0) {
@@ -3457,7 +3517,7 @@ function main(argv) {
     }
     case "sessions": {
       const repo = here();
-      const rows = allSessions(repo).map((f) => ({ f, state: loadState(repo, f.session), file: sessionFile(repo, f.session) })).filter((x) => x.state && x.state.chunks > 0 && existsSync14(x.file)).map((x) => ({ ...x, at: statSync2(x.file).mtime.toISOString() })).sort((a, b) => b.at.localeCompare(a.at));
+      const rows = allSessions(repo).map((f) => ({ f, state: loadState(repo, f.session), file: sessionFile(repo, f.session) })).filter((x) => x.state && x.state.chunks > 0 && existsSync15(x.file)).map((x) => ({ ...x, at: statSync5(x.file).mtime.toISOString() })).sort((a, b) => b.at.localeCompare(a.at));
       if (rows.length === 0) out(`braid: no saved sessions in ${repo.dir}`);
       for (const { f, state, at } of rows) {
         const where2 = state.ran && state.ran !== repo.top ? `, in ${basename2(state.ran)}` : "";
@@ -3499,7 +3559,7 @@ braid fork --new writes another.` : `braid: wrote ${what} as a new ${to.title} s
   ${start(to.resume(r.cwd, r.session))}`;
       if (current) {
         const transcript = loadState(repo, current)?.transcript ?? transcriptOf(current);
-        if (transcript && existsSync14(transcript)) save(repo, current, transcript);
+        if (transcript && existsSync15(transcript)) save(repo, current, transcript);
       }
       const m = target ? TURN.exec(target) : null;
       if (m && !(m[1] && resolve3(repo, target).length)) {

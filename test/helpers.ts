@@ -26,6 +26,8 @@ export function sandbox(): Env {
     HOME: home,
     XDG_CONFIG_HOME: join(home, ".config"),
     BRAID_STATUS_NO_PR: "1",
+    // Nothing runs in the background unless a test asks: what each step saves stays exact.
+    BRAID_BACKGROUND: "0",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_TERMINAL_PROMPT: "0",
   };

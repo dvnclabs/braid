@@ -138,6 +138,15 @@ export function readEntry(session: string): Entry | undefined {
   }
 }
 
+/** Every session braid has met on this machine, with its transcript and the project that keeps it. */
+export function knownEntries(): ({ session: string } & Entry)[] {
+  const dir = join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "braid", "sessions");
+  return list(dir)
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => f.slice(0, -".json".length))
+    .map((session) => ({ session, ...readEntry(session) }));
+}
+
 /** Sessions on this machine whose id starts with `prefix`, with the project that keeps each. */
 export function knownSessions(prefix: string): { session: string; project?: string }[] {
   if (!/^[A-Za-z0-9-]{4,80}$/.test(prefix)) return [];

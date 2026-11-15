@@ -22,7 +22,7 @@ You need Node 22 or later and git. In Claude Code:
 
 `/braid:init` installs the `braid` command and braid's part of the status line, and saves the conversation you run it in, from its first turn. From then on braid saves every session after each turn. `braid save --all` saves the project's sessions from before then: every Claude Code and Codex session on the machine that ran in the project, in any of its worktrees. braid init also moves conversations braid 0.1 kept in `~/.braid` into the projects they ran in.
 
-When Codex is on the machine, `braid init` also adds braid's hooks to `~/.codex/hooks.json`, so braid saves Codex sessions the same way. Codex runs a new hook only once you trust it: open `/hooks` in Codex once and trust braid's three. Without Claude Code, clone this repository and run `node dist/braid.mjs init` in a terminal.
+When Codex is on the machine, `braid init` also adds braid's hooks to `~/.codex/hooks.json`, so braid saves Codex sessions the same way. Codex runs a new hook only once you trust it: open `/hooks` in Codex once and trust braid's four. Without Claude Code, clone this repository and run `node dist/braid.mjs init` in a terminal.
 
 ## Where sessions are kept
 
@@ -92,7 +92,7 @@ braid verify 9e36aa15.41: ok
 
 ## How it works
 
-braid's hooks in Claude Code and Codex save each turn when it ends: they read only what the agent wrote since the last save, convert it with ATXF's converters, and append it to the session's file. A fork writes the conversation as the target agent writes its own sessions, so the agent resumes it as it resumes its own. braid calls no model of its own. [docs/design.md](docs/design.md) covers the model, storage, turns, forks and the format.
+braid's hooks in Claude Code and Codex save each turn when it ends: they read only what the agent wrote since the last save, convert it with ATXF's converters, and append it to the session's file. During a long turn, braid also saves in the background after tool calls, at most every ten seconds. When an agent crashes or is force-quit before its hooks run, the next session to start on the machine saves what it wrote, so everything the agent wrote to its transcript ends up in braid's file. A fork writes the conversation as the target agent writes its own sessions, so the agent resumes it as it resumes its own. braid calls no model of its own. [docs/design.md](docs/design.md) covers the model, storage, turns, forks and the format.
 
 ## Development
 

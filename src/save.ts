@@ -1,12 +1,12 @@
 // Saving: append what an agent wrote since the last save to the session's file.
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import { appendRecords, readAgents, readRecords } from "./store.ts";
 import { config } from "./git.ts";
 import { about, lastTurn, withBraid, type Actor, type Rec } from "./records.ts";
-import { checkoutOf, ensureStore, projectOf, repoFor, type Repo } from "./repo.ts";
-import { recordSession, sessionsOnMachine, type OnMachine } from "./registry.ts";
+import { checkoutOf, ensureStore, projectOf, repoAt, repoFor, type Repo } from "./repo.ts";
+import { knownEntries, recordSession, sessionsOnMachine, type OnMachine } from "./registry.ts";
 import { loadState, newState, saveState, withLock, type SessionState } from "./state.ts";
 import { formatOf, intact, readWindow, START, type Format, type Window } from "./transcript.ts";
 import { startsTurn } from "./turns.ts";
@@ -281,4 +281,40 @@ export function projectSessions(cwd: string): { project: string; sessions: OnMac
 /** Sessions of the project `cwd` is in that ran on this machine and braid has not saved, as those from before it was installed. */
 export function unsaved(cwd: string): OnMachine[] {
   return projectSessions(cwd).sessions.filter((s) => !((loadState(repoFor(s.session, s.cwd), s.session)?.chunks ?? 0) > 0));
+}
+
+/** Whether a session's agent wrote lines since braid last saved it: to its transcript, or to a subagent's. */
+export function behind(state: SessionState, transcript = state.transcript): boolean {
+  if (!transcript || !existsSync(transcript)) return false;
+  if (statSync(transcript).size > (state.cursor?.offset ?? 0)) return true;
+  if (state.harness !== "claude-code") return false;
+  const dir = join(transcript.replace(/\.jsonl$/, ""), "subagents");
+  if (!existsSync(dir)) return false;
+  return readdirSync(dir).some((f) => {
+    const id = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(f)?.[1];
+    return !!id && statSync(join(dir, f)).size > (state.agents?.[id]?.cursor.offset ?? 0);
+  });
+}
+
+/**
+ * `braid save --pending`: every session on this machine that its agent wrote
+ * more of since braid last saved it, as one that crashed or was force-quit
+ * before its hooks ran, saved now. A session counts once it ran: saved before,
+ * registered by its agent's hook, or, for a fork braid wrote, grown past what
+ * braid wrote, as where braid's hooks do not run; a fork nobody opened does
+ * not. Sessions whose project's .braid folder is gone stay as they are.
+ */
+export function savePending(): Saved[] {
+  return knownEntries().flatMap(({ session, project }): Saved[] => {
+    if (!project || !existsSync(join(project, ".braid"))) return [];
+    const repo = repoAt(project);
+    const state = loadState(repo, session);
+    const continued = state?.written !== undefined && !!state.transcript && existsSync(state.transcript) && statSync(state.transcript).size > state.written;
+    if (!state || !(state.chunks > 0 || state.ran || continued) || !behind(state)) return [];
+    try {
+      return [{ session, repo, ...save(repo, session) }];
+    } catch (err) {
+      return [{ session, repo, added: 0, error: err instanceof Error ? err.message : String(err) }];
+    }
+  });
 }

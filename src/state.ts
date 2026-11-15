@@ -35,6 +35,8 @@ export interface SessionState {
   turn?: number;
   /** The checkout the session ran in: one of the project's worktrees, or the project itself. */
   ran?: string;
+  /** For a fork braid wrote: the size of the file it wrote, so a fork continued where no hook of braid's ran is told from one nobody opened. */
+  written?: number;
 }
 
 function path(repo: Repo, session: string): string {

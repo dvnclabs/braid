@@ -513,6 +513,7 @@ test("Codex sessions save as they happen, from braid's hooks in Codex, and conti
   const installed = {
     Stop: ["notify-me 5", "braid hook stop --agent codex 30"],
     SessionStart: ["braid hook session-start --agent codex 15"],
+    PostToolUse: ["braid hook post-tool-use --agent codex 10"],
     SessionEnd: ["braid hook session-end --agent codex 3"],
   };
   assert.deepEqual(commands(), installed);
@@ -1050,4 +1051,68 @@ test("braid save --all saves every session of the project on this machine, in an
   assert.match(again, /^ {2}5b0e2c1a\.2 +financial-plan {2}\(2 records saved\)$/m);
   assert.doesNotMatch(braid(env, repo, ["init"]).stdout, /earlier session/);
   assert.equal(braid(env, elsewhere, ["save", "--all"]).stdout.split("\n")[0], `braid: 1 session of ${realpathSync(elsewhere)}, kept in ${join(realpathSync(elsewhere), ".braid", "sessions")}; 1 saved now, 0 up to date already`);
+});
+
+test("a session that crashes or is force-quit loses nothing: braid saves during the turn, and the next session's start saves the rest", () => {
+  const s = sandbox();
+  const repo = realpathSync(clone(s, "max", "max@example.com"));
+  must(s.env, repo, "git", ["commit", "--quiet", "--allow-empty", "-m", "initial"]);
+  braid(s.env, repo, ["init"]);
+  const background = { BRAID_BACKGROUND: "1" };
+  const t = new Transcript(s.root, ALICE, repo);
+  const hookIn = (session: string, tr: Transcript) => JSON.stringify({ session_id: session, transcript_path: tr.path, cwd: repo });
+  // Each message saved: its text, or the tool it calls.
+  const texts = () =>
+    saved(repo, ALICE)
+      .filter((r) => r.type === "message")
+      .map((r) => (typeof r.content === "string" ? r.content : r.content.map((c: { type: string; text?: string; name?: string }) => (c.type === "text" ? c.text : c.type === "tool_call" ? `→ ${c.name}` : "")).join("")));
+  const eventually = (what: string, ok: () => boolean) => {
+    for (const until = Date.now() + 10_000; Date.now() < until; ) {
+      if (ok()) return;
+      spawnSync("sleep", ["0.1"]);
+    }
+    assert.fail(`${what}: ${JSON.stringify(texts())}`);
+  };
+  braid(s.env, repo, ["hook", "session-start"], hookIn(ALICE, t));
+  t.user("Plan the cache.");
+  t.assistant("Use an LRU.");
+  braid(s.env, repo, ["hook", "stop"], hookIn(ALICE, t));
+
+  // In the middle of a turn, after a tool call: braid saves in the background, and the hook returns at once.
+  t.user("Write the cache.");
+  t.toolCall("Write", { file_path: join(repo, "cache.ts"), content: "export {}" }, "toolu_c1", "wrote cache.ts");
+  braid(s.env, repo, ["hook", "post-tool-use"], hookIn(ALICE, t), background);
+  eventually("saved after the tool call", () => texts().includes("wrote cache.ts"));
+  // Ten seconds go by before another: one tool call after another does not start a save each.
+  t.toolCall("Edit", { file_path: join(repo, "app.ts"), old_string: "a", new_string: "b" }, "toolu_c2", "edited app.ts");
+  braid(s.env, repo, ["hook", "post-tool-use"], hookIn(ALICE, t), background);
+  spawnSync("sleep", ["1"]);
+  assert.ok(!texts().includes("edited app.ts"), "not saved again within ten seconds");
+
+  // The agent answers, and crashes before its Stop hook: no hook of this session runs again.
+  t.assistant("Wrote cache.ts and used it in app.ts.");
+  // Any session's start, here another's, saves what the crashed one wrote since braid last saved it.
+  const other = new Transcript(s.root, BOB, repo);
+  braid(s.env, repo, ["hook", "session-start"], hookIn(BOB, other), background);
+  eventually("saved by the next session's start", () => texts().includes("Wrote cache.ts and used it in app.ts."));
+  assert.deepEqual(texts(), ["Plan the cache.", "Use an LRU.", "Write the cache.", "→ Write", "wrote cache.ts", "→ Edit", "edited app.ts", "Wrote cache.ts and used it in app.ts."]);
+  assert.equal(braid(s.env, repo, ["status", "--session", ALICE]).stdout.split("\n")[0], "braid · 5b0e2c1a.2 · Plan the cache.");
+  const v = braid(s.env, repo, ["verify", "--session", ALICE]);
+  assert.equal(v.status, 0, v.stdout);
+
+  // braid save --pending does the same, and says what it saved. A session saved to its last line is not pending, nor
+  // is a fork braid wrote that nobody opened.
+  t.user("And a TTL?");
+  const fork = /--resume (\S+)/.exec(braid(s.env, repo, ["fork", "5b0e2c1a.1", "--cwd", repo]).stdout)![1]!;
+  const pending = braid(s.env, repo, ["save", "--pending"]);
+  assert.equal(pending.stdout, "braid: saved 1 records of 5b0e2c1a.3, which its agent wrote after braid last saved it\n");
+  assert.equal(braid(s.env, repo, ["save", "--pending"]).stdout, "");
+  // A fork continued where braid's hooks do not run, as in a profile with braid's plugin turned off, grew past what braid
+  // wrote: it ran, and is saved, its history included.
+  const forkFile = join(s.env.HOME!, ".claude", "projects", repo.replace(/[^A-Za-z0-9]/g, "-"), `${fork}.jsonl`);
+  const lines = readFileSync(forkFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const last = lines.filter((l) => l.uuid).at(-1).uuid;
+  appendFileSync(forkFile, JSON.stringify({ parentUuid: last, isSidechain: false, type: "user", uuid: "f0000000-0000-4000-8000-0000000000f1", timestamp: "2026-11-15T10:00:00.000Z", cwd: repo, sessionId: fork, version: "2.1.319", message: { role: "user", content: "Try a TTL." } }) + "\n");
+  assert.match(braid(s.env, repo, ["save", "--pending"]).stdout, new RegExp(`^braid: saved \\d+ records of ${fork.slice(0, 8)}\\.2, which its agent wrote after braid last saved it\n$`));
+  assert.deepEqual(braid(s.env, repo, ["log", fork]).stdout.split("\n").filter(Boolean).map((l) => l.replace(/ +/g, " ")), [`${fork.slice(0, 8)}.1 Plan the cache.`, `${fork.slice(0, 8)}.2 Try a TTL.`]);
 });

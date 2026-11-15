@@ -3,7 +3,7 @@
 // on another machine, or as a second direction from the same point. Paths from
 // the source checkout are rewritten to this one.
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, openSync, readSync, realpathSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { claudeCode, uuidFor } from "@leostera/atxf/claude-code";
 import { readRecords } from "./store.ts";
 import { recordSession } from "./registry.ts";
@@ -260,6 +260,7 @@ export function replay(repo: Repo, found: Found, to: Harness, opts: { cwd?: stri
   const upTo = own.findIndex((r) => r.id === head);
   const turn = own.slice(0, upTo + 1).filter(startsTurn).length;
   state.forkedFrom = { session: found.session, turn };
+  state.written = statSync(file).size;
   // Until its first save counts the turns of its own file, a fork stands at the turn it forks from.
   state.turn = turn;
   // The fork is about what its source was about at the turn it forks from; from the newest, as it is now.
