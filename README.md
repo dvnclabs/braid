@@ -35,8 +35,11 @@ braid starts on autopilot: it does everything by itself and nothing leaves your 
 | `repo` | `auto` | the braid repository, which keeps every conversation apart from the code: `auto` is `~/.braid`; a path such as `~/work-convos` names another. |
 | `autocommit` | off | each commit the agent makes commits the conversation too. Off, you commit it with `/braid:commit` after `/braid:edit`. |
 | `autopush` | on in private repositories, off in public ones | off autopilot, `git push` publishes the committed part of the sessions behind the pushed commits. Off, `/braid:push` publishes. |
+| `git-hooks` | on | commits name the session that made them, with a `Braid-Session` trailer, so `autocommit` and `autopush` can follow them. Off, braid leaves git alone. |
+| `link` | `trailer` | how a commit names its sessions: `trailer`, a line in the commit message, or `store`, labels inside the sessions only. On autopilot, `store`. |
+| `remote` | `origin` | the remote `git push` publishes sessions to, and `braid fetch` reads them from. |
 
-`braid init --no-git-hooks` leaves git alone.
+`.braid/config.toml` lists every setting with what it does, the ones you have not set commented out at their defaults, and `~/.config/braid/config.toml` lists those you can set for yourself, across repositories.
 
 ## Use
 

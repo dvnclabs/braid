@@ -3642,28 +3642,67 @@ function visibility(repo) {
 }
 var TEMPLATE = (s) => [
   "# braid: efficient session manager. https://github.com/dvnclabs/braid",
-  "# autopilot: braid works on this machine only. It keeps conversations in the braid",
-  "#   repository, and never pushes, fetches or asks GitHub anything. false: git push can",
-  "#   publish them to this repository's remote, for teammates and pull request reviews.",
-  "# autofork: before a turn that changes a lot, braid marks a point to fork from",
-  "#   (braid fork @N). false: no points.",
-  '# repo: the braid repository conversations are kept in, apart from the code. "auto":',
-  '#   ~/.braid. A path, such as "~/work-convos": that git repository instead.',
+  "# Every setting braid reads here. braid init --<setting> or --no-<setting> changes one. Your own",
+  "# ~/.config/braid/config.toml can set autopilot, autofork, autocommit, autopush and repo over these.",
+  "",
+  "# autopilot: braid works on this machine only. It keeps conversations in the braid repository,",
+  "#   and never pushes, fetches or asks GitHub anything. false: git push can publish them to this",
+  "#   repository's remote, for teammates and pull request reviews.",
+  `autopilot = ${s.autopilot}`,
+  "",
+  "# autofork: before a turn that changes a lot (5 files edited, or 30 tool calls), braid marks the",
+  "#   conversation as it stood, a point to fork from (braid fork @N). Any turn forks by its name too",
+  "#   (braid fork <session>.<n>). false: no points.",
+  `autofork = ${s.autofork}`,
+  "",
+  '# repo: the braid repository conversations are kept in, apart from the code. "auto": ~/.braid.',
+  '#   A path, such as "~/work-convos": that git repository instead.',
+  `repo = "${s.repo}"`,
+  "",
   "# git-hooks: commits name the agent session that made them (a Braid-Session trailer), so",
   "#   autocommit and autopush can follow them. false: braid leaves git alone.",
-  "# autocommit: each commit the agent makes commits its conversation too. false: you commit",
-  "#   it with /braid:commit, after /braid:edit.",
-  "# autopush: git push publishes the committed part of the sessions behind the pushed",
-  "#   commits. false: publish with /braid:push.",
-  "# Your own ~/.config/braid/config.toml can set any of these over the repository's.",
-  '# link = "store" names sessions inside the sessions only, without a Braid-Session trailer.',
-  `autopilot = ${s.autopilot}`,
-  `autofork = ${s.autofork}`,
-  `repo = "${s.repo}"`,
   `git-hooks = ${s["git-hooks"]}`,
+  "",
+  "# autocommit: each commit the agent makes commits its conversation too. false: you commit it",
+  "#   with /braid:commit, after /braid:edit.",
   `autocommit = ${s.autocommit}`,
+  "",
+  "# autopush: git push publishes the committed part of the sessions behind the pushed commits.",
+  "#   false: publish with /braid:push. Off on autopilot. Leaving autopilot, braid init sets it on in",
+  "#   private repositories and off in public ones.",
   `autopush = ${s.autopush}`,
-  'remote = "origin"',
+  "",
+  '# link: how a commit names its sessions. "trailer": a Braid-Session line in its message. "store":',
+  '#   labels inside the sessions only, and the message stays as written. On autopilot, "store".',
+  '# link = "trailer"',
+  "",
+  "# remote: the remote that git push publishes sessions to, and braid fetch reads them from.",
+  `remote = "origin"`,
+  ""
+].join("\n");
+var USER_TEMPLATE = [
+  "# braid: your own settings, over every repository's .braid/config.toml. Uncomment one to set it.",
+  "",
+  "# autopilot: false lets braid push and fetch conversations where a repository allows it; true",
+  "#   keeps every conversation on this machine, whatever the repository says.",
+  "# autopilot = true",
+  "",
+  "# autofork: false marks no fork points before big turns.",
+  "# autofork = true",
+  "",
+  "# autocommit: true commits the conversation with each commit the agent makes.",
+  "# autocommit = false",
+  "",
+  "# autopush: false keeps git push from publishing; publish with /braid:push.",
+  "# autopush = true",
+  "",
+  '# repo: the braid repository every conversation is kept in. "auto": ~/.braid.',
+  '# repo = "auto"',
+  "",
+  "# [paths]: path prefixes to rewrite when forking a session from another machine, the other",
+  "#   machine's first, this one's second.",
+  "# [paths]",
+  '# "/Users/alice/dev" = "/home/alice/dev"',
   ""
 ].join("\n");
 var tomlValue = (value) => typeof value === "boolean" ? String(value) : JSON.stringify(value);
@@ -3817,6 +3856,12 @@ function setup(opts = {}) {
     return [`restored the previous status line in ${settingsFile}`, ...codexHooks(join10(homedir4(), ".local", "bin", "braid"), true)];
   }
   writePointer();
+  const own = join10(configDir(), "config.toml");
+  if (!existsSync11(own)) {
+    mkdirSync7(configDir(), { recursive: true });
+    writeFileSync7(own, USER_TEMPLATE);
+    notes.push(`wrote ${own}: your own settings, each commented out until you set it`);
+  }
   const bin = join10(homedir4(), ".local", "bin");
   mkdirSync7(bin, { recursive: true });
   writeFileSync7(join10(bin, "braid"), SHIM);

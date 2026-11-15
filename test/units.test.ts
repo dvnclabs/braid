@@ -7,7 +7,8 @@ import { publishedChunks } from "../src/publish.ts";
 import { about, ago, isPrompt, parseJsonl, printable, promptLine, type Rec } from "../src/records.ts";
 import { lineOf, numbering, turnsAlong } from "../src/turns.ts";
 import { redactString } from "../src/redact.ts";
-import { readConfig, type Repo } from "../src/repo.ts";
+import { readConfig, userConfig, type Repo } from "../src/repo.ts";
+import { TEMPLATE, USER_TEMPLATE } from "../src/setup.ts";
 import { cleanName, colors, render, uncovered, type Status } from "../src/status.ts";
 import { intact, readWindow, START } from "../src/transcript.ts";
 import { parseToml } from "../src/rules.ts";
@@ -289,4 +290,32 @@ test("turns are numbered along a session's line: a fork continues the numbering 
   const line = lineOf(sessions, "bbbbbbbb-2");
   assert.deepEqual(line.map((s) => [s.session, s.records.map((r) => r.id)]), [["aaaaaaaa-1", ["p1", "a1"]], ["bbbbbbbb-2", ["q", "r", "m"]]]);
   assert.deepEqual(turnsAlong(line, turns).map((t) => [t.session, t.n, t.start?.id]), [["aaaaaaaa-1", 1, "p1"], ["bbbbbbbb-2", 2, "q"], ["bbbbbbbb-2", 3, "m"]]);
+});
+
+test("the settings files list every setting, and what is commented out changes nothing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "braid-settings-"));
+  const home = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = join(dir, "config");
+  try {
+    // Your own file, as braid init writes it: every setting is there, none of them set.
+    mkdirSync(join(dir, "config", "braid"), { recursive: true });
+    writeFileSync(join(dir, "config", "braid", "config.toml"), USER_TEMPLATE);
+    for (const key of ["autopilot", "autofork", "autocommit", "autopush", "repo", "[paths]"]) assert.match(USER_TEMPLATE, new RegExp(`^# ${key.replace(/[[\]]/g, "\\$&")}`, "m"));
+    assert.deepEqual(userConfig(), { repo: undefined, autopilot: undefined, autofork: undefined, autocommit: undefined, autopush: undefined, paths: [] });
+
+    // A repository's file: each setting braid reads, set or commented out at its default, reads back as written.
+    const top = join(dir, "code");
+    mkdirSync(join(top, ".braid"), { recursive: true });
+    const text = TEMPLATE({ autopilot: false, autofork: true, repo: "auto", "git-hooks": true, autocommit: true, autopush: false });
+    for (const key of ["autopilot", "autofork", "repo", "git-hooks", "autocommit", "autopush", "link", "remote"]) assert.match(text, new RegExp(`^(# )?${key} = `, "m"), key);
+    writeFileSync(join(top, ".braid", "config.toml"), text);
+    const repo = { top, separate: false } as unknown as Repo;
+    assert.deepEqual(readConfig(repo), { autopilot: false, autofork: true, gitHooks: true, autocommit: true, autopush: false, link: "trailer", remote: "origin", repo: undefined });
+    // Uncommenting one sets it.
+    writeFileSync(join(top, ".braid", "config.toml"), text.replace('# link = "trailer"', 'link = "store"'));
+    assert.equal(readConfig(repo).link, "store");
+  } finally {
+    if (home === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = home;
+  }
 });
