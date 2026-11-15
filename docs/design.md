@@ -164,7 +164,7 @@ braid adds session ids and turn names as handles, and forks between Claude Code 
 
 ## Distribution
 
-braid ships as a Claude Code plugin served from this repository. The plugin carries the hooks, the skills and the CLI, which is one bundled file (`dist/braid.mjs`, built from `src/` with esbuild) that needs only Node 22. Installing the plugin is the whole install, and `/braid:init` adds the `braid` command and the status line. `claude plugin update` installs a new version when the version number changes. `braid init` adds braid's hooks to Codex, which reads the same skills and Claude-style plugin manifests, so the skills come to Codex next.
+braid ships as a Claude Code plugin served from this repository. The plugin carries the hooks, the skills and the CLI, which is one bundled file (`dist/braid.mjs`, built from `src/` with esbuild) that needs only Node 22, or bun. The hooks and the `braid` command run it through `bin/braid`, which picks Node 22 or later, else bun; with neither, a hook does nothing, so the agent runs as it would without braid, and the session's start says that braid is not saving it. Installing the plugin is the whole install, and `/braid:init` adds the `braid` command and the status line. `claude plugin update` installs a new version when the version number changes. `braid init` adds braid's hooks to Codex, which reads the same skills and Claude-style plugin manifests, so the skills come to Codex next.
 
 ## Status of v0.4
 

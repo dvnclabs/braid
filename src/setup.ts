@@ -27,10 +27,14 @@ function settingsPath(): string {
 }
 
 const SHIM = `#!/bin/sh
-# braid: runs the braid CLI wherever the Claude Code plugin installed it.
+# braid: runs the braid CLI wherever the Claude Code plugin installed it, through the launcher next to it, which runs
+# it with Node 22 or later, else bun.
 cli="\${XDG_CONFIG_HOME:-$HOME/.config}/braid/cli"
 [ -f "$cli" ] || { echo "braid: start a Claude Code session with the braid plugin once, then run /braid:init" >&2; exit 1; }
-exec node "$(cat "$cli")" "$@"
+cli=$(cat "$cli")
+launcher="$(dirname "$(dirname "$cli")")/bin/braid"
+[ -f "$launcher" ] && exec sh "$launcher" "$@"
+exec node "$cli" "$@"
 `;
 
 const codexHome = () => process.env.CODEX_HOME || join(homedir(), ".codex");

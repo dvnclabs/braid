@@ -19,7 +19,8 @@ export function sandbox(): Env {
   const bin = join(root, "bin");
   mkdirSync(home);
   mkdirSync(bin);
-  writeFileSync(join(bin, "braid"), `#!/bin/sh\nexec node "${CLI}" "$@"\n`);
+  // BRAID_TEST_RUNNER runs another build or runtime in braid's place, as `bun dist/braid.mjs`.
+  writeFileSync(join(bin, "braid"), `#!/bin/sh\nexec ${process.env.BRAID_TEST_RUNNER ?? `node "${CLI}"`} "$@"\n`);
   chmodSync(join(bin, "braid"), 0o755);
   const env: NodeJS.ProcessEnv = {
     PATH: `${bin}:${process.env.PATH}`,

@@ -12,7 +12,7 @@
 
 ## Install
 
-You need Node 22 or later and git. In Claude Code:
+You need Node 22 or later, or [bun](https://bun.sh), and git. In Claude Code:
 
 ```
 /plugin marketplace add dvnclabs/braid
@@ -22,7 +22,7 @@ You need Node 22 or later and git. In Claude Code:
 
 `/braid:init` installs the `braid` command and braid's part of the status line, and saves the conversation you run it in, from its first turn. From then on braid saves every session after each turn. `braid save --all` saves the project's sessions from before then: every Claude Code and Codex session on the machine that ran in the project, in any of its worktrees. braid init also moves conversations braid 0.1 kept in `~/.braid` into the projects they ran in.
 
-When Codex is on the machine, `braid init` also adds braid's hooks to `~/.codex/hooks.json`, so braid saves Codex sessions the same way. Codex runs a new hook only once you trust it: open `/hooks` in Codex once and trust braid's four. Without Claude Code, clone this repository and run `node dist/braid.mjs init` in a terminal.
+When Codex is on the machine, `braid init` also adds braid's hooks to `~/.codex/hooks.json`, so braid saves Codex sessions the same way. Codex runs a new hook only once you trust it: open `/hooks` in Codex once and trust braid's four. Without Claude Code, clone this repository and run `sh bin/braid init` in a terminal.
 
 ## Where sessions are kept
 

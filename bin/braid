@@ -1,4 +1,21 @@
 #!/bin/sh
-# Runs the braid CLI bundled next to this script.
+# Runs the braid CLI bundled next to this script, with Node 22 or later, else bun.
+# Without either, an agent's hook does nothing, so the agent runs as it would
+# without braid, and the session's start says so.
 dir=$(cd "$(dirname "$0")/.." && pwd)
-exec node "$dir/dist/braid.mjs" "$@"
+v=$(node --version 2>/dev/null)
+v=${v#v}
+v=${v%%.*}
+if [ "${v:-0}" -ge 22 ] 2>/dev/null; then exec node "$dir/dist/braid.mjs" "$@"; fi
+for bun in "$(command -v bun 2>/dev/null)" "$HOME/.bun/bin/bun"; do
+  if [ -n "$bun" ] && [ -x "$bun" ]; then exec "$bun" "$dir/dist/braid.mjs" "$@"; fi
+done
+found="${v:+Node $v}"
+if [ "$1" = hook ]; then
+  if [ "$2" = session-start ]; then
+    printf '{"systemMessage":"braid is not saving this session: it needs Node 22 or later, or bun, and found %s"}\n' "${found:-neither}"
+  fi
+  exit 0
+fi
+echo "braid: needs Node 22 or later, or bun, and found ${found:-neither}" >&2
+exit 1

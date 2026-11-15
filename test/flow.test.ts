@@ -1116,3 +1116,35 @@ test("a session that crashes or is force-quit loses nothing: braid saves during 
   assert.match(braid(s.env, repo, ["save", "--pending"]).stdout, new RegExp(`^braid: saved \\d+ records of ${fork.slice(0, 8)}\\.2, which its agent wrote after braid last saved it\n$`));
   assert.deepEqual(braid(s.env, repo, ["log", fork]).stdout.split("\n").filter(Boolean).map((l) => l.replace(/ +/g, " ")), [`${fork.slice(0, 8)}.1 Plan the cache.`, `${fork.slice(0, 8)}.2 Try a TTL.`]);
 });
+
+test("braid's launcher runs it with Node 22 or later, else bun; with neither, hooks do nothing and the session's start says so", () => {
+  const s = sandbox();
+  const launcher = join(import.meta.dirname, "..", "bin", "braid");
+  const bin = join(s.root, "fake");
+  mkdirSync(bin);
+  // A host's old Node, and bun, each saying how it was run.
+  const fake = (name: string, body: string) => writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  const run = (args: string[]) => spawnSync("sh", [launcher, ...args], { env: { PATH: `${bin}:/usr/bin:/bin`, HOME: s.env.HOME }, encoding: "utf8" });
+  fake("node", `[ "$1" = --version ] && echo v12.22.9 && exit 0\necho "node $*"`);
+  fake("bun", `echo "bun $*"`);
+  assert.equal(run(["version"]).stdout, `bun ${join(import.meta.dirname, "..", "dist", "braid.mjs")} version\n`);
+  fake("node", `[ "$1" = --version ] && echo v22.18.0 && exit 0\necho "node $*"`);
+  assert.match(run(["version"]).stdout, /^node \S+\/dist\/braid\.mjs version\n$/);
+  // Neither: the agent runs as it would without braid, told once, at the session's start.
+  fake("node", `[ "$1" = --version ] && echo v12.22.9 && exit 0\necho "node $*"`);
+  rmSync(join(bin, "bun"));
+  const start = run(["hook", "session-start"]);
+  assert.equal(start.status, 0);
+  assert.deepEqual(JSON.parse(start.stdout), { systemMessage: "braid is not saving this session: it needs Node 22 or later, or bun, and found Node 12" });
+  assert.deepEqual([run(["hook", "post-tool-use"]).status, run(["hook", "post-tool-use"]).stdout], [0, ""]);
+  const cli = run(["sessions"]);
+  assert.deepEqual([cli.status, cli.stderr], [1, "braid: needs Node 22 or later, or bun, and found Node 12\n"]);
+
+  // The braid command braid init installs runs through the launcher.
+  braid(s.env, s.root, ["init"]);
+  const shim = join(s.env.HOME!, ".local", "bin", "braid");
+  assert.match(readFileSync(shim, "utf8"), /exec sh "\$launcher" "\$@"/);
+  const direct = spawnSync("sh", [launcher, "version"], { env: s.env, encoding: "utf8" }).stdout;
+  assert.match(direct, /^\d+\.\d+\.\d+\n$/);
+  assert.equal(spawnSync(shim, ["version"], { env: s.env, encoding: "utf8" }).stdout, direct);
+});
