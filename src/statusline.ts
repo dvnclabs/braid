@@ -93,8 +93,9 @@ export function statusline(stdin: string): string {
   const session = input.session_id;
   if (!session) return prev;
   const { sep, dim } = colors();
-  // The session id, dimmed, and what the session is about.
-  let head = dim(session.slice(0, 8));
+  // braid · 5b0e2c1a.12 · Webhook retries · local: the session's newest turn, by the name braid fork takes, and what it is about.
+  let name = session.slice(0, 8);
+  let title: string | undefined;
   const parts: string[] = [];
   const dir = input.workspace?.current_dir ?? input.cwd ?? process.cwd();
   const code = findRepo(dir);
@@ -104,15 +105,14 @@ export function statusline(stdin: string): string {
   const repo = locate(dir);
   if (repo) {
     const state = loadState(repo, session);
-    // The session's newest turn by name, as braid fork takes it: 5b0e2c1a.12.
-    if (state?.turn) head = dim(`${session.slice(0, 8)}.${state.turn}`);
-    if (state?.title) head += ` ${printable(state.title.text, 40)}`;
+    if (state?.turn) name = `${name}.${state.turn}`;
+    if (state?.title) title = printable(state.title.text, 40);
     const remote = readConfig(repo).remote;
     const part = braidPart(repo, session, remote);
     if (part) parts.push(part);
     fetchInBackground(repo, remote);
   }
-  const ours = [head, ...parts].join(sep);
+  const ours = [dim("braid"), name, ...(title ? [title] : []), ...parts].join(sep);
   if (!prev) return ours;
   return prev.includes("\n") ? `${prev}\n${ours}` : `${prev} · ${ours}`;
 }

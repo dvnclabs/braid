@@ -43,7 +43,7 @@ braid starts on autopilot: it does everything by itself and nothing leaves your 
 Work with Claude Code as usual. The status line shows what your session is about and where it stands:
 
 ```
-5b0e2c1a.12 Webhook retries · local
+braid · 5b0e2c1a.12 · Webhook retries · local
 ```
 
 | | |
@@ -57,7 +57,7 @@ Work with Claude Code as usual. The status line shows what your session is about
 | `⚠ braid verify` | the last check of this session found a problem: run `braid verify` |
 | `✓` | everything published, nothing waiting |
 
-Marks are in color: amber for work not yet published, magenta for a session waiting to be merged, red for a failed check, green when everything is published. `NO_COLOR` turns colors off.
+The `braid` label, the separators and `local` are dimmed; marks are in color: amber for work not yet published, magenta for a session waiting to be merged, red for a failed check, green when everything is published. `NO_COLOR` turns colors off.
 
 **Come back.** When you resume a session, or open a fork of one, braid shows what it is about: `braid · 5b0e2c1a · Webhook retries`. In Codex, which writes no recaps, it adds Claude Code's latest recap of the session too. `braid status` shows the title and the latest recap.
 

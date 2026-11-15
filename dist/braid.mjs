@@ -5383,7 +5383,8 @@ function statusline(stdin) {
   const session = input.session_id;
   if (!session) return prev;
   const { sep, dim } = colors();
-  let head = dim(session.slice(0, 8));
+  let name2 = session.slice(0, 8);
+  let title;
   const parts = [];
   const dir = input.workspace?.current_dir ?? input.cwd ?? process.cwd();
   const code = findRepo(dir);
@@ -5392,14 +5393,14 @@ function statusline(stdin) {
   const repo = locate(dir);
   if (repo) {
     const state = loadState(repo, session);
-    if (state?.turn) head = dim(`${session.slice(0, 8)}.${state.turn}`);
-    if (state?.title) head += ` ${printable(state.title.text, 40)}`;
+    if (state?.turn) name2 = `${name2}.${state.turn}`;
+    if (state?.title) title = printable(state.title.text, 40);
     const remote = readConfig(repo).remote;
     const part = braidPart(repo, session, remote);
     if (part) parts.push(part);
     fetchInBackground(repo, remote);
   }
-  const ours = [head, ...parts].join(sep);
+  const ours = [dim("braid"), name2, ...title ? [title] : [], ...parts].join(sep);
   if (!prev) return ours;
   return prev.includes("\n") ? `${prev}
 ${ours}` : `${prev} \xB7 ${ours}`;

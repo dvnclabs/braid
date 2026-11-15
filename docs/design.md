@@ -187,7 +187,7 @@ Other people's sessions are untrusted input. A record's author, model and tool r
 The status line shows where the session stands. braid computes it from the refs and the agent never writes it, so it costs no tokens and stays out of the model's context.
 
 ```
-5b0e2c1a.12 Webhook retries · #128 · ↑4 · ↓ review/bob +5 → /braid:merge
+braid · 5b0e2c1a.12 · Webhook retries · #128 · ↑4 · ↓ review/bob +5 → /braid:merge
 ```
 
 | Shown | Meaning |
@@ -212,7 +212,7 @@ When something changes between turns, a hook adds one line under the reply:
 braid: review/bob +5 waiting to be merged into this session. /braid:merge to merge.
 ```
 
-Colors set the marks apart: the session id and `local` are dimmed, work not yet published is amber, a session waiting to be merged magenta, a failed `braid verify` red, and `✓` green. `NO_COLOR` turns them off.
+Colors set the marks apart: the `braid` label, the separators and `local` are dimmed, work not yet published is amber, a session waiting to be merged magenta, a failed `braid verify` red, and `✓` green. `NO_COLOR` turns them off.
 
 When you resume a session, or open a fork of one, a hook shows what it is about: `braid · 5b0e2c1a · Webhook retries`, and for a fork `, a fork of <session>`. braid keeps the title, and the latest recap Claude Code writes when you come back to a session, from the records it saves, and calls no model for them. Claude Code shows its own recap again when it resumes a session, so braid adds the recap only in Codex, which writes none. `braid status` shows both. Neither goes into the model's context.
 

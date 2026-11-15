@@ -84,7 +84,7 @@ test("save, publish, review, merge", () => {
   // The status line: Alice's session id and state.
   const line = braid(s.env, alice, ["statusline"], JSON.stringify({ session_id: ALICE, workspace: { current_dir: alice } }));
   // Her first prompt stands for the session until Claude Code titles it; the key in it stays hidden.
-  assert.equal(line.stdout.trim().replace(/\x1b\[[0-9;]*m/g, ""), "5b0e2c1a.1 Add retries to sendWebhook. My key is […" + " · ✓");
+  assert.equal(line.stdout.trim().replace(/\x1b\[[0-9;]*m/g, ""), "braid · 5b0e2c1a.1 · Add retries to sendWebhook. My key is […" + " · ✓");
   assert.doesNotMatch(line.stdout, /AKIA/);
 
   // Bob clones; his first session sets up the hooks itself and lists Alice's session.
@@ -1357,14 +1357,14 @@ test("braid shows what a session is about: its title in the status line and brai
   t.user("Add retries to the webhook sender");
   t.assistant("Added exponential backoff with jitter.");
   braid(s.env, repo, ["hook", "stop"], hookIn());
-  assert.equal(plain(statusline()), "5b0e2c1a.2 Add retries to the webhook sender · local", "the newest turn by name: a command you typed is a turn too");
+  assert.equal(plain(statusline()), "braid · 5b0e2c1a.2 · Add retries to the webhook sender · local", "the newest turn by name: a command you typed is a turn too");
 
   // Claude Code's own title, then the recap it writes when you come back to the session.
   t.raw({ type: "ai-title", aiTitle: "Webhook retries with backoff", sessionId: ALICE });
   t.system("away_summary", "You're adding retries to the webhook sender; backoff is in, next is a time budget.");
   braid(s.env, repo, ["hook", "stop"], hookIn());
-  assert.equal(statusline({ NO_COLOR: "1" }), "5b0e2c1a.2 Webhook retries with backoff · local", "a title and a recap start no turn");
-  assert.equal(statusline(), "\x1b[2m5b0e2c1a.2\x1b[22m Webhook retries with backoff\x1b[2m · \x1b[22m\x1b[2mlocal\x1b[22m", "the id and quiet marks dimmed");
+  assert.equal(statusline({ NO_COLOR: "1" }), "braid · 5b0e2c1a.2 · Webhook retries with backoff · local", "a title and a recap start no turn");
+  assert.equal(statusline(), "\x1b[2mbraid\x1b[22m\x1b[2m · \x1b[22m5b0e2c1a.2\x1b[2m · \x1b[22mWebhook retries with backoff\x1b[2m · \x1b[22m\x1b[2mlocal\x1b[22m", "the label, separators and quiet marks dimmed");
   const status = braid(s.env, repo, ["status", "--session", ALICE]).stdout;
   assert.match(status, /\n {2}Webhook retries with backoff\n {2}recap, [^:]+: You're adding retries to the webhook sender; backoff is in, next is a time budget\.\n/);
 
@@ -1376,7 +1376,7 @@ test("braid shows what a session is about: its title in the status line and brai
   t.raw({ type: "custom-title", customTitle: "retries-v2", sessionId: ALICE });
   t.raw({ type: "ai-title", aiTitle: "A newer title", sessionId: ALICE });
   braid(s.env, repo, ["hook", "stop"], hookIn());
-  assert.equal(statusline({ NO_COLOR: "1" }), "5b0e2c1a.2 retries-v2 · local");
+  assert.equal(statusline({ NO_COLOR: "1" }), "braid · 5b0e2c1a.2 · retries-v2 · local");
 
   // A session saved before braid kept titles gets its own back from the store, the name you gave included.
   const statePath = join(s.env.HOME!, ".braid", ".git", "braid", "sessions", `${ALICE}.json`);
@@ -1384,7 +1384,7 @@ test("braid shows what a session is about: its title in the status line and brai
   writeFileSync(statePath, JSON.stringify(older));
   t.raw({ type: "ai-title", aiTitle: "Yet another title", sessionId: ALICE });
   braid(s.env, repo, ["hook", "stop"], hookIn());
-  assert.equal(statusline({ NO_COLOR: "1" }), "5b0e2c1a.2 retries-v2 · local");
+  assert.equal(statusline({ NO_COLOR: "1" }), "braid · 5b0e2c1a.2 · retries-v2 · local");
 
   // A fork into Codex is about what its source was about. Codex writes no recaps, so braid shows Claude Code's latest.
   const codexHome = join(s.root, "codex");
@@ -1413,11 +1413,11 @@ test("braid init keeps the status line that ran before braid, also over another 
   braid(s.env, repo, ["init"]);
   assert.equal(JSON.parse(readFileSync(saved, "utf8")).previous, "echo mine");
   const line = (env: NodeJS.ProcessEnv = {}) => braid(s.env, repo, ["statusline"], JSON.stringify({ session_id: ALICE, workspace: { current_dir: repo } }), { NO_COLOR: "1", ...env }).stdout.trim();
-  assert.match(line(), /^mine · 5b0e2c1a/);
+  assert.match(line(), /^mine · braid · 5b0e2c1a/);
 
   // And a previous line that is braid's own is never run before braid's.
   writeFileSync(saved, JSON.stringify({ previous: "/tmp/elsewhere/.local/bin/braid statusline" }));
-  assert.match(line(), /^5b0e2c1a/);
+  assert.match(line(), /^braid · 5b0e2c1a/);
 });
 
 test("autofork marks the point before a Codex turn that patches many files", () => {
@@ -1474,7 +1474,7 @@ test("every turn has a name, <session>.<n>: braid log lists them, braid fork and
   ]);
   assert.match(braid(s.env, repo, ["log", ALICE, "--records"]).stdout, /^5b0e2c1a\.2 +tool +ok$/m, "each record under its turn");
   const line = braid(s.env, repo, ["statusline"], JSON.stringify({ session_id: ALICE, workspace: { current_dir: repo } }), { NO_COLOR: "1" }).stdout;
-  assert.match(line, /^5b0e2c1a\.3 Plan the cache\. · local/);
+  assert.match(line, /^braid · 5b0e2c1a\.3 · Plan the cache\. · local/);
 
   // A fork from the end of turn 2 holds turns 1 and 2, and continues as turn 3 of its own.
   const fork = braid(s.env, repo, ["fork", ".2", "--session", ALICE]);
